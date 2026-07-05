@@ -1,0 +1,301 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const { test } = require("node:test");
+
+const {
+  countThreadListRows,
+  planThreadListAppServerFetch,
+  planThreadListInitialFallbackAttempt,
+  threadListInitialFallbackMetadata,
+  threadListAppServerLatencyTimingFields,
+  threadListAppServerFetchTimingFields,
+} = require("../adapters/thread-list-app-server-fetch-policy-service");
+
+test("thread-list app-server fetch policy bounds default list overfetch", () => {
+  assert.deepEqual(planThreadListAppServerFetch({ limit: 40 }), {
+    requestedLimit: 40,
+    appServerLimit: 500,
+    reason: "default-preserve-visible-entry-window",
+    overfetchFactor: 12.5,
+    cursor: false,
+    archived: false,
+    hasWorkspace: false,
+    hasSearch: false,
+  });
+
+  assert.deepEqual(planThreadListAppServerFetch({ limit: 80 }), {
+    requestedLimit: 80,
+    appServerLimit: 500,
+    reason: "default-preserve-visible-entry-window",
+    overfetchFactor: 6.25,
+    cursor: false,
+    archived: false,
+    hasWorkspace: false,
+    hasSearch: false,
+  });
+});
+
+test("thread-list app-server fetch policy keeps cursor pages exact", () => {
+  assert.deepEqual(planThreadListAppServerFetch({
+    limit: 80,
+    cursor: "opaque-cursor",
+  }), {
+    requestedLimit: 80,
+    appServerLimit: 80,
+    reason: "cursor-page",
+    overfetchFactor: 1,
+    cursor: true,
+    archived: false,
+    hasWorkspace: false,
+    hasSearch: false,
+  });
+});
+
+test("thread-list app-server fetch policy preserves workspace and archived overfetch windows", () => {
+  const workspacePlan = planThreadListAppServerFetch({
+    limit: 40,
+    cwd: "/private/workspace",
+  });
+  assert.equal(workspacePlan.appServerLimit, 500);
+  assert.equal(workspacePlan.reason, "workspace-filter-preserve-overfetch");
+  assert.equal(workspacePlan.hasWorkspace, true);
+
+  const archivedPlan = planThreadListAppServerFetch({
+    limit: 40,
+    archived: true,
+  });
+  assert.equal(archivedPlan.appServerLimit, 500);
+  assert.equal(archivedPlan.reason, "archived-preserve-overfetch");
+  assert.equal(archivedPlan.archived, true);
+});
+
+test("thread-list app-server fetch policy bounds search without copying the query", () => {
+  const plan = planThreadListAppServerFetch({
+    limit: 30,
+    searchTerm: "private query text should not be copied",
+  });
+
+  assert.equal(plan.requestedLimit, 30);
+  assert.equal(plan.appServerLimit, 80);
+  assert.equal(plan.reason, "search-bounded-overfetch");
+  assert.equal(plan.hasSearch, true);
+  assert.doesNotMatch(JSON.stringify(plan), /private query/);
+});
+
+test("thread-list app-server fetch policy normalizes limits and timing fields", () => {
+  const plan = planThreadListAppServerFetch({ limit: 999 });
+  assert.equal(plan.requestedLimit, 200);
+  assert.equal(plan.appServerLimit, 500);
+
+  assert.deepEqual(threadListAppServerFetchTimingFields(plan), {
+    appServerRequestedLimit: 200,
+    appServerRequestLimit: 500,
+    appServerRequestReason: "default-preserve-visible-entry-window",
+    appServerOverfetchFactor: 2.5,
+  });
+
+  assert.deepEqual(threadListAppServerFetchTimingFields({
+    requestedLimit: "not-a-number",
+    appServerLimit: 10000,
+    reason: `long-${"x".repeat(200)}`,
+    overfetchFactor: 10000,
+  }), {
+    appServerRequestedLimit: 80,
+    appServerRequestLimit: 500,
+    appServerRequestReason: `long-${"x".repeat(75)}`,
+    appServerOverfetchFactor: 500,
+  });
+});
+
+test("thread-list app-server latency fields split rpc and local post-processing", () => {
+  const fields = threadListAppServerLatencyTimingFields({
+    rawResult: { data: [{ id: "private-1" }, { id: "private-2" }, { id: "private-3" }] },
+    visibleResult: { data: [{ id: "private-1" }, { id: "private-2" }] },
+    filteredResult: { data: [{ id: "private-1" }] },
+    rpcMs: 1234,
+    visibleFilterMs: 5,
+    workspaceFilterMs: 7,
+    totalMs: 1300,
+    rpcDiagnostics: {
+      transportKind: "external-jsonl-tcp",
+      endpointKind: "profile-mux-file",
+      endpointProtocol: "jsonl-tcp",
+      attemptCount: 1,
+      timeoutMs: 12000,
+      retryEnabled: true,
+      timedOut: false,
+      errorCode: "",
+      requestPayloadBytes: 188,
+      requestParamBytes: 96,
+      responsePayloadBytes: 45678,
+      source: "/Users/private/.codex/app-server-mux/endpoint.json",
+    },
+    privatePrompt: "do not copy",
+  });
+
+  assert.deepEqual(fields, {
+    appServerRpcMs: 1234,
+    appServerVisibleFilterMs: 5,
+    appServerWorkspaceFilterMs: 7,
+    appServerPostProcessMs: 12,
+    appServerMeasuredMs: 1246,
+    appServerUnattributedMs: 54,
+    appServerRawCount: 3,
+    appServerVisibleCount: 2,
+    appServerFilteredCount: 1,
+    appServerTransportKind: "external-jsonl-tcp",
+    appServerEndpointKind: "profile-mux-file",
+    appServerEndpointProtocol: "jsonl-tcp",
+    appServerRpcAttemptCount: 1,
+    appServerRpcTimeoutMs: 12000,
+    appServerRpcRetryEnabled: true,
+    appServerRpcTimedOut: false,
+    appServerRpcErrorCode: "",
+    appServerRequestPayloadBytes: 188,
+    appServerRequestParamBytes: 96,
+    appServerResponsePayloadBytes: 45678,
+  });
+  assert.doesNotMatch(JSON.stringify(fields), /private|prompt|endpoint\.json|Users/);
+});
+
+test("thread-list initial fallback metadata separates warm cache and cold baseline first paint", () => {
+  assert.deepEqual(threadListInitialFallbackMetadata({ cacheHit: true }), {
+    appServerDeferredReason: "warm-fallback-initial",
+    initialSource: "warm-fallback-cache",
+    eventName: "warm_fallback_initial",
+  });
+
+  assert.deepEqual(threadListInitialFallbackMetadata({ cacheHit: true, reason: "default-warm-cache" }), {
+    appServerDeferredReason: "warm-fallback-default",
+    initialSource: "warm-fallback-cache",
+    eventName: "warm_fallback_default",
+  });
+
+  assert.deepEqual(threadListInitialFallbackMetadata({ cacheHit: true, reason: "workspace-warm-cache" }), {
+    appServerDeferredReason: "warm-fallback-workspace",
+    initialSource: "warm-fallback-cache",
+    eventName: "warm_fallback_workspace",
+  });
+
+  assert.deepEqual(threadListInitialFallbackMetadata({ cacheHit: false }), {
+    appServerDeferredReason: "cold-fallback-initial",
+    initialSource: "fallback-baseline",
+    eventName: "fallback_baseline_initial",
+  });
+});
+
+test("thread-list initial fallback policy separates explicit fallback from default warm cache", () => {
+  assert.deepEqual(planThreadListInitialFallbackAttempt({
+    initialMode: "warm-fallback",
+    limit: 40,
+  }), {
+    attempt: true,
+    allowBaseline: true,
+    requireCacheHit: false,
+    reason: "explicit-warm-fallback",
+    initialMode: "warm-fallback",
+    fallbackMode: "",
+  });
+
+  assert.deepEqual(planThreadListInitialFallbackAttempt({
+    limit: 40,
+  }), {
+    attempt: true,
+    allowBaseline: false,
+    requireCacheHit: true,
+    reason: "default-warm-cache",
+    initialMode: "",
+    fallbackMode: "",
+  });
+
+  assert.deepEqual(planThreadListInitialFallbackAttempt({
+    limit: 40,
+    cwd: "/private/workspace",
+  }), {
+    attempt: true,
+    allowBaseline: false,
+    requireCacheHit: true,
+    reason: "workspace-warm-cache",
+    initialMode: "",
+    fallbackMode: "",
+  });
+
+  assert.deepEqual(planThreadListInitialFallbackAttempt({
+    initialMode: "warm-fallback",
+    cwd: "/private/workspace",
+  }), {
+    attempt: true,
+    allowBaseline: false,
+    requireCacheHit: true,
+    reason: "workspace-warm-cache",
+    initialMode: "warm-fallback",
+    fallbackMode: "",
+  });
+
+  assert.equal(planThreadListInitialFallbackAttempt({
+    searchTerm: "private query",
+  }).attempt, false);
+  assert.equal(planThreadListInitialFallbackAttempt({
+    cursor: "cursor",
+  }).attempt, false);
+  assert.equal(planThreadListInitialFallbackAttempt({
+    archived: true,
+  }).attempt, false);
+  assert.equal(planThreadListInitialFallbackAttempt({
+    defaultWarmFallback: false,
+  }).attempt, false);
+  assert.equal(planThreadListInitialFallbackAttempt({
+    fallbackMode: "defer",
+  }).attempt, false);
+});
+
+test("thread-list app-server latency fields are bounded and count data or threads arrays", () => {
+  assert.equal(countThreadListRows({ data: [{}, {}] }), 2);
+  assert.equal(countThreadListRows({ threads: [{}, {}, {}] }), 3);
+  assert.equal(countThreadListRows([{}, {}, {}, {}]), 4);
+
+  assert.deepEqual(threadListAppServerLatencyTimingFields({
+    rawCount: 9999999,
+    visibleCount: -1,
+    filteredCount: "bad",
+    rpcMs: 999999999,
+    visibleFilterMs: -5,
+    workspaceFilterMs: "bad",
+    totalMs: 999999999,
+    rpcDiagnostics: {
+      transportKind: "x".repeat(120),
+      endpointKind: "y".repeat(120),
+      endpointProtocol: "z".repeat(80),
+      attemptCount: 9999999,
+      timeoutMs: 999999999,
+      retryEnabled: "yes",
+      timedOut: true,
+      errorCode: `long-${"e".repeat(100)}`,
+      requestPayloadBytes: 999999999,
+      requestParamBytes: -1,
+      responsePayloadBytes: 999999999,
+    },
+  }), {
+    appServerRpcMs: 600000,
+    appServerVisibleFilterMs: 0,
+    appServerWorkspaceFilterMs: 0,
+    appServerPostProcessMs: 0,
+    appServerMeasuredMs: 600000,
+    appServerUnattributedMs: 0,
+    appServerRawCount: 100000,
+    appServerVisibleCount: 0,
+    appServerFilteredCount: 0,
+    appServerTransportKind: "x".repeat(80),
+    appServerEndpointKind: "y".repeat(80),
+    appServerEndpointProtocol: "z".repeat(40),
+    appServerRpcAttemptCount: 100000,
+    appServerRpcTimeoutMs: 600000,
+    appServerRpcRetryEnabled: false,
+    appServerRpcTimedOut: true,
+    appServerRpcErrorCode: `long-${"e".repeat(75)}`,
+    appServerRequestPayloadBytes: 104857600,
+    appServerRequestParamBytes: 0,
+    appServerResponsePayloadBytes: 104857600,
+  });
+});
