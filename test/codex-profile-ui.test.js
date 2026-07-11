@@ -4,10 +4,18 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const { readFrontendSources } = require("./frontend-source-helper");
 
 const root = path.resolve(__dirname, "..");
 const serverJs = fs.readFileSync(path.join(root, "server.js"), "utf8");
-const appJs = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
+const serverRouteCompositionServiceJs = fs.readFileSync(path.join(root, "server-routes", "server-route-composition-service.js"), "utf8");
+const coreApiRouteServiceJs = fs.readFileSync(path.join(root, "server-routes", "core-api-route-service.js"), "utf8");
+const codexAppServerClientServiceJs = fs.readFileSync(
+  path.join(root, "services", "runtime", "codex-app-server-client-service.js"),
+  "utf8",
+);
+const profileSwitchServiceJs = fs.readFileSync(path.join(root, "adapters", "codex-profile-switch-service.js"), "utf8");
+const appJs = readFrontendSources(root);
 const indexHtml = fs.readFileSync(path.join(root, "public", "index.html"), "utf8");
 const stylesCss = fs.readFileSync(path.join(root, "public", "styles.css"), "utf8");
 const launcher = fs.readFileSync(path.join(root, "start-codex-mobile-web-windowless.ps1"), "utf8");
@@ -43,15 +51,17 @@ test("settings panel exposes Codex profile account and switch UI", () => {
 
 test("server exposes profile list and active profile switch endpoints", () => {
   assert.match(serverJs, /createCodexProfileService/);
-  assert.match(serverJs, /codexProfiles:\s*codexProfileService\.profiles\(\{/);
-  assert.match(serverJs, /activeQuota:\s*liveQuotaSnapshotForProfiles\(\)/);
-  assert.match(serverJs, /url\.pathname === "\/api\/codex-profiles"/);
-  assert.match(serverJs, /url\.pathname === "\/api\/codex-profiles\/switch-progress"/);
-  assert.match(serverJs, /url\.pathname === "\/api\/codex-profiles\/active"/);
-  assert.match(serverJs, /setProfileSwitchProgress/);
-  assert.match(serverJs, /target_profile_rate_limits_unavailable/);
-  assert.match(serverJs, /\[codex-profile-switch\] failed/);
-  assert.match(serverJs, /sharedChainRestartService\.restart/);
+  assert.match(serverJs, /createServerRouteCompositionService/);
+  assert.match(serverRouteCompositionServiceJs, /createCoreApiRouteService/);
+  assert.match(codexAppServerClientServiceJs, /codexProfiles:\s*codexProfileService\.profiles\(\{/);
+  assert.match(codexAppServerClientServiceJs, /activeQuota:\s*liveQuotaSnapshotForProfiles\(\)/);
+  assert.match(coreApiRouteServiceJs, /url\.pathname === "\/api\/codex-profiles"/);
+  assert.match(coreApiRouteServiceJs, /url\.pathname === "\/api\/codex-profiles\/switch-progress"/);
+  assert.match(coreApiRouteServiceJs, /url\.pathname === "\/api\/codex-profiles\/active"/);
+  assert.match(coreApiRouteServiceJs, /setProfileSwitchProgress/);
+  assert.match(profileSwitchServiceJs, /target_profile_rate_limits_unavailable/);
+  assert.match(coreApiRouteServiceJs, /\[codex-profile-switch\] failed/);
+  assert.match(coreApiRouteServiceJs, /sharedChainRestartService\.restart/);
 });
 
 test("windowless launcher reads active profile store before starting mux", () => {
@@ -120,6 +130,6 @@ test("multi-account docs describe current shared-thread-state profile design", (
   assert.match(multiAccountDoc, /Historical pre-switcher observation/);
   assert.match(multiAccountDoc, /That old observation is about Desktop GUI isolation, not the current Mobile Web/);
   assert.doesNotMatch(multiAccountDoc, /previous`[\s\S]{0,120}did not yet have `auth\.json`/);
-  assert.doesNotMatch(multiAccountDoc, /previous`[\s\S]{0,160}did not[\s\S]{0,40}create `C:\\Users\\xuxin\\\.codex-homes\\previous\\auth\.json`/);
+  assert.doesNotMatch(multiAccountDoc, /previous`[\s\S]{0,160}did not[\s\S]{0,40}create `C:\\Users\\Public\\\.codex-homes\\previous\\auth\.json`/);
   assert.doesNotMatch(multiAccountDoc, /verify `previous` still has no `auth\.json`/);
 });

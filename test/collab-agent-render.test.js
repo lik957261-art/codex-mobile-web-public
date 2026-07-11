@@ -4,33 +4,79 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
+const { readFrontendSources } = require("./frontend-source-helper");
 
 const root = path.resolve(__dirname, "..");
-const appJs = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
+const appJs = readFrontendSources(root);
+const threadDetailRuntimeJs = fs.readFileSync(path.join(root, "public", "thread-detail-runtime.js"), "utf8");
+const sideChatRuntimeJs = fs.readFileSync(path.join(root, "public", "side-chat-runtime.js"), "utf8");
+const paneLayoutRuntimeJs = fs.readFileSync(path.join(root, "public", "pane-layout-runtime.js"), "utf8");
 const indexHtml = fs.readFileSync(path.join(root, "public", "index.html"), "utf8");
 const stylesCss = fs.readFileSync(path.join(root, "public", "styles.css"), "utf8");
 
+const threadDetailRuntimeFunctionNames = new Set([
+  "currentLiveOperationEntry",
+  "isSupersededLiveTurn",
+  "liveTurnStatusDockItem",
+  "visibleItemsForTurn",
+]);
+const sideChatRuntimeFunctionNames = new Set([
+  "beginSubagentSwipe",
+  "currentSubagentItems",
+  "currentSubagentStatusKind",
+  "currentSubagentTurn",
+  "handleSubagentWheelSwipe",
+  "handleSideChatActionClick",
+  "isActiveSubagentItem",
+  "isHorizontalScrollableGestureTarget",
+  "isSubagentItem",
+  "openSubagentPanelFromGesture",
+  "createSideChatCandidateFromText",
+  "queueSideChatCandidate",
+  "applySideChatCandidate",
+  "renderSubagentPanel",
+  "renderSubagentStatusWindow",
+  "renderSideChatMessage",
+  "renderSideChatCandidate",
+  "renderSideChatPanel",
+  "scheduleSideChatDraftSave",
+  "subagentSwipeAvailable",
+  "updateSubagentPanelUi",
+]);
+const paneLayoutRuntimeFunctionNames = new Set([
+  "patchHtml",
+  "patchNode",
+]);
+
+function sourceForFunction(name) {
+  if (sideChatRuntimeFunctionNames.has(name)) return sideChatRuntimeJs;
+  if (paneLayoutRuntimeFunctionNames.has(name)) return paneLayoutRuntimeJs;
+  return threadDetailRuntimeFunctionNames.has(name) ? threadDetailRuntimeJs : appJs;
+}
+
 function functionBody(name) {
-  const start = appJs.indexOf(`function ${name}(`);
+  const source = sourceForFunction(name);
+  const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing function ${name}`);
-  const bodyStart = appJs.indexOf(") {", start) + 2;
+  const bodyStart = source.indexOf(") {", start) + 2;
   assert.notEqual(bodyStart, 1, `missing function body ${name}`);
   let depth = 0;
-  for (let index = bodyStart; index < appJs.length; index += 1) {
-    const char = appJs[index];
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index];
     if (char === "{") depth += 1;
     if (char === "}") depth -= 1;
-    if (depth === 0) return appJs.slice(bodyStart + 1, index);
+    if (depth === 0) return source.slice(bodyStart + 1, index);
   }
   throw new Error(`could not parse function ${name}`);
 }
 
 function functionSource(name) {
-  const start = appJs.indexOf(`function ${name}(`);
+  const source = sourceForFunction(name);
+  const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing function ${name}`);
-  const open = appJs.indexOf(") {", start) + 2;
+  const open = source.indexOf(") {", start) + 2;
   assert.notEqual(open, 1, `missing function body ${name}`);
-  return `${appJs.slice(start, open + 1)}${functionBody(name)}}`;
+  return `${source.slice(start, open + 1)}${functionBody(name)}}`;
 }
 
 function cssRuleBody(selector) {
@@ -53,9 +99,11 @@ test("collab agent tool calls render as compact summary cards", () => {
 });
 
 test("live operation cards dock on wide screens and become a mobile bubble", () => {
-  assert.match(appJs, /function currentLiveOperationEntry\(thread\)/);
-  assert.match(functionBody("currentLiveOperationEntry"), /const turn = latestTurnForThread\(thread\);/);
-  assert.match(functionBody("currentLiveOperationEntry"), /if \(!turn \|\| !isLiveTurnForThread\(thread, turn\)\) return null;/);
+  assert.match(threadDetailRuntimeJs, /function currentLiveOperationEntry\(thread\)/);
+  assert.match(functionBody("currentLiveOperationEntry"), /for \(let index = thread\.turns\.length - 1; index >= 0; index -= 1\)/);
+  assert.match(functionBody("currentLiveOperationEntry"), /if \(isSupersededLiveTurn\(candidate\)\) continue;/);
+  assert.match(functionBody("currentLiveOperationEntry"), /if \(isLiveTurnForThread\(thread, candidate\)\)/);
+  assert.match(functionBody("currentLiveOperationEntry"), /if \(!turn\) return null;/);
   assert.match(appJs, /function latestTurnForThread\(thread\)/);
   assert.match(appJs, /function isLiveTurnForThread\(thread, turn\)/);
   assert.match(appJs, /function isActiveOperationalItem\(item\)/);
@@ -86,8 +134,8 @@ test("live operation cards dock on wide screens and become a mobile bubble", () 
   assert.match(appJs, /liveOperationDockMode:\s*"compact"/);
   assert.match(appJs, /liveOperationDockPinned:\s*false/);
   assert.match(appJs, /liveOperationDockPinnedThreadId:\s*""/);
-  assert.match(appJs, /const liveOperationDockPolicy = window\.CodexLiveOperationDockState/);
-  assert.match(appJs, /const LIVE_OPERATION_BUBBLE_MIN_VISIBLE_MS = liveOperationDockPolicy\.DEFAULT_MIN_VISIBLE_MS;/);
+  assert.match(appJs, /(?:const|var) liveOperationDockPolicy = window\.CodexLiveOperationDockState/);
+  assert.match(appJs, /(?:const|var) LIVE_OPERATION_BUBBLE_MIN_VISIBLE_MS = liveOperationDockPolicy\.DEFAULT_MIN_VISIBLE_MS;/);
   assert.match(appJs, /liveOperationDockCompactVisibleUntilMs:\s*0/);
   assert.match(appJs, /liveOperationDockCompactHtml:\s*""/);
   assert.match(appJs, /liveOperationDockCompactThreadId:\s*""/);
@@ -201,6 +249,7 @@ test("live operation cards dock on wide screens and become a mobile bubble", () 
   assert.match(stylesCss, /\.operation-duration\s*{[\s\S]*font-variant-numeric:\s*tabular-nums;/);
   assert.match(stylesCss, /\.mobile-operation-bubble-duration\s*{[\s\S]*flex:\s*0 0 8ch;[\s\S]*min-width:\s*8ch;[\s\S]*text-align:\s*right;/);
   assert.match(stylesCss, /\.thread-tile-operation-dock \.mobile-operation-bubble-duration\s*{[\s\S]*flex:\s*0 0 9\.5ch;[\s\S]*min-width:\s*9\.5ch;[\s\S]*text-align:\s*right;/);
+  assert.match(stylesCss, /\.conversation \.entry-animate,\s*\n\.conversation \.entry-leave\s*{[\s\S]*animation:\s*none;/);
   assert.match(stylesCss, /\.item\.live-operation\.entry-animate\s*{[\s\S]*animation:\s*none;/);
   assert.match(stylesCss, /\.operation-detail-line\s*{[\s\S]*overflow:\s*hidden;/);
   assert.match(stylesCss, /\.live-operation-dock \.operation-detail-line\s*{[\s\S]*display:\s*none;/);
@@ -259,6 +308,10 @@ function isLiveTurn(turn) {
   return Boolean(turn && !isTurnComplete(turn) && isRunningStatus(turn.status));
 }
 function isIncompleteInterruptedTurn() { return false; }
+function isStaleActiveStatus(status) { return Boolean(status && status.mobileStaleActiveTurn); }
+function isSupersededLiveTurn(turn) { return Boolean(turn && (turn.mobileSupersededLive || (turn.status && turn.status.mobileSupersededLive))); }
+function renderContextThread(thread) { return thread || state.currentThread; }
+function turnHasDisplayItems(turn) { return Boolean(turn && Array.isArray(turn.items) && turn.items.some(Boolean)); }
 function turnHasActiveLiveItems(turn) {
   const items = Array.isArray(turn && turn.items) ? turn.items : [];
   return items.some(isActiveOperationalItem);
@@ -267,6 +320,8 @@ function turnStartedAtMs() { return 0; }
 ${functionSource("isActiveOperationalItem")}
 ${functionSource("liveTurnStatusDockItem")}
 ${functionSource("latestTurnForThread")}
+${functionSource("turnHasNewerDisplayTurn")}
+${functionSource("isStaleOrSupersededLiveTurn")}
 ${functionSource("isLiveTurnForThread")}
 ${functionSource("currentLiveOperationEntry")}
 return (thread) => {
@@ -297,14 +352,24 @@ return (thread) => {
   assert.equal(fallbackEntry.item.type, "liveTurnStatus");
   assert.equal(fallbackEntry.item.title, "Command");
   assert.equal(fallbackEntry.item.status, "");
+
+  thread.turns.push({
+    id: "superseded-old-live",
+    status: { type: "active", mobileSupersededLive: true },
+    items: [
+      { id: "stale-running-cmd", type: "commandExecution", status: "running", command: "npm test" },
+    ],
+  });
+
+  assert.equal(currentLiveOperationEntry(thread), null);
 });
 
 test("current-turn subagent panel opens from a left swipe without a topbar button", () => {
   assert.match(indexHtml, /id="subagentPanel"/);
   assert.doesNotMatch(indexHtml, /id="subagentStatusButton"/);
   assert.match(appJs, /subagentSwipe:\s*null/);
-  assert.match(appJs, /const SUBAGENT_EDGE_SWIPE_PX = 56/);
-  assert.match(appJs, /const SUBAGENT_EDGE_SWIPE_MAX_PX = 88/);
+  assert.match(appJs, /(?:const|var) SUBAGENT_EDGE_SWIPE_PX = 56/);
+  assert.match(appJs, /(?:const|var) SUBAGENT_EDGE_SWIPE_MAX_PX = 88/);
   assert.match(appJs, /function subagentSwipeStartsNearEdge\(/);
   assert.match(appJs, /function currentSubagentItems\(/);
   assert.match(appJs, /function turnSubagentItems\(/);
@@ -390,10 +455,10 @@ test("current-turn subagent panel opens from a left swipe without a topbar butto
 });
 
 test("thread detail DOM patch helper owns keyed child reconciliation", () => {
-  assert.match(appJs, /const threadDetailDomPatchApi = window\.CodexThreadDetailDomPatch/);
+  assert.match(appJs, /(?:const|var) threadDetailDomPatchApi = window\.CodexThreadDetailDomPatch/);
   assert.match(functionBody("patchNode"), /threadDetailDomPatchApi\.patchNode\(target, source\)/);
   assert.match(functionBody("patchHtml"), /threadDetailDomPatchApi\.patchHtml\(\{ target, html, document \}\)/);
-  assert.doesNotMatch(appJs, /function patchChildNodes\(/);
-  assert.doesNotMatch(appJs, /function canPatchNode\(/);
-  assert.doesNotMatch(appJs, /function syncAttributes\(/);
+  assert.doesNotMatch(paneLayoutRuntimeJs, /function patchChildNodes\(/);
+  assert.doesNotMatch(paneLayoutRuntimeJs, /function canPatchNode\(/);
+  assert.doesNotMatch(paneLayoutRuntimeJs, /function syncAttributes\(/);
 });

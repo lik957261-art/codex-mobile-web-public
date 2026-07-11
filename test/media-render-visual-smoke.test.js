@@ -39,8 +39,8 @@ test("media render visual smoke classifies image routes without leaking values",
   assert.equal(smoke.imageRouteKind("/api/hermes-plugins/codex-mobile/proxy/api/uploads/file?id=2026-06-23%2Fthread%2Fupload.jpg&key=session-key"), "hermes-proxy-upload");
   assert.equal(smoke.imageRouteKind("data:image/png;base64,abc123"), "data-image");
   assert.equal(smoke.imageRouteKind("blob:http://127.0.0.1:8787/local-preview"), "blob");
-  assert.equal(smoke.imageRouteKind("/Users/xuxin/.codex-mobile-web/uploads/private.jpg"), "local-path-leak");
-  assert.equal(smoke.imageRouteKind("/api/uploads/file?path=%2FUsers%2Fxuxin%2Fsecret.jpg&key=session-key"), "local-path-leak");
+  assert.equal(smoke.imageRouteKind("/Users/example/.codex-mobile-web/uploads/private.jpg"), "local-path-leak");
+  assert.equal(smoke.imageRouteKind("/api/uploads/file?path=%2FUsers%2Fexample%2Fsecret.jpg&key=session-key"), "local-path-leak");
 });
 
 test("media render visual smoke screenshot result does not expose local paths", () => {

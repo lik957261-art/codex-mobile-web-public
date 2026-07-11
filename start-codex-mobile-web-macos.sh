@@ -16,7 +16,7 @@ Options:
   --host <address>       Bind address, default 0.0.0.0
   --port <port>          Bind port, default 8787
   --codex <path|name>    Codex CLI executable, default command -v codex
-  --node <path|name>     Node executable, default command -v node
+  --node <path|name>     Node executable, default portable/Homebrew/PATH discovery
   --codex-home <path>    Codex state directory, default $HOME/.codex
   --no-auth              Disable access-key auth for isolated local testing
   -h, --help             Show this help
@@ -40,6 +40,39 @@ resolve_command() {
     return 1
   fi
   printf '%s\n' "$value"
+}
+
+default_codex_executable() {
+  local candidate
+  for candidate in \
+    "${CODEX_DESKTOP_APP_PATH:-/Applications/ChatGPT.app}/Contents/Resources/codex" \
+    "/Applications/ChatGPT.app/Contents/Resources/codex" \
+    "/Applications/Codex.app/Contents/Resources/codex" \
+    "$HOME/Applications/ChatGPT.app/Contents/Resources/codex" \
+    "$HOME/Applications/Codex.app/Contents/Resources/codex"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' codex
+}
+
+default_node_executable() {
+  local candidate
+  for candidate in \
+    "$SCRIPT_DIR/../runtime/node-current/bin/node" \
+    "$HOME/.codex-mobile-web/runtime/node-current/bin/node" \
+    "/opt/homebrew/opt/node@24/bin/node" \
+    "/usr/local/opt/node@24/bin/node" \
+    "/opt/homebrew/bin/node" \
+    "/usr/local/bin/node"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' node
 }
 
 while [[ $# -gt 0 ]]; do
@@ -80,7 +113,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "$NODE_EXE_VALUE" ]]; then
+  NODE_EXE_VALUE="$(default_node_executable)"
+fi
 NODE_EXE_VALUE="$(resolve_command "$NODE_EXE_VALUE" node)"
+if [[ -z "$CODEX_EXE_VALUE" ]]; then
+  CODEX_EXE_VALUE="$(default_codex_executable)"
+fi
 CODEX_EXE_VALUE="$(resolve_command "$CODEX_EXE_VALUE" codex)"
 
 if [[ "$NODE_EXE_VALUE" == */* && ! -x "$NODE_EXE_VALUE" ]]; then

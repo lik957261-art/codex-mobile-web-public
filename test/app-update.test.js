@@ -4,12 +4,28 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
+const vm = require("node:vm");
+const { readFrontendSources } = require("./frontend-source-helper");
 
 const root = path.resolve(__dirname, "..");
-const appJs = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
+const appJs = readFrontendSources(root);
+const appUpdateRuntimeJs = fs.readFileSync(path.join(root, "public", "app-update-runtime.js"), "utf8");
+const appUpdateSource = `${appUpdateRuntimeJs}\n${appJs}`;
+const composerRuntimeJs = fs.readFileSync(path.join(root, "public", "composer-runtime.js"), "utf8");
+const sideChatRuntimeJs = fs.readFileSync(path.join(root, "public", "side-chat-runtime.js"), "utf8");
+const mediaPreviewRuntimeJs = fs.readFileSync(path.join(root, "public", "media-preview-runtime.js"), "utf8");
 const indexHtml = fs.readFileSync(path.join(root, "public", "index.html"), "utf8");
+const appPreviewHtml = fs.readFileSync(path.join(root, "public", "vite-shell", "app-preview.html"), "utf8");
+const swJs = fs.readFileSync(path.join(root, "public", "sw.js"), "utf8");
 const stylesCss = fs.readFileSync(path.join(root, "public", "styles.css"), "utf8");
+const shellManifest = JSON.parse(fs.readFileSync(path.join(root, "public", "shell-asset-manifest.json"), "utf8"));
 const serverJs = fs.readFileSync(path.join(root, "server.js"), "utf8");
+const threadListRuntimeJs = fs.readFileSync(path.join(root, "public", "thread-list-runtime.js"), "utf8");
+const serverRuntimeUtilsJs = fs.readFileSync(path.join(root, "services", "runtime", "server-runtime-utils.js"), "utf8");
+const serverSupportRuntimeServiceJs = fs.readFileSync(path.join(root, "services", "runtime", "server-support-runtime-service.js"), "utf8");
+const serverRouteCompositionServiceJs = fs.readFileSync(path.join(root, "server-routes", "server-route-composition-service.js"), "utf8");
+const coreApiRouteServiceJs = fs.readFileSync(path.join(root, "server-routes", "core-api-route-service.js"), "utf8");
+const appMaintenanceServiceJs = fs.readFileSync(path.join(root, "adapters", "app-maintenance-service.js"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 
 function functionBody(source, name) {
@@ -36,115 +52,216 @@ function evaluatedPublicPrReviewWorkspacePath() {
     "workspacePathIsVisible",
     "visibleWorkspaceWithBaseName",
     "publicPrReviewWorkspacePath",
-  ].map((name) => functionBody(appJs, name));
+  ].map((name) => functionBody(appUpdateSource, name));
   return (state) => Function("state", `${sources.join("\n")}\nreturn publicPrReviewWorkspacePath();`)(state);
 }
 
+function createServiceWorkerHarness() {
+  const listeners = {};
+  const cache = new Map();
+  const putCalls = [];
+  const networkCalls = [];
+  const context = {
+    URL,
+    Request,
+    Response,
+    console,
+    setTimeout,
+    importScripts: () => {},
+    fetch: async (request, init = {}) => {
+      networkCalls.push({
+        url: typeof request === "string" ? request : request.url,
+        cache: init.cache || "",
+      });
+      return new Response("network-stable-entry", { status: 200 });
+    },
+    caches: {
+      async match(key) {
+        const cacheKey = typeof key === "string" ? key : key.url;
+        return cache.get(cacheKey) || null;
+      },
+      async keys() {
+        return ["codex-mobile-shell-v625-test"];
+      },
+      async delete() {
+        return true;
+      },
+      async open() {
+        return {
+          async addAll() {},
+          async put(key, response) {
+            const cacheKey = typeof key === "string" ? key : key.url;
+            putCalls.push(cacheKey);
+            cache.set(cacheKey, response.clone ? response.clone() : response);
+          },
+        };
+      },
+    },
+  };
+  context.self = {
+    location: { origin: "https://codex.example.test" },
+    CODEX_MOBILE_SHELL_MANIFEST: {
+      shellCacheName: "codex-mobile-shell-v625-test",
+      precacheAssets: [],
+    },
+    skipWaiting: () => Promise.resolve(),
+    clients: {
+      claim: () => Promise.resolve(),
+      matchAll: () => Promise.resolve([]),
+      openWindow: () => Promise.resolve(null),
+    },
+    registration: {
+      showNotification: () => Promise.resolve(),
+    },
+    addEventListener(type, handler) {
+      listeners[type] = handler;
+    },
+  };
+  vm.runInNewContext(swJs, context, { filename: "sw.js" });
+  return { listeners, cache, networkCalls, putCalls };
+}
+
+async function runServiceWorkerFetch(harness, request) {
+  let responsePromise = null;
+  harness.listeners.fetch({
+    request,
+    respondWith(promise) {
+      responsePromise = Promise.resolve(promise);
+    },
+  });
+  assert.ok(responsePromise, "fetch handler should respond");
+  return responsePromise;
+}
+
 test("self-update UI explains supervisor-dependent restart", () => {
-  assert.match(appJs, /等待重启…/);
-  assert.match(appJs, /服务会退出并等待启动任务或守护脚本拉起/);
-  assert.match(appJs, /手动启动的部署需要在服务停止后手动重启/);
-  assert.match(appJs, /手动运行 node\/npm start 的部署需要手动重启/);
-  assert.match(appJs, /如连接断开且未自动恢复，请在部署机手动重启/);
+  assert.match(appUpdateSource, /等待重启…/);
+  assert.match(appUpdateSource, /服务会退出并等待启动任务或守护脚本拉起/);
+  assert.match(appUpdateSource, /手动启动的部署需要在服务停止后手动重启/);
+  assert.match(appUpdateSource, /手动运行 node\/npm start 的部署需要手动重启/);
+  assert.match(appUpdateSource, /如连接断开且未自动恢复，请在部署机手动重启/);
 });
 
-test("self-update unsupported installs do not render as update failures", () => {
-  const body = functionBody(appJs, "renderAppUpdateStatus");
-  const unsupportedBranch = body.indexOf("} else if (!supported) {");
-  const errorBranch = body.indexOf("} else if (status.error) {");
-  assert.ok(unsupportedBranch > 0, "unsupported branch should be present");
-  assert.ok(errorBranch > 0, "error branch should be present");
-  assert.ok(unsupportedBranch < errorBranch, "unsupported installs should keep the version label instead of showing update failure");
+test("app update runtime is wired into the static shell", () => {
+  assert.match(indexHtml, /<script src="\/app-update-runtime\.js"><\/script>/);
+  assert.ok(shellManifest.precacheAssets.includes("/app-update-runtime.js"));
+  assert.match(appJs, /"\/app-update-runtime\.js"/);
+  assert.ok(shellManifest.hashAssets.includes("/app-update-runtime.js"));
+  assert.match(swJs, /shell-asset-manifest\.js/);
+  assert.match(serverRuntimeUtilsJs, /shell-asset-manifest\.json/);
+  assert.match(appJs, /(?:const|var) appUpdateRuntimeApi = window\.CodexAppUpdateRuntime/);
+  const requireRuntimeBody = functionBody(appJs, "requireAppUpdateRuntime");
+  assert.match(requireRuntimeBody, /if \(!appUpdateRuntime\) \{/);
+  assert.match(requireRuntimeBody, /appUpdateRuntimeApi\.createAppUpdateRuntime\(\{/);
+  const earlyConstantsEnd = appJs.indexOf("function hasStartupThreadOpenIntent");
+  const earlyConstantsBlock = appJs.slice(appJs.indexOf("var COMPOSER_INTENT_BODY_MAX_CHARS"), earlyConstantsEnd);
+  assert.doesNotMatch(earlyConstantsBlock, /appUpdateRuntimeApi\.createAppUpdateRuntime\(\{/);
+  assert.match(appJs, /function requireAppUpdateRuntime\(\)/);
+  assert.match(appUpdateRuntimeJs, /function createAppUpdateRuntime\(deps = \{\}\)/);
+  assert.match(appUpdateRuntimeJs, /root\.CodexAppUpdateRuntime/);
 });
 
 test("page prompts for refresh when server client build changes", () => {
-  assert.match(serverJs, /function clientBuildId\(/);
-  assert.match(serverJs, /function currentPublicBuildConfig\(\)/);
-  assert.match(serverJs, /const shellCacheName = readServiceWorkerCacheName\(\);/);
-  assert.match(serverJs, /const buildId = appShellBuildId\(shellCacheName\);/);
-  assert.match(serverJs, /clientBuildId:\s*clientBuildId\(shellCacheName, buildId\)/);
-  assert.match(serverJs, /const buildConfig = currentPublicBuildConfig\(\);/);
-  assert.match(serverJs, /buildId:\s*buildConfig\.buildId/);
-  assert.match(serverJs, /clientBuildId:\s*buildConfig\.clientBuildId/);
-  assert.match(serverJs, /shellCacheName:\s*buildConfig\.shellCacheName/);
+  assert.match(serverRuntimeUtilsJs, /function clientBuildId\(/);
+  assert.match(serverRuntimeUtilsJs, /function currentPublicBuildConfig\(\)/);
+  assert.match(serverRuntimeUtilsJs, /const shellCacheName = readServiceWorkerCacheName\(\);/);
+  assert.match(serverRuntimeUtilsJs, /const buildId = appShellBuildId\(shellCacheName\);/);
+  assert.match(serverRuntimeUtilsJs, /clientBuildId:\s*clientBuildId\(shellCacheName, buildId\)/);
+  assert.match(serverJs, /currentPublicBuildConfig/);
+  assert.match(coreApiRouteServiceJs, /const buildConfig = deps\.currentPublicBuildConfig\(\);/);
+  assert.match(coreApiRouteServiceJs, /buildId:\s*buildConfig\.buildId/);
+  assert.match(coreApiRouteServiceJs, /clientBuildId:\s*buildConfig\.clientBuildId/);
+  assert.match(coreApiRouteServiceJs, /shellCacheName:\s*buildConfig\.shellCacheName/);
   assert.match(indexHtml, /id="pageRefreshPrompt"/);
-  assert.match(appJs, /const PAGE_SHELL_ASSETS = Object\.freeze\(\[/);
-  assert.match(appJs, /"\/styles\.css"/);
-  assert.match(appJs, /"\/api-client\.js"/);
-  assert.match(appJs, /"\/runtime-settings\.js"/);
-  assert.match(appJs, /"\/draft-store\.js"/);
-  assert.match(appJs, /"\/markdown-renderer\.js"/);
-  assert.match(appJs, /"\/viewport-metrics\.js"/);
-  assert.match(appJs, /"\/conversation-scroll\.js"/);
-  assert.match(appJs, /"\/image-compressor\.js"/);
-  assert.match(appJs, /"\/plugin-embed\.js"/);
-  assert.match(appJs, /"\/home-ai-diagnostic-reporting\.js"/);
-  assert.match(appJs, /"\/thread-diagnostic-events\.js"/);
-  assert.match(appJs, /"\/thread-performance-metrics\.js"/);
-  assert.match(appJs, /"\/thread-list-load-policy\.js"/);
-  assert.match(appJs, /"\/thread-list-stable-order\.js"/);
-  assert.match(appJs, /"\/live-operation-dock-state\.js"/);
-  assert.match(appJs, /"\/thread-detail-state\.js"/);
-  assert.match(appJs, /"\/thread-detail-render-plan\.js"/);
-  assert.match(appJs, /"\/thread-detail-merge-state\.js"/);
-  assert.match(appJs, /"\/thread-detail-v4-merge-state\.js"/);
-  assert.match(appJs, /"\/thread-detail-patch-plan\.js"/);
-  assert.match(appJs, /"\/thread-detail-dom-patch\.js"/);
-  assert.match(appJs, /"\/thread-detail-actions\.js"/);
-  assert.match(appJs, /"\/thread-tile-actions\.js"/);
-  assert.match(appJs, /"\/thread-tile-state\.js"/);
-  assert.match(appJs, /"\/thread-tile-layout\.js"/);
-  assert.match(appJs, /"\/build-refresh-policy\.js"/);
-  assert.match(indexHtml, /<script src="\/thread-performance-metrics\.js"><\/script>\s*\n\s*<script src="\/thread-list-load-policy\.js"><\/script>\s*\n\s*<script src="\/thread-list-stable-order\.js"><\/script>\s*\n\s*<script src="\/live-operation-dock-state\.js"><\/script>\s*\n\s*<script src="\/thread-detail-state\.js"><\/script>\s*\n\s*<script src="\/thread-detail-render-plan\.js"><\/script>\s*\n\s*<script src="\/thread-detail-merge-state\.js"><\/script>\s*\n\s*<script src="\/thread-detail-v4-merge-state\.js"><\/script>\s*\n\s*<script src="\/thread-detail-patch-plan\.js"><\/script>\s*\n\s*<script src="\/thread-detail-dom-patch\.js"><\/script>\s*\n\s*<script src="\/thread-detail-actions\.js"><\/script>\s*\n\s*<script src="\/thread-tile-actions\.js"><\/script>\s*\n\s*<script src="\/thread-tile-state\.js"><\/script>\s*\n\s*<script src="\/thread-tile-layout\.js"><\/script>\s*\n\s*<script src="\/build-refresh-policy\.js"><\/script>\s*\n\s*<script src="\/app\.js"><\/script>/);
-  assert.match(serverJs, /"viewport-metrics\.js"/);
-  assert.match(serverJs, /"conversation-scroll\.js"/);
-  assert.match(serverJs, /"home-ai-diagnostic-reporting\.js"/);
-  assert.match(serverJs, /"thread-diagnostic-events\.js"/);
-  assert.match(serverJs, /"thread-performance-metrics\.js"/);
-  assert.match(serverJs, /"thread-list-load-policy\.js"/);
-  assert.match(serverJs, /"thread-list-stable-order\.js"/);
-  assert.match(serverJs, /"live-operation-dock-state\.js"/);
-  assert.match(serverJs, /"thread-detail-state\.js"/);
-  assert.match(serverJs, /"thread-detail-render-plan\.js"/);
-  assert.match(serverJs, /"thread-detail-merge-state\.js"/);
-  assert.match(serverJs, /"thread-detail-v4-merge-state\.js"/);
-  assert.match(serverJs, /"thread-detail-patch-plan\.js"/);
-  assert.match(serverJs, /"thread-detail-dom-patch\.js"/);
-  assert.match(serverJs, /"thread-detail-actions\.js"/);
-  assert.match(serverJs, /"thread-tile-actions\.js"/);
-  assert.match(serverJs, /"thread-tile-state\.js"/);
-  assert.match(serverJs, /"thread-tile-layout\.js"/);
-  assert.match(serverJs, /"build-refresh-policy\.js"/);
+  assert.match(shellManifest.shellCacheName, /^codex-mobile-shell-v628-[a-f0-9]{12}$/);
+  assert.match(shellManifest.clientBuildId, /^0\.1\.12\|codex-mobile-shell-v628-[a-f0-9]{12}$/);
+  assert.ok(shellManifest.pageShellAssets.includes("/sw.js"));
+  assert.ok(shellManifest.pageShellAssets.includes("/shell-asset-manifest.js"));
+  assert.ok(shellManifest.pageShellAssets.includes("/shell-asset-manifest.json"));
+  assert.ok(shellManifest.pageShellAssets.includes("/app-update-runtime.js"));
+  assert.ok(shellManifest.pageShellAssets.includes("/app-shell-runtime.js"));
+  assert.match(appUpdateSource, /shellManifestList\("pageShellAssets"/);
+  assert.doesNotMatch(appUpdateSource, /PAGE_SHELL_ASSETS\s*=\s*Object\.freeze\(\s*\[/);
+  const scriptOrder = [
+    "/shell-asset-manifest.js",
+    "/thread-diagnostic-events.js",
+    "/frontend-runtime-health.js",
+    "/thread-status-hints.js",
+    "/thread-performance-metrics.js",
+    "/thread-list-load-policy.js",
+    "/thread-list-stable-order.js",
+    "/thread-list-runtime.js",
+    "/client-render-stability-guard.js",
+    "/live-operation-dock-state.js",
+    "/thread-detail-state.js",
+    "/thread-detail-render-plan.js",
+    "/thread-detail-merge-state.js",
+    "/thread-detail-v4-merge-state.js",
+    "/thread-detail-runtime.js",
+    "/thread-detail-patch-plan.js",
+    "/thread-detail-dom-patch.js",
+    "/thread-detail-actions.js",
+    "/thread-tile-actions.js",
+    "/thread-tile-state.js",
+    "/thread-tile-layout.js",
+    "/thread-tile-runtime.js",
+    "/build-refresh-policy.js",
+    "/app-update-runtime.js",
+    "/side-chat-runtime.js",
+    "/media-preview-runtime.js",
+    "/app-bootstrap.js",
+    "/settings-runtime.js",
+    "/modal-runtime.js",
+    "/navigation-runtime.js",
+    "/api-client-runtime.js",
+    "/notification-ui-runtime.js",
+    "/pane-layout-runtime.js",
+    "/task-card-runtime.js",
+    "/conversation-render-runtime.js",
+    "/event-stream-runtime.js",
+    "/composer-bridge-runtime.js",
+    "/runtime-wiring-runtime.js",
+    "/app-shell-runtime.js",
+    "/app.js",
+  ];
+  let previousScriptIndex = -1;
+  for (const asset of scriptOrder) {
+    const scriptIndex = indexHtml.indexOf(`<script src="${asset}"></script>`);
+    assert.notEqual(scriptIndex, -1, `missing shell script ${asset}`);
+    assert.ok(scriptIndex > previousScriptIndex, `${asset} should load after the prior runtime asset`);
+    previousScriptIndex = scriptIndex;
+  }
+  assert.match(serverRuntimeUtilsJs, /shell-asset-manifest\.json/);
+  assert.match(serverRuntimeUtilsJs, /manifestAssetFiles\("hashAssets"/);
   assert.match(indexHtml, /id="hardRefreshButton"/);
-  assert.match(appJs, /function checkPageRefreshAvailability\(/);
-  assert.match(appJs, /function refreshPageForNewBuild\(/);
-  assert.match(appJs, /function renderHardRefreshButton\(/);
-  assert.match(appJs, /function handleHardRefreshClick\(/);
-  assert.match(appJs, /const buildRefreshPolicy = window\.CodexBuildRefreshPolicy/);
-  assert.match(appJs, /function shouldPromptForServerBuildChange\(/);
-  assert.match(appJs, /function rememberRateLimitsFromConfig\(config\)/);
-  assert.match(appJs, /function preparePageShellAssets\(config, options = \{\}\)/);
-  assert.match(appJs, /function clearAllShellCaches\(\)/);
-  assert.match(appJs, /function resetPageShellServiceWorker\(\)/);
-  assert.match(appJs, /function pageReloadUrlWithBust\(\)/);
-  assert.match(appJs, /rememberRateLimitsFromConfig\(config\);[\s\S]*await preparePageShellAssets\(config, \{ populateCache: true \}\)/);
-  assert.match(functionBody(appJs, "refreshPageForNewBuild"), /await clearAllShellCaches\(\);[\s\S]*await preparePageShellAssets\(config, \{ populateCache: true \}\);[\s\S]*await resetPageShellServiceWorker\(\);[\s\S]*window\.location\.replace\(pageReloadUrlWithBust\(\)\);/);
-  assert.doesNotMatch(functionBody(appJs, "checkPageRefreshAvailability"), /preparePageShellAssets\(config, \{ populateCache: true \}\)/);
-  assert.match(functionBody(appJs, "initializePageBuildState"), /shouldPromptForServerBuildChange\(currentServerBuildId, state\.serverBuildId\)/);
-  assert.match(functionBody(appJs, "checkPageRefreshAvailability"), /const serverBuildNeedsRefresh = serverBuildChanged && shouldPromptForServerBuildChange\(nextBuildId, state\.serverBuildId\)/);
-  assert.match(functionBody(appJs, "checkPageRefreshAvailability"), /if \(serverBuildNeedsRefresh\) \{[\s\S]*if \(isHermesEmbedMode\(\)\) \{[\s\S]*requestHermesPluginRefresh\("server_build_changed"\);/);
-  assert.match(functionBody(appJs, "checkPageRefreshAvailability"), /if \(assetsChanged && !serverBuildNeedsRefresh\) \{[\s\S]*state\.serverAssetBuildId = nextAssetBuildId;[\s\S]*return;/);
-  assert.doesNotMatch(functionBody(appJs, "checkPageRefreshAvailability"), /if \(serverBuildNeedsRefresh \|\| assetsChanged\)/);
-  assert.match(functionBody(appJs, "renderPageRefreshPrompt"), /New version available\. Tap to refresh\./);
-  assert.match(functionBody(appJs, "renderPageRefreshPrompt"), /Manual refresh only/);
-  assert.match(appJs, /cache:\s*"no-store"/);
-  assert.match(appJs, /function pruneOldShellCaches\(expectedCacheName\)/);
-  assert.match(appJs, /key !== expectedCacheName/);
-  assert.match(appJs, /window\.location\.replace\(pageReloadUrlWithBust\(\)\)/);
-  assert.match(functionBody(appJs, "renderPageRefreshPrompt"), /renderHardRefreshButton\(\)/);
-  assert.match(functionBody(appJs, "handleHardRefreshClick"), /state\.pageRefreshPreparedConfig = null;[\s\S]*state\.pageRefreshReason = "build";[\s\S]*state\.pageRefreshAvailable = true;[\s\S]*await refreshPageForNewBuild\(\);/);
-  assert.match(appJs, /hardRefreshButton"\)\.addEventListener\("click", \(\) => handleHardRefreshClick\(\)\.catch\(showError\)\)/);
-  assert.match(appJs, /addEventListener\("click", refreshPageForNewBuild\)/);
+  assert.match(appUpdateSource, /function checkPageRefreshAvailability\(/);
+  assert.match(appUpdateSource, /function refreshPageForNewBuild\(/);
+  assert.match(appUpdateSource, /function renderHardRefreshButton\(/);
+  assert.match(appUpdateSource, /function handleHardRefreshClick\(/);
+  assert.match(appUpdateSource, /(?:const|var) buildRefreshPolicy = window\.CodexBuildRefreshPolicy/);
+  assert.match(appUpdateSource, /function shouldPromptForServerBuildChange\(/);
+  assert.match(appUpdateSource, /function rememberRateLimitsFromConfig\(config\)/);
+  assert.match(appUpdateSource, /function preparePageShellAssets\(config, options = \{\}\)/);
+  assert.match(appUpdateSource, /function clearAllShellCaches\(\)/);
+  assert.match(appUpdateSource, /function resetPageShellServiceWorker\(\)/);
+  assert.match(appUpdateSource, /function pageReloadUrlWithBust\(\)/);
+  assert.match(appUpdateSource, /rememberRateLimitsFromConfig\(config\);[\s\S]*await preparePageShellAssets\(config, \{ populateCache: true \}\)/);
+  assert.match(functionBody(appUpdateSource, "refreshPageForNewBuild"), /await clearAllShellCaches\(\);[\s\S]*await preparePageShellAssets\(config, \{ populateCache: true \}\);[\s\S]*await resetPageShellServiceWorker\(\);[\s\S]*window\.location\.replace\(pageReloadUrlWithBust\(\)\);/);
+  assert.doesNotMatch(functionBody(appUpdateSource, "checkPageRefreshAvailability"), /preparePageShellAssets\(config, \{ populateCache: true \}\)/);
+  assert.match(functionBody(appUpdateSource, "initializePageBuildState"), /shouldPromptForServerBuildChange\(currentServerBuildId, state\.serverBuildId\)/);
+  assert.match(functionBody(appUpdateSource, "checkPageRefreshAvailability"), /const serverBuildNeedsRefresh = serverBuildChanged && shouldPromptForServerBuildChange\(nextBuildId, state\.serverBuildId\)/);
+  assert.match(functionBody(appUpdateSource, "checkPageRefreshAvailability"), /if \(serverBuildNeedsRefresh\) \{[\s\S]*if \(isHermesEmbedMode\(\)\) \{[\s\S]*requestHermesPluginRefresh\("server_build_changed"\);/);
+  assert.match(functionBody(appUpdateSource, "checkPageRefreshAvailability"), /if \(assetsChanged && !serverBuildNeedsRefresh\) \{[\s\S]*state\.serverAssetBuildId = nextAssetBuildId;[\s\S]*return;/);
+  assert.doesNotMatch(functionBody(appUpdateSource, "checkPageRefreshAvailability"), /if \(serverBuildNeedsRefresh \|\| assetsChanged\)/);
+  assert.match(functionBody(appUpdateSource, "renderPageRefreshPrompt"), /New version available\. Tap to refresh\./);
+  assert.match(functionBody(appUpdateSource, "renderPageRefreshPrompt"), /Manual refresh only/);
+  assert.match(appUpdateSource, /cache:\s*"no-store"/);
+  assert.match(appUpdateSource, /function pruneOldShellCaches\(expectedCacheName\)/);
+  assert.match(appUpdateSource, /key !== expectedCacheName/);
+  assert.match(appUpdateSource, /window\.location\.replace\(pageReloadUrlWithBust\(\)\)/);
+  assert.match(functionBody(appUpdateSource, "renderPageRefreshPrompt"), /renderHardRefreshButton\(\)/);
+  assert.match(functionBody(appUpdateSource, "handleHardRefreshClick"), /state\.pageRefreshPreparedConfig = null;[\s\S]*state\.pageRefreshReason = "build";[\s\S]*state\.pageRefreshAvailable = true;[\s\S]*await refreshPageForNewBuild\(\);/);
+  assert.match(appUpdateSource, /hardRefreshButton"\)\.addEventListener\("click", \(\) => handleHardRefreshClick\(\)\.catch\(showError\)\)/);
+  assert.match(appUpdateSource, /addEventListener\("click", refreshPageForNewBuild\)/);
   assert.doesNotMatch(stylesCss, /html\.embed-hermes #pageRefreshPrompt/);
   assert.match(stylesCss, /html\.embed-hermes #refreshThreads\s*\{[\s\S]*display:\s*none;/);
   assert.match(stylesCss, /html\.embed-hermes #connectionState\s*\{[\s\S]*display:\s*none;/);
@@ -153,45 +270,48 @@ test("page prompts for refresh when server client build changes", () => {
 });
 
 test("page refresh prompt also handles server restart reconnects", () => {
-  assert.match(appJs, /pageRefreshReason:\s*""/);
-  assert.match(appJs, /function showReconnectRefreshPrompt\(reason = "reconnect"\)/);
-  assert.match(appJs, /state\.pageRefreshReason = reason === "restart" \? "restart" : "reconnect"/);
-  assert.match(appJs, /function clearReconnectRefreshPrompt\(\)/);
-  assert.match(functionBody(appJs, "clearReconnectRefreshPrompt"), /state\.pageRefreshReason === "reconnect" \|\| state\.pageRefreshReason === "restart"/);
-  assert.match(functionBody(appJs, "clearReconnectRefreshPrompt"), /finishRestartingUiIfReady\(\)/);
-  assert.match(appJs, /function recoverEventStreamWithApiFallback\(options = \{\}\)/);
-  assert.match(appJs, /function scheduleEventFallbackPoll\(delayMs = 8000\)/);
-  assert.match(appJs, /function scheduleEventReconnectRetry\(\)/);
-  assert.match(appJs, /function scheduleVisiblePageRefreshCheck\(delayMs = 0, options = \{\}\)/);
-  assert.match(appJs, /state\.events\.onopen = \(\) => \{[\s\S]*scheduleVisiblePageRefreshCheck\(200, \{ force: true \}\)/);
-  assert.match(appJs, /payload\.type === "status"[\s\S]*scheduleVisiblePageRefreshCheck\(1200\)/);
-  assert.match(appJs, /renderThreads\(result\);[\s\S]*scheduleVisiblePageRefreshCheck\(500\)/);
-  assert.match(appJs, /Service restarted\. Tap to refresh\./);
-  assert.match(appJs, /Connection changed\. Tap to refresh\./);
-  assert.match(appJs, /Refreshing and reconnecting\.\.\./);
-  assert.match(functionBody(appJs, "showReconnectRefreshPrompt"), /if \(isHermesEmbedMode\(\) && reason !== "restart"\) return;/);
-  assert.match(appJs, /async function waitForPageBuildConfig\(timeoutMs = 18000\)/);
-  assert.match(appJs, /state\.pageRefreshReason === "reconnect" \|\| state\.pageRefreshReason === "restart"[\s\S]*await waitForPageBuildConfig\(\)/);
-  assert.match(functionBody(appJs, "refreshPageForNewBuild"), /if \(reconnectRefresh && !shouldPromptForServerBuildChange\(nextBuildId, currentBuildId\)\) \{[\s\S]*state\.pageRefreshAvailable = false;[\s\S]*finishRestartingUiIfReady\(\);[\s\S]*return;/);
-  assert.match(appJs, /showReconnectRefreshPrompt\("reconnect"\);[\s\S]*if \(!isHermesEmbedMode\(\)\) showError\(err\)/);
-  assert.match(appJs, /showReconnectRefreshPrompt\("restart"\)/);
-  assert.match(appJs, /function shouldRefreshThreadListDuringEventRecovery\(options = \{\}\)/);
-  assert.match(functionBody(appJs, "shouldRefreshThreadListDuringEventRecovery"), /return Boolean\(options\.force\) \|\| !isHermesEmbedMode\(\) \|\| !state\.threads\.length;/);
-  assert.match(functionBody(appJs, "refreshThreadListDuringEventRecovery"), /if \(!shouldRefreshThreadListDuringEventRecovery\(options\)\) return false;/);
-  assert.match(functionBody(appJs, "refreshThreadListDuringEventRecovery"), /await loadThreads\(\{ silent: isHermesEmbedMode\(\) \|\| Boolean\(state\.threads\.length\) \}\);/);
-  assert.match(functionBody(appJs, "scheduleEventFallbackPoll"), /await refreshThreadListDuringEventRecovery\(\);/);
-  assert.doesNotMatch(functionBody(appJs, "scheduleEventFallbackPoll"), /await loadThreads\(/);
-  assert.match(functionBody(appJs, "scheduleEventFallbackPoll"), /if \(state\.currentThreadId\) await refreshCurrentThread\(\{ source: "event-fallback-poll" \}\);/);
-  assert.match(functionBody(appJs, "recoverEventStreamWithApiFallback"), /Boolean\(options\.afterEventReconnect\)/);
-  assert.match(functionBody(appJs, "recoverEventStreamWithApiFallback"), /await refreshThreadListDuringEventRecovery\(\{ force: Boolean\(options\.afterEventReconnect\) \}\);/);
-  assert.doesNotMatch(functionBody(appJs, "recoverEventStreamWithApiFallback"), /await loadThreads\(/);
-  assert.match(functionBody(appJs, "connectEvents"), /const hadReconnectFailure = state\.eventReconnectFailures > 0 \|\| state\.eventFallbackMode;/);
-  assert.match(functionBody(appJs, "connectEvents"), /if \(hadReconnectFailure\) \{[\s\S]*recoverEventStreamWithApiFallback\(\{ afterEventReconnect: true \}\)/);
-  assert.match(functionBody(appJs, "recoverEventStreamWithApiFallback"), /if \(isHermesEmbedMode\(\)\) \{[\s\S]*scheduleEventFallbackPoll\(\);[\s\S]*scheduleEventReconnectRetry\(\);/);
-  assert.match(functionBody(appJs, "connectEvents"), /if \(!isHermesEmbedMode\(\)\) \{[\s\S]*markActivity\("重连"\);[\s\S]*updateConnectionState\(null, "Reconnecting"\);[\s\S]*\}/);
-  assert.doesNotMatch(appJs, /updateConnectionState\(null, "Reconnecting"\);\s*showReconnectRefreshPrompt/);
-  assert.match(appJs, /pageRefreshPrompt\.addEventListener\("click", refreshPageForNewBuild\)/);
-  assert.doesNotMatch(functionBody(appJs, "handleSharedRestartClick"), /refreshPageForNewBuild\(\)\.catch\(showError\)/);
+  assert.match(appUpdateSource, /pageRefreshReason:\s*""/);
+  assert.match(appUpdateSource, /function showReconnectRefreshPrompt\(reason = "reconnect"\)/);
+  assert.match(appUpdateSource, /state\.pageRefreshReason = reason === "restart" \? "restart" : "reconnect"/);
+  assert.match(appUpdateSource, /function clearReconnectRefreshPrompt\(\)/);
+  assert.match(functionBody(appUpdateSource, "clearReconnectRefreshPrompt"), /state\.pageRefreshReason === "reconnect" \|\| state\.pageRefreshReason === "restart"/);
+  assert.match(functionBody(appUpdateSource, "clearReconnectRefreshPrompt"), /finishRestartingUiIfReady\(\)/);
+  assert.match(appUpdateSource, /function recoverEventStreamWithApiFallback\(options = \{\}\)/);
+  assert.match(appUpdateSource, /function scheduleEventFallbackPoll\(delayMs = 8000\)/);
+  assert.match(appUpdateSource, /function scheduleEventReconnectRetry\(\)/);
+  assert.match(appUpdateSource, /function scheduleVisiblePageRefreshCheck\(delayMs = 0, options = \{\}\)/);
+  assert.match(appUpdateSource, /state\.events\.onopen = \(\) => \{[\s\S]*scheduleVisiblePageRefreshCheck\(200, \{ force: true \}\)/);
+  assert.match(appUpdateSource, /payload\.type === "status"[\s\S]*scheduleVisiblePageRefreshCheck\(1200\)/);
+  assert.match(threadListRuntimeJs, /renderThreads\(result\);[\s\S]*scheduleVisiblePageRefreshCheck\(500\)/);
+  assert.match(appUpdateSource, /Service restarted\. Tap to refresh\./);
+  assert.match(appUpdateSource, /Connection changed\. Tap to refresh\./);
+  assert.match(appUpdateSource, /Refreshing and reconnecting\.\.\./);
+  assert.match(functionBody(appUpdateSource, "showReconnectRefreshPrompt"), /if \(isHermesEmbedMode\(\) && reason !== "restart"\) return;/);
+  assert.match(appUpdateSource, /rememberCodexProfiles = \(\) => \{\}/);
+  assert.match(appUpdateSource, /function codexProfileRestartReadyForCompletion\(\)/);
+  assert.match(functionBody(appUpdateSource, "codexProfileRestartReadyForCompletion"), /服务已恢复，正在等待目标账号额度刷新/);
+  assert.match(appUpdateSource, /async function waitForPageBuildConfig\(timeoutMs = 18000\)/);
+  assert.match(appUpdateSource, /state\.pageRefreshReason === "reconnect" \|\| state\.pageRefreshReason === "restart"[\s\S]*await waitForPageBuildConfig\(\)/);
+  assert.match(functionBody(appUpdateSource, "refreshPageForNewBuild"), /if \(reconnectRefresh && !shouldPromptForServerBuildChange\(nextBuildId, currentBuildId\)\) \{[\s\S]*rememberCodexProfiles\(config && config\.codexProfiles \|\| null\);[\s\S]*const restartFinished = finishRestartingUiIfReady\(\);[\s\S]*state\.pageRefreshAvailable = !restartFinished && state\.codexProfileRestarting;[\s\S]*return;/);
+  assert.match(appUpdateSource, /showReconnectRefreshPrompt\("reconnect"\);[\s\S]*if \(!isHermesEmbedMode\(\)\) showError\(err\)/);
+  assert.match(appUpdateSource, /showReconnectRefreshPrompt\("restart"\)/);
+  assert.match(appUpdateSource, /function shouldRefreshThreadListDuringEventRecovery\(options = \{\}\)/);
+  assert.match(functionBody(appUpdateSource, "shouldRefreshThreadListDuringEventRecovery"), /return Boolean\(options\.force\) \|\| !isHermesEmbedMode\(\) \|\| !state\.threads\.length;/);
+  assert.match(functionBody(appUpdateSource, "refreshThreadListDuringEventRecovery"), /if \(!shouldRefreshThreadListDuringEventRecovery\(options\)\) return false;/);
+  assert.match(functionBody(appUpdateSource, "refreshThreadListDuringEventRecovery"), /await loadThreads\(\{ silent: isHermesEmbedMode\(\) \|\| Boolean\(state\.threads\.length\) \}\);/);
+  assert.match(functionBody(appUpdateSource, "scheduleEventFallbackPoll"), /await refreshThreadListDuringEventRecovery\(\);/);
+  assert.doesNotMatch(functionBody(appUpdateSource, "scheduleEventFallbackPoll"), /await loadThreads\(/);
+  assert.match(functionBody(appUpdateSource, "scheduleEventFallbackPoll"), /if \(state\.currentThreadId\) await refreshCurrentThread\(\{ source: "event-fallback-poll" \}\);/);
+  assert.match(functionBody(appUpdateSource, "recoverEventStreamWithApiFallback"), /Boolean\(options\.afterEventReconnect\)/);
+  assert.match(functionBody(appUpdateSource, "recoverEventStreamWithApiFallback"), /await refreshThreadListDuringEventRecovery\(\{ force: Boolean\(options\.afterEventReconnect\) \}\);/);
+  assert.doesNotMatch(functionBody(appUpdateSource, "recoverEventStreamWithApiFallback"), /await loadThreads\(/);
+  assert.match(functionBody(appUpdateSource, "connectEvents"), /const hadReconnectFailure = state\.eventReconnectFailures > 0 \|\| state\.eventFallbackMode;/);
+  assert.match(functionBody(appUpdateSource, "connectEvents"), /if \(hadReconnectFailure\) \{[\s\S]*recoverEventStreamWithApiFallback\(\{ afterEventReconnect: true \}\)/);
+  assert.match(functionBody(appUpdateSource, "recoverEventStreamWithApiFallback"), /if \(isHermesEmbedMode\(\)\) \{[\s\S]*scheduleEventFallbackPoll\(\);[\s\S]*scheduleEventReconnectRetry\(\);/);
+  assert.match(functionBody(appUpdateSource, "connectEvents"), /if \(!isHermesEmbedMode\(\)\) \{[\s\S]*markActivity\("重连"\);[\s\S]*updateConnectionState\(null, "Reconnecting"\);[\s\S]*\}/);
+  assert.doesNotMatch(appUpdateSource, /updateConnectionState\(null, "Reconnecting"\);\s*showReconnectRefreshPrompt/);
+  assert.match(appUpdateSource, /pageRefreshPrompt\.addEventListener\("click", refreshPageForNewBuild\)/);
+  assert.doesNotMatch(functionBody(appUpdateSource, "handleSharedRestartClick"), /refreshPageForNewBuild\(\)\.catch\(showError\)/);
 });
 
 test("boot recovery UI can clear PWA shell state before app.js starts", () => {
@@ -207,12 +327,84 @@ test("boot recovery UI can clear PWA shell state before app.js starts", () => {
   assert.match(indexHtml, /shellReload/);
   assert.match(indexHtml, /window\.addEventListener\("error"/);
   assert.match(indexHtml, /window\.addEventListener\("unhandledrejection"/);
-  assert.match(indexHtml, /setTimeout\(function \(\) \{ showRecovery\("startup-timeout"\); \}, 4500\)/);
-  assert.match(appJs, /function markBootReady\(\)/);
-  assert.match(appJs, /window\.codexMobileBoot/);
-  assert.match(appJs, /markBootReady\(\);[\s\S]*if \(state\.startupThreadOpenPending\) renderCurrentThread\(\);/);
-  assert.match(appJs, /start\(\)\.catch\(\(err\) => \{/);
-  assert.match(functionBody(appJs, "refreshPageForNewBuild"), /await clearAllShellCaches\(\);[\s\S]*await resetPageShellServiceWorker\(\);/);
+  assert.match(indexHtml, /function isScriptStartupError\(event\)/);
+  assert.match(indexHtml, /tagName === "SCRIPT"/);
+  assert.match(indexHtml, /function scheduleScriptRecovery\(\)/);
+  assert.match(indexHtml, /function autoReloadForScriptStartupError\(\)/);
+  assert.match(indexHtml, /SCRIPT_AUTO_RELOAD_STORAGE_KEY/);
+  assert.match(indexHtml, /window\.sessionStorage\.setItem\(scriptAutoReloadKey\(\), "1"\)/);
+  assert.match(indexHtml, /window\.location\.replace\(cacheBustUrl\(\)\)/);
+  assert.match(indexHtml, /if \(autoReloadForScriptStartupError\(\)\) return;/);
+  assert.match(indexHtml, /clearScriptAutoReloadAttempt\(\);/);
+  assert.doesNotMatch(indexHtml, /showRecovery\("script-error"\); \}, 0\)/);
+  assert.match(appPreviewHtml, /function isScriptStartupError\(event\)/);
+  assert.match(appPreviewHtml, /tagName === "SCRIPT"/);
+  assert.match(appPreviewHtml, /function scheduleScriptRecovery\(\)/);
+  assert.match(appPreviewHtml, /function autoReloadForScriptStartupError\(\)/);
+  assert.match(indexHtml, /var APP_PREVIEW_STARTUP_RECOVERY_TIMEOUT_MS = 12000;/);
+  assert.match(indexHtml, /var APP_PREVIEW_STARTUP_RECOVERY_HARD_LIMIT_MS = 30000;/);
+  assert.match(indexHtml, /function appPreviewStartupStillPending\(\)/);
+  assert.match(indexHtml, /status\.appStartPending === true/);
+  assert.match(indexHtml, /scheduleStartupRecovery\(APP_PREVIEW_STARTUP_RECOVERY_POLL_MS\)/);
+  assert.match(indexHtml, /scheduleStartupRecovery\(isViteAppPreviewPage\(\)[\s\S]*APP_PREVIEW_STARTUP_RECOVERY_TIMEOUT_MS[\s\S]*STARTUP_RECOVERY_TIMEOUT_MS\)/);
+  assert.match(appPreviewHtml, /var APP_PREVIEW_STARTUP_RECOVERY_TIMEOUT_MS = 12000;/);
+  assert.match(appPreviewHtml, /function appPreviewStartupStillPending\(\)/);
+  assert.match(appUpdateSource, /function markBootReady\(\)/);
+  assert.match(appUpdateSource, /window\.codexMobileBoot/);
+  assert.match(appUpdateSource, /markBootReady\(\);[\s\S]*if \(state\.startupThreadOpenPending\) renderCurrentThread\(\);/);
+  assert.match(appUpdateSource, /function isRecoverablePluginStartupError\(err\)/);
+  assert.match(appUpdateSource, /function recordViteAppPreviewStartFailure\(err\)/);
+  assert.match(appUpdateSource, /status\.appStartErrorCode = appShellStartupErrorCode\(err\)/);
+  assert.match(appUpdateSource, /start\(\)\.catch\(\(err\) => \{/);
+  assert.match(appUpdateSource, /requestHermesPluginRefresh\(pluginRefreshReasonForApiError/);
+  assert.match(appUpdateSource, /boot\.fail\("app-start-error"\)/);
+  assert.match(appUpdateSource, /if \(isViteAppPreview\) throw err;/);
+  assert.match(functionBody(appUpdateSource, "refreshPageForNewBuild"), /await clearAllShellCaches\(\);[\s\S]*await resetPageShellServiceWorker\(\);/);
+});
+
+test("service worker refreshes mutable Vite shell startup assets network-first", () => {
+  assert.match(swJs, /function isShellReloadNavigation\(url\)/);
+  assert.match(swJs, /url\.searchParams\.has\("shellReload"\)/);
+  assert.match(swJs, /url\.searchParams\.has\("codexMobileBuild"\)/);
+  assert.match(swJs, /url\.searchParams\.has\("codexViteShell"\)/);
+  assert.match(swJs, /function shouldNetworkFirstShellAsset\(url\)/);
+  assert.ok(swJs.includes('path === "/vite-shell/app-preview-entry.js"'));
+  assert.ok(swJs.includes('/^\\/vite-shell\\/assets\\/vite-shell-entry-[^/]+\\.js$/.test(path)'));
+  assert.match(swJs, /function networkFirst\(request, cacheKey = request\)/);
+  assert.match(swJs, /fetch\(request, \{ cache: "reload" \}\)/);
+  assert.match(swJs, /if \(isShellReloadNavigation\(url\)\) \{[\s\S]*return networkFirst\(request, "\/index\.html"\);/);
+  assert.match(swJs, /if \(shouldNetworkFirstShellAsset\(url\)\) \{[\s\S]*event\.respondWith\(networkFirst\(request\)\);/);
+});
+
+test("service worker does not serve cached stale Vite entry before network", async () => {
+  const harness = createServiceWorkerHarness();
+  const staleEntryUrl = "https://codex.example.test/vite-shell/assets/vite-shell-entry-old.js";
+  harness.cache.set(staleEntryUrl, new Response("cached-stale-entry", { status: 200 }));
+
+  const response = await runServiceWorkerFetch(harness, {
+    method: "GET",
+    mode: "same-origin",
+    url: staleEntryUrl,
+  });
+
+  assert.equal(await response.text(), "network-stable-entry");
+  assert.deepEqual(harness.networkCalls, [{ url: staleEntryUrl, cache: "reload" }]);
+  assert.deepEqual(harness.putCalls, [staleEntryUrl]);
+});
+
+test("service worker shellReload navigation bypasses cached index first", async () => {
+  const harness = createServiceWorkerHarness();
+  harness.cache.set("/index.html", new Response("cached-index", { status: 200 }));
+
+  const response = await runServiceWorkerFetch(harness, {
+    method: "GET",
+    mode: "navigate",
+    url: "https://codex.example.test/?shellReload=123",
+  });
+
+  assert.equal(await response.text(), "network-stable-entry");
+  assert.deepEqual(harness.networkCalls, [{ url: "https://codex.example.test/?shellReload=123", cache: "reload" }]);
+  assert.deepEqual(harness.putCalls, ["/index.html"]);
 });
 
 test("public pull request check prompts before public publishing work", () => {
@@ -220,60 +412,66 @@ test("public pull request check prompts before public publishing work", () => {
   assert.match(indexHtml, /id="appNativeDialog"/);
   assert.match(stylesCss, /\.public-pr-status/);
   assert.match(stylesCss, /\.app-native-dialog/);
-  assert.match(serverJs, /workspacePath:\s*APP_ROOT/);
-  assert.match(serverJs, /publicPullRequests:/);
-  assert.match(serverJs, /\/api\/public-pull-requests\/status/);
-  assert.match(serverJs, /publicPullRequestApiUrl\(PUBLIC_PR_REPOSITORY\)/);
-  assert.match(appJs, /function renderPublicPrStatus\(\)/);
-  assert.match(appJs, /function maybePromptPublicPrMerge\(status\)/);
-  assert.match(appJs, /function publicPrMergeConfirmationMessage\(status\)/);
-  assert.match(appJs, /function publicPrMergeInstruction\(status\)/);
-  assert.match(appJs, /const PUBLIC_PR_REVIEW_THREAD_TITLE = "Codex Mobile Public PR";/);
-  assert.match(appJs, /function findPublicPrReviewThread\(workspacePath = ""\)/);
-  assert.match(appJs, /function publicPrReviewWorkspacePath\(\)/);
-  assert.match(appJs, /async function openPublicPrReviewThreadIfAvailable\(workspacePath, text\)/);
-  assert.match(appJs, /await loadThread\(target\.id, \{ source: "public-pr" \}\);/);
-  assert.match(appJs, /state\.appWorkspacePath = String\(config\.workspacePath \|\| state\.appWorkspacePath \|\| ""\)\.trim\(\);/);
-  assert.match(functionBody(appJs, "preparePublicPrMergePrompt"), /const workspacePath = publicPrReviewWorkspacePath\(\);/);
-  assert.match(functionBody(appJs, "preparePublicPrMergePrompt"), /await loadWorkspaces\(\)\.catch/);
-  assert.match(appJs, /if \(await openPublicPrReviewThreadIfAvailable\(workspacePath, text\)\) \{[\s\S]*return;[\s\S]*\}/);
-  assert.match(appJs, /state\.newThreadTitle = publicPrReviewThreadTitle\(\);[\s\S]*state\.newThreadDraft = true;|state\.newThreadDraft = true;[\s\S]*state\.newThreadTitle = publicPrReviewThreadTitle\(\);/);
-  assert.match(appJs, /body\.append\("title", submittedTitle\);/);
-  assert.match(appJs, /scheduleStartupPublicPrCheck\(\)/);
-  assert.match(appJs, /handlePublicPrStatusClick\(\)\.catch\(showError\)/);
-  assert.match(functionBody(appJs, "maybePromptPublicPrMerge"), /requestAppConfirmation\(publicPrMergeConfirmationMessage\(status\)/);
-  assert.match(functionBody(appJs, "handlePublicPrStatusClick"), /await requestAppConfirmation\(publicPrMergeConfirmationMessage\(status\)/);
+  assert.match(serverJs, /createServerRouteCompositionService/);
+  assert.match(serverRouteCompositionServiceJs, /createCoreApiRouteService/);
+  assert.match(serverJs, /appRoot:\s*APP_ROOT/);
+  assert.match(coreApiRouteServiceJs, /workspacePath:\s*appRoot/);
+  assert.match(coreApiRouteServiceJs, /publicPullRequests:/);
+  assert.match(coreApiRouteServiceJs, /\/api\/public-pull-requests\/status/);
+  assert.match(serverJs, /createServerSupportRuntimeService/);
+  assert.match(serverSupportRuntimeServiceJs, /createAppMaintenanceService/);
+  assert.match(serverJs, /publicPrRepository:\s*PUBLIC_PR_REPOSITORY/);
+  assert.match(appMaintenanceServiceJs, /publicPullRequestApiUrl\(publicPrRepository\)/);
+  assert.match(appUpdateSource, /function renderPublicPrStatus\(\)/);
+  assert.match(appUpdateSource, /function maybePromptPublicPrMerge\(status\)/);
+  assert.match(appUpdateSource, /function publicPrMergeConfirmationMessage\(status\)/);
+  assert.match(appUpdateSource, /function publicPrMergeInstruction\(status\)/);
+  assert.match(appUpdateSource, /(?:const|var) PUBLIC_PR_REVIEW_THREAD_TITLE = "Codex Mobile Public PR";/);
+  assert.match(appUpdateSource, /function findPublicPrReviewThread\(workspacePath = ""\)/);
+  assert.match(appUpdateSource, /function publicPrReviewWorkspacePath\(\)/);
+  assert.match(appUpdateSource, /async function openPublicPrReviewThreadIfAvailable\(workspacePath, text\)/);
+  assert.match(appUpdateSource, /await loadThread\(target\.id, \{ source: "public-pr" \}\);/);
+  assert.match(appUpdateSource, /state\.appWorkspacePath = String\(config\.workspacePath \|\| state\.appWorkspacePath \|\| ""\)\.trim\(\);/);
+  assert.match(functionBody(appUpdateSource, "preparePublicPrMergePrompt"), /const workspacePath = publicPrReviewWorkspacePath\(\);/);
+  assert.match(functionBody(appUpdateSource, "preparePublicPrMergePrompt"), /await loadWorkspaces\(\)\.catch/);
+  assert.match(appUpdateSource, /if \(await openPublicPrReviewThreadIfAvailable\(workspacePath, text\)\) \{[\s\S]*return;[\s\S]*\}/);
+  assert.match(appUpdateSource, /state\.newThreadTitle = publicPrReviewThreadTitle\(\);[\s\S]*state\.newThreadDraft = true;|state\.newThreadDraft = true;[\s\S]*state\.newThreadTitle = publicPrReviewThreadTitle\(\);/);
+  assert.match(composerRuntimeJs, /body\.append\("title", submittedTitle\);/);
+  assert.match(appUpdateSource, /scheduleStartupPublicPrCheck\(\)/);
+  assert.match(appUpdateSource, /handlePublicPrStatusClick\(\)\.catch\(showError\)/);
+  assert.match(functionBody(appUpdateSource, "maybePromptPublicPrMerge"), /requestAppConfirmation\(publicPrMergeConfirmationMessage\(status\)/);
+  assert.match(functionBody(appUpdateSource, "handlePublicPrStatusClick"), /await requestAppConfirmation\(publicPrMergeConfirmationMessage\(status\)/);
 });
 
 test("mobile shell action dialogs do not depend on native browser modals", () => {
   assert.match(indexHtml, /id="appNativeDialog"/);
   assert.match(indexHtml, /id="appNativeDialogInput"/);
   assert.match(stylesCss, /\.app-native-dialog/);
-  assert.match(appJs, /function requestAppAlert\(message, options = \{\}\)/);
-  assert.match(appJs, /function requestAppConfirmation\(message, options = \{\}\)/);
-  assert.match(appJs, /function requestAppTextInput\(message, value = "", options = \{\}\)/);
-  assert.doesNotMatch(appJs, /window\.(alert|confirm|prompt)\(/);
-  assert.doesNotMatch(appJs, /\balert\(/);
-  assert.doesNotMatch(appJs, /\bconfirm\(/);
-  assert.doesNotMatch(appJs, /\bprompt\(/);
-  assert.match(functionBody(appJs, "handleAppUpdateClick"), /await requestAppConfirmation\(/);
-  assert.match(functionBody(appJs, "clearSideChat"), /await requestAppConfirmation\(/);
-  assert.match(functionBody(appJs, "createThreadTaskCardFromThread"), /await requestAppTextInput\(/);
-  assert.match(functionBody(appJs, "replyTaskCard"), /await requestAppTextInput\(/);
-  assert.doesNotMatch(functionBody(appJs, "requestCodexProfileSwitchConfirmation"), /window\.confirm/);
-  assert.doesNotMatch(functionBody(appJs, "requestThreadArchiveConfirmation"), /window\.confirm/);
+  assert.match(appUpdateSource, /function requestAppAlert\(message, options = \{\}\)/);
+  assert.match(appUpdateSource, /function requestAppConfirmation\(message, options = \{\}\)/);
+  assert.match(appUpdateSource, /function requestAppTextInput\(message, value = "", options = \{\}\)/);
+  assert.doesNotMatch(appUpdateSource, /window\.(alert|confirm|prompt)\(/);
+  assert.doesNotMatch(appUpdateSource, /\balert\(/);
+  assert.doesNotMatch(appUpdateSource, /\bconfirm\(/);
+  assert.doesNotMatch(appUpdateSource, /\bprompt\(/);
+  assert.match(functionBody(appUpdateSource, "handleAppUpdateClick"), /await requestAppConfirmation\(/);
+  assert.match(functionBody(sideChatRuntimeJs, "clearSideChat"), /await requestAppConfirmation\(/);
+  assert.match(functionBody(appUpdateSource, "createThreadTaskCardFromThread"), /await requestAppTextInput\(/);
+  assert.match(functionBody(appUpdateSource, "replyTaskCard"), /await requestAppTextInput\(/);
+  assert.doesNotMatch(functionBody(appUpdateSource, "requestCodexProfileSwitchConfirmation"), /window\.confirm/);
+  assert.doesNotMatch(functionBody(appUpdateSource, "requestThreadArchiveConfirmation"), /window\.confirm/);
 });
 
 test("public pull request prompt clears stale merged PR state", () => {
-  assert.match(appJs, /function publicPrHasOpenPullRequests\(status\)/);
-  assert.match(functionBody(appJs, "handlePublicPrStatusClick"), /refreshPublicPrStatus\(\{ force: true, skipPrompt: true \}\)/);
-  assert.match(functionBody(appJs, "handlePublicPrStatusClick"), /!publicPrHasOpenPullRequests\(status\)/);
-  assert.match(functionBody(appJs, "renderPublicPrStatus"), /el\.classList\.toggle\("hidden", !checking && !hasPrs && !blocked\)/);
-  assert.match(functionBody(appJs, "refreshPublicPrStatus"), /hasOpenPullRequests: false/);
-  assert.match(functionBody(appJs, "refreshPublicPrStatus"), /openPullRequestCount: 0/);
-  assert.match(functionBody(appJs, "refreshPublicPrStatus"), /pullRequests: \[\]/);
-  assert.match(functionBody(appJs, "renderUpdatePanel"), /hasPublicPrs\s*\?\s*"Review Public PR"\s*:\s*"Check PR"/);
-  assert.match(functionBody(appJs, "renderUpdatePanel"), /primary: hasPublicPrs/);
+  assert.match(appUpdateSource, /function publicPrHasOpenPullRequests\(status\)/);
+  assert.match(functionBody(appUpdateSource, "handlePublicPrStatusClick"), /refreshPublicPrStatus\(\{ force: true, skipPrompt: true \}\)/);
+  assert.match(functionBody(appUpdateSource, "handlePublicPrStatusClick"), /!publicPrHasOpenPullRequests\(status\)/);
+  assert.match(functionBody(appUpdateSource, "renderPublicPrStatus"), /el\.classList\.toggle\("hidden", !checking && !hasPrs && !blocked\)/);
+  assert.match(functionBody(appUpdateSource, "refreshPublicPrStatus"), /hasOpenPullRequests: false/);
+  assert.match(functionBody(appUpdateSource, "refreshPublicPrStatus"), /openPullRequestCount: 0/);
+  assert.match(functionBody(appUpdateSource, "refreshPublicPrStatus"), /pullRequests: \[\]/);
+  assert.match(functionBody(appUpdateSource, "renderUpdatePanel"), /hasPublicPrs\s*\?\s*"Review Public PR"\s*:\s*"Check PR"/);
+  assert.match(functionBody(appUpdateSource, "renderUpdatePanel"), /primary: hasPublicPrs/);
 });
 
 test("public pull request prompt targets visible source workspace when production path is not visible", () => {
@@ -309,18 +507,18 @@ test("version button opens an update panel with Public release status", () => {
   assert.match(indexHtml, /id="updateDialog"/);
   assert.match(indexHtml, /id="appUpdateStatus"/);
   assert.match(stylesCss, /\.update-dialog/);
-  assert.match(serverJs, /publicRelease:/);
-  assert.match(serverJs, /\/api\/public-release\/status/);
-  assert.match(serverJs, /function publicRepositoryCommitApiUrl\(/);
-  assert.match(serverJs, /currentCheckoutUsesPublicRelease/);
-  assert.match(appJs, /function renderUpdatePanel\(\)/);
-  assert.match(appJs, /function refreshPublicReleaseStatus\(options = \{\}\)/);
-  assert.match(appJs, /function currentUpdateUsesPublicRelease\(/);
-  assert.match(appJs, /function clientBuildVersionText\(buildId = CLIENT_BUILD_ID\)/);
-  assert.match(appJs, /v\$\{version\} · \$\{client\}/);
-  assert.match(appJs, /当前客户端 \$\{CLIENT_BUILD_ID\}/);
-  assert.match(appJs, /appUpdateStatus"\)\.addEventListener\("click", openUpdatePanel\)/);
-  assert.match(appJs, /updateActionButton\("apply-current"/);
+  assert.match(coreApiRouteServiceJs, /publicRelease:/);
+  assert.match(coreApiRouteServiceJs, /\/api\/public-release\/status/);
+  assert.match(appMaintenanceServiceJs, /function publicRepositoryCommitApiUrl\(/);
+  assert.match(appMaintenanceServiceJs, /currentCheckoutUsesPublicRelease/);
+  assert.match(appUpdateSource, /function renderUpdatePanel\(\)/);
+  assert.match(appUpdateSource, /function refreshPublicReleaseStatus\(options = \{\}\)/);
+  assert.match(appUpdateSource, /function currentUpdateUsesPublicRelease\(/);
+  assert.match(appUpdateSource, /function clientBuildVersionText\(buildId = CLIENT_BUILD_ID\)/);
+  assert.match(appUpdateSource, /v\$\{version\} · \$\{client\}/);
+  assert.match(appUpdateSource, /当前客户端 \$\{CLIENT_BUILD_ID\}/);
+  assert.match(appUpdateSource, /appUpdateStatus"\)\.addEventListener\("click", openUpdatePanel\)/);
+  assert.match(appUpdateSource, /updateActionButton\("apply-current"/);
 });
 
 test("README documents manual-start update restart requirement", () => {

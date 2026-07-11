@@ -2,7 +2,7 @@
 
 const {
   diagnoseThreadDetailColdPath,
-} = require("./thread-detail-cold-path-diagnosis-service");
+} = require("../services/thread-detail/thread-detail-cold-path-diagnosis-service");
 
 function safeDurationMs(value) {
   const number = Number(value);
@@ -128,6 +128,9 @@ function buildThreadDetailDiagnostics(input = {}) {
     "activeOverlayProjectionLookupMs",
     "activeOverlayPlanMs",
     "activeOverlayWindowMs",
+    "activeOverlayBackfillWindowMs",
+    "activeOverlayFullProjectionMs",
+    "activeOverlayHistoryBaselineMs",
     "activeOverlayMergeMs",
   ]) {
     output[key] = safeDurationMs(timings[key]);

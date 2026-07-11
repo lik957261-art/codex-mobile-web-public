@@ -1,18 +1,65 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
+const { readFrontendSources } = require("./frontend-source-helper");
 
 const serverJs = fs.readFileSync(path.resolve(__dirname, "..", "server.js"), "utf8");
-const routingServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "thread-task-card-routing-service.js"), "utf8");
-const threadDetailRouteServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "thread-detail-route-service.js"), "utf8");
-const appJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "app.js"), "utf8");
+const serverRouteCompositionServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "server-routes", "server-route-composition-service.js"), "utf8");
+const apiDispatchRouteServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "server-routes", "api-dispatch-route-service.js"), "utf8");
+const apiDispatchRouteAdapterJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "api-dispatch-route-service.js"), "utf8");
+const autoTurnRecoveryServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "auto-turn-recovery-service.js"), "utf8");
+const coreApiRouteServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "server-routes", "core-api-route-service.js"), "utf8");
+const continuationThreadServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "continuation-thread-service.js"), "utf8");
+const codexAppServerClientServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "services", "runtime", "codex-app-server-client-service.js"),
+  "utf8",
+);
+const appServerRequestPolicyServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "runtime", "app-server-request-policy-service.js"), "utf8");
+const taskCardRuntimeCompositionServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "task-cards", "thread-task-card-runtime-service.js"), "utf8");
+const taskCardRouteServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "server-routes", "thread-task-card-route-service.js"), "utf8");
+const taskCardRouteAdapterJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "thread-task-card-route-service.js"), "utf8");
+const threadMessageRouteServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "server-routes", "thread-message-route-service.js"), "utf8");
+const threadSummaryStateServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "thread-list", "thread-summary-state-service.js"), "utf8");
+const threadListStateServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "thread-list", "thread-list-state-service.js"), "utf8");
+const threadListRuntimeServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "thread-list", "thread-list-runtime-service.js"), "utf8");
+const threadEventNotificationServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "runtime", "thread-event-notification-service.js"), "utf8");
+const notificationRuntimeServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "runtime", "notification-runtime-service.js"), "utf8");
+const runtimeTurnEventPipelineServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "runtime", "runtime-turn-event-pipeline-service.js"), "utf8");
+const serverEventRuntimeBoundaryServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "runtime", "server-event-runtime-boundary-service.js"), "utf8");
+const serverRuntimeConfigServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "runtime", "server-runtime-config-service.js"), "utf8");
+const routingServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "task-cards", "thread-task-card-routing-service.js"), "utf8");
+const threadDetailRouteServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "server-routes", "thread-detail-route-service.js"), "utf8");
+const threadDetailRouteAdapterJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "thread-detail-route-service.js"), "utf8");
+const threadDetailRuntimeServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "services", "thread-detail", "thread-detail-runtime-service.js"),
+  "utf8",
+);
+const threadDetailStateBridgeServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "services", "thread-detail", "thread-detail-state-bridge-service.js"),
+  "utf8",
+);
+const threadDetailResponsePreparationServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "thread-detail", "thread-detail-response-preparation-service.js"), "utf8");
+const webPushRuntimeServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "web-push-runtime-service.js"), "utf8");
+const runtimeSettingsServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "runtime", "runtime-settings-service.js"), "utf8");
+const taskCardIdempotencyServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "task-cards", "task-card-idempotency-service.js"), "utf8");
+const taskCardRuntimePolicyServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "task-cards", "task-card-runtime-policy-service.js"), "utf8");
+const appJs = readFrontendSources(path.resolve(__dirname, ".."));
+const composerRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "composer-runtime.js"), "utf8");
+const threadListRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "thread-list-runtime.js"), "utf8");
 const indexHtml = fs.readFileSync(path.resolve(__dirname, "..", "public", "index.html"), "utf8");
 const stylesCss = fs.readFileSync(path.resolve(__dirname, "..", "public", "styles.css"), "utf8");
 const createThreadTaskCardScript = fs.readFileSync(path.resolve(__dirname, "..", "scripts", "create-thread-task-card.js"), "utf8");
 const returnThreadTaskCardScript = fs.readFileSync(path.resolve(__dirname, "..", "scripts", "return-thread-task-card.js"), "utf8");
+const { createThreadTaskCardRouteService } = require("../server-routes/thread-task-card-route-service");
+const threadTaskCardRouteAdapter = require("../adapters/thread-task-card-route-service");
+
+function stableTextHash(value) {
+  return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 16);
+}
 
 function functionBody(source, name) {
   let start = source.indexOf(`function ${name}(`);
@@ -49,39 +96,53 @@ function functionSource(source, name) {
 }
 
 test("server exposes thread task card routes and enriches thread detail responses", () => {
-  assert.match(serverJs, /createThreadTaskCardService/);
-  assert.match(serverJs, /createHomeAiAutonomousDeliveryReturnService/);
-  assert.match(serverJs, /const homeAiAutonomousDeliveryReturnService = createHomeAiAutonomousDeliveryReturnService/);
-  assert.match(serverJs, /onTerminalReturnCard: async \(event\) => homeAiAutonomousDeliveryReturnService\.send\(event, \{ workspaceId: "owner" \}\)/);
+  assert.match(serverJs, /createThreadTaskCardRuntimeService/);
+  assert.match(serverJs, /require\("\.\/services\/task-cards\/thread-task-card-runtime-service"\)/);
+  assert.match(taskCardRuntimeCompositionServiceJs, /require\("\.\/thread-task-card-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-task-card-service"\)/);
+  assert.match(taskCardRuntimeCompositionServiceJs, /createHomeAiAutonomousDeliveryReturnService/);
+  assert.match(taskCardRuntimeCompositionServiceJs, /onTerminalReturnCard: async \(event\) => homeAiAutonomousDeliveryReturnService\.send\(event, \{ workspaceId: "owner" \}\)/);
   assert.doesNotMatch(serverJs, /createThreadTaskCardIntentService/);
-  assert.match(serverJs, /CODEX_MOBILE_THREAD_TASK_CARD_FILE/);
-  assert.match(serverJs, /"\/api\/thread-task-cards"/);
-  assert.doesNotMatch(serverJs, /"\/api\/thread-task-cards\/parse"/);
-  assert.match(serverJs, /const threadTaskCardApprove = url\.pathname\.match\(/);
-  assert.match(serverJs, /const threadTaskCardDelete = url\.pathname\.match\(/);
-  assert.match(serverJs, /const threadTaskCardRevoke = url\.pathname\.match\(/);
-  assert.match(serverJs, /const threadTaskCardReply = url\.pathname\.match\(/);
-  assert.match(serverJs, /const threadTaskCardExecutionPause = url\.pathname\.match\(/);
-  assert.match(serverJs, /const threadTaskCardExecutionCancel = url\.pathname\.match\(/);
-  assert.match(serverJs, /function attachThreadTaskCardsToThread\(/);
-  assert.match(serverJs, /thread\.threadTaskCards = threadTaskCardService\.listForThread\(thread\.id\)/);
-  assert.match(serverJs, /thread\.pendingIncomingTaskCardCount = taskCardCounts\.pendingIncoming/);
-  assert.match(serverJs, /function attachThreadTaskCardCountsToThreadListResult\(/);
-  assert.match(serverJs, /attachThreadTaskCardsToResult\(result\)/);
-  assert.match(serverJs, /await threadTaskCardService\.approve/);
-  assert.match(serverJs, /await threadTaskCardService\.reply/);
+  assert.match(serverJs, /THREAD_TASK_CARD_FILE/);
+  assert.match(serverRuntimeConfigServiceJs, /CODEX_MOBILE_THREAD_TASK_CARD_FILE/);
+  assert.match(taskCardRuntimeCompositionServiceJs, /createThreadTaskCardRouteService/);
+  assert.match(apiDispatchRouteServiceJs, /threadTaskCardRouteService\.handleRoute/);
+  assert.match(taskCardRouteServiceJs, /"\/api\/thread-task-cards"/);
+  assert.doesNotMatch(taskCardRouteServiceJs, /"\/api\/thread-task-cards\/parse"/);
+  assert.match(taskCardRouteServiceJs, /const threadTaskCardApprove = url\.pathname\.match\(/);
+  assert.match(taskCardRouteServiceJs, /const threadTaskCardDelete = url\.pathname\.match\(/);
+  assert.match(taskCardRouteServiceJs, /const threadTaskCardRevoke = url\.pathname\.match\(/);
+  assert.match(taskCardRouteServiceJs, /const threadTaskCardReply = url\.pathname\.match\(/);
+  assert.match(taskCardRouteServiceJs, /const threadTaskCardExecutionPause = url\.pathname\.match\(/);
+  assert.match(taskCardRouteServiceJs, /const threadTaskCardExecutionCancel = url\.pathname\.match\(/);
+  assert.match(serverJs, /createThreadDetailStateBridgeService/);
+  assert.match(serverJs, /require\("\.\/services\/thread-detail\/thread-detail-state-bridge-service"\)/);
+  assert.match(threadDetailStateBridgeServiceJs, /function attachThreadTaskCardsToThread\(/);
+  assert.match(threadDetailStateBridgeServiceJs, /thread\.threadTaskCards = typeof threadTaskCardService\.listForThread === "function"/);
+  assert.match(threadDetailStateBridgeServiceJs, /thread\.pendingIncomingTaskCardCount = Number\(counts\.pendingIncoming \|\| 0\)/);
+  assert.match(threadListStateServiceJs, /function attachThreadTaskCardCountsToThreadListResult\(/);
+  assert.match(functionBody(threadDetailStateBridgeServiceJs, "attachThreadTaskCardsToResult"), /attachThreadTaskCardsToThread\(result\.thread\)/);
+  assert.match(serverJs, /attachThreadTaskCardsToResult,/);
+  assert.match(taskCardRouteServiceJs, /await threadTaskCardService\.approve/);
+  assert.match(taskCardRouteServiceJs, /await threadTaskCardService\.reply/);
+});
+
+test("thread task card route adapter re-exports the canonical server route", () => {
+  assert.match(taskCardRouteAdapterJs, /require\("\.\.\/server-routes\/thread-task-card-route-service"\)/);
+  assert.equal(threadTaskCardRouteAdapter.createThreadTaskCardRouteService, createThreadTaskCardRouteService);
+  assert.doesNotMatch(taskCardRouteAdapterJs, /threadTaskCardService\.createMany/);
 });
 
 test("server exposes a thread-callable direct task-card interface", () => {
-  assert.ok(serverJs.includes('const sourceThreadTaskCardCreate = url.pathname.match(/^\\/api\\/threads\\/([^/]+)\\/task-cards$/);'));
-  assert.ok(serverJs.includes('const sourceThreadWorkspaceDelegation = url.pathname.match(/^\\/api\\/threads\\/([^/]+)\\/workspace-delegation$/);'));
-  const workspaceDelegationRoute = serverJs.slice(
-    serverJs.indexOf('const sourceThreadWorkspaceDelegation = url.pathname.match(/^\\/api\\/threads\\/([^/]+)\\/workspace-delegation$/);'),
-    serverJs.indexOf('const threadDetailMatch = url.pathname.match(/^\\/api\\/threads\\/([^/]+)$/);'),
+  assert.ok(taskCardRouteServiceJs.includes('const sourceThreadTaskCardCreate = url.pathname.match(/^\\/api\\/threads\\/([^/]+)\\/task-cards$/);'));
+  assert.ok(taskCardRouteServiceJs.includes('const sourceThreadWorkspaceDelegation = url.pathname.match(/^\\/api\\/threads\\/([^/]+)\\/workspace-delegation$/);'));
+  const workspaceDelegationRoute = taskCardRouteServiceJs.slice(
+    taskCardRouteServiceJs.indexOf('const sourceThreadWorkspaceDelegation = url.pathname.match(/^\\/api\\/threads\\/([^/]+)\\/workspace-delegation$/);'),
+    taskCardRouteServiceJs.indexOf('const sourceThreadTaskCardCreate = url.pathname.match(/^\\/api\\/threads\\/([^/]+)\\/task-cards$/);'),
   );
   assert.match(workspaceDelegationRoute, /disabled: true/);
   assert.match(workspaceDelegationRoute, /delegated: false/);
-  assert.match(workspaceDelegationRoute, /const workspaceDelegation = workspaceDelegationPublicSettings\(\)/);
+  assert.match(workspaceDelegationRoute, /const workspaceDelegation = workspaceDelegationSettings\(\)/);
   assert.match(workspaceDelegationRoute, /enabled: workspaceDelegation\.enabled/);
   assert.match(workspaceDelegationRoute, /reason: workspaceDelegation\.enabled/);
   assert.match(workspaceDelegationRoute, /workspace_delegation_disabled/);
@@ -89,138 +150,165 @@ test("server exposes a thread-callable direct task-card interface", () => {
   assert.doesNotMatch(serverJs, /function runWorkspaceDelegationFromSourceThread\(/);
   assert.doesNotMatch(serverJs, /analyzeWorkspaceDelegation\(/);
   assert.doesNotMatch(serverJs, /buildWorkspaceDelegationTaskCardPayload\(/);
-  assert.match(serverJs, /const RUNTIME_SETTINGS_FILE =/);
-  assert.match(serverJs, /const WORKSPACE_DELEGATION_ENV_DEFAULT =/);
-  assert.match(serverJs, /const WORKSPACE_DELEGATION_TOOL_NAMESPACE = "codex_mobile"/);
-  assert.match(serverJs, /const WORKSPACE_DELEGATION_TOOL_NAME = "delegate_to_thread"/);
-  assert.match(serverJs, /const TASK_CARD_RETURN_TOOL_NAME = "return_to_source"/);
-  assert.match(serverJs, /CODEX_MOBILE_ALLOW_WORKSPACE_DELEGATION/);
-  assert.match(serverJs, /CODEX_MOBILE_WORKSPACE_DELEGATION_ENABLED/);
-  assert.match(serverJs, /function workspaceDelegationPublicSettings\(/);
-  assert.match(serverJs, /function workspaceDelegationDynamicToolSpec\(/);
-  assert.match(serverJs, /function taskCardReturnDynamicToolSpec\(/);
-  assert.match(serverJs, /function attachTaskCardRuntimeDynamicTools\(/);
-  assert.match(serverJs, /function attachWorkspaceDelegationRuntimeGuidance\(/);
-  assert.match(serverJs, /function taskCardReturnScriptFallbackInstruction\(/);
-  assert.match(serverJs, /function workspaceDelegationScriptFallbackInstruction\(/);
-  assert.doesNotMatch(functionBody(serverJs, "workspaceDelegationTargetHints"), /threadTaskCardCanonicalVisibleTargets/);
-  assert.match(functionBody(serverJs, "workspaceDelegationTargetHints"), /threadTaskCardVisibleTargetThreads\(\)/);
-  assert.match(serverJs, /function workspaceDelegationRpcDiagnostics\(/);
-  assert.match(serverJs, /function logWorkspaceDelegationRpc\(/);
-  assert.match(serverJs, /function workspaceDelegationDynamicToolCallDiagnostics\(/);
-  assert.match(serverJs, /function logWorkspaceDelegationDynamicToolCall\(/);
-  assert.match(serverJs, /function dynamicToolServerRequestResponsePayload\(/);
-  assert.match(serverJs, /function setWorkspaceDelegationEnabled\(/);
-  assert.match(serverJs, /url\.pathname === "\/api\/settings\/workspace-delegation"/);
-  assert.match(functionBody(serverJs, "workspaceDelegationPublicSettings"), /failureRecovery:\s*enabled \? "source_model_tool_call_with_dynamic_source_write_guard" : "off"/);
-  assert.match(functionBody(serverJs, "workspaceDelegationPublicSettings"), /serverAutoTaskCardFromFailures:\s*false/);
-  assert.match(serverJs, /function buildThreadTaskCardCreatePayload\(/);
-  assert.match(serverJs, /function threadTaskCardThreadCallIdempotencyKey\(/);
-  assert.match(serverJs, /function normalizeThreadTaskCardReasoningEffort\(/);
-  assert.match(serverJs, /function resolvedThreadTaskCardTargetIds\(/);
-  assert.match(serverJs, /function threadTaskCardVisibleTargetThreads\(/);
-  assert.match(serverJs, /function threadTaskCardCanonicalVisibleTargets\(/);
-  assert.match(serverJs, /function threadTaskCardCanonicalTargetForCwd\(/);
-  assert.match(serverJs, /createThreadTaskCardRoutingService/);
-  assert.match(serverJs, /const threadTaskCardRoutingService = createThreadTaskCardRoutingService\(\{/);
-  assert.match(functionBody(serverJs, "resolveThreadTaskCardTargetReference"), /threadTaskCardRoutingService\.resolveTargetReference\(value, sourceThreadId, options\)/);
+  assert.match(serverJs, /RUNTIME_SETTINGS_FILE/);
+  assert.match(serverJs, /WORKSPACE_DELEGATION_ENV_DEFAULT/);
+  assert.match(serverRuntimeConfigServiceJs, /WORKSPACE_DELEGATION_TOOL_NAMESPACE: "codex_mobile"/);
+  assert.match(serverRuntimeConfigServiceJs, /WORKSPACE_DELEGATION_TOOL_NAME: "delegate_to_thread"/);
+  assert.match(serverRuntimeConfigServiceJs, /TASK_CARD_RETURN_TOOL_NAME: "return_to_source"/);
+  assert.match(serverRuntimeConfigServiceJs, /HOME_AI_SECRET_REF_CONSUME_PATH/);
+  assert.match(serverRuntimeConfigServiceJs, /CODEX_MOBILE_ALLOW_WORKSPACE_DELEGATION/);
+  assert.match(serverRuntimeConfigServiceJs, /CODEX_MOBILE_WORKSPACE_DELEGATION_ENABLED/);
+  assert.match(runtimeSettingsServiceJs, /function workspaceDelegationPublicSettings\(/);
+  assert.match(taskCardRouteServiceJs, /function workspaceDelegationDynamicToolSpec\(/);
+  assert.match(taskCardRouteServiceJs, /function taskCardReturnDynamicToolSpec\(/);
+  assert.match(taskCardRouteServiceJs, /function attachTaskCardRuntimeDynamicTools\(/);
+  assert.match(taskCardRouteServiceJs, /function attachWorkspaceDelegationRuntimeGuidance\(/);
+  assert.match(taskCardRouteServiceJs, /function taskCardReturnScriptFallbackInstruction\(/);
+  assert.match(taskCardRouteServiceJs, /function workspaceDelegationScriptFallbackInstruction\(/);
+  assert.doesNotMatch(functionBody(taskCardRouteServiceJs, "workspaceDelegationTargetHints"), /threadTaskCardCanonicalVisibleTargets/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationTargetHints"), /threadTaskCardVisibleTargetThreads\(\)/);
+  assert.doesNotMatch(serverJs, /function workspaceDelegationRpcDiagnostics\(/);
+  assert.match(taskCardRouteServiceJs, /function workspaceDelegationRpcDiagnostics\(/);
+  assert.match(taskCardRouteServiceJs, /function logWorkspaceDelegationRpc\(/);
+  assert.match(taskCardRouteServiceJs, /function workspaceDelegationDynamicToolCallDiagnostics\(/);
+  assert.match(taskCardRouteServiceJs, /function logWorkspaceDelegationDynamicToolCall\(/);
+  assert.match(taskCardRouteServiceJs, /function dynamicToolServerRequestResponsePayload\(/);
+  assert.match(runtimeSettingsServiceJs, /function setWorkspaceDelegationEnabled\(/);
+  assert.match(coreApiRouteServiceJs, /url\.pathname === "\/api\/settings\/workspace-delegation"/);
+  assert.match(functionBody(runtimeSettingsServiceJs, "workspaceDelegationPublicSettings"), /failureRecovery:\s*enabled \? "source_model_tool_call_with_dynamic_source_write_guard" : "off"/);
+  assert.match(functionBody(runtimeSettingsServiceJs, "workspaceDelegationPublicSettings"), /serverAutoTaskCardFromFailures:\s*false/);
+  assert.match(taskCardRouteServiceJs, /function buildThreadTaskCardCreatePayload\(/);
+  assert.match(taskCardRouteServiceJs, /function threadTaskCardThreadCallIdempotencyKey\(/);
+  assert.match(taskCardRouteServiceJs, /function normalizeThreadTaskCardReasoningEffort\(/);
+  assert.match(taskCardRouteServiceJs, /function resolvedThreadTaskCardTargetIds\(/);
+  assert.match(taskCardRouteServiceJs, /function threadTaskCardVisibleTargetThreads\(/);
+  assert.match(taskCardRouteServiceJs, /function threadTaskCardCanonicalVisibleTargets\(/);
+  assert.match(taskCardRouteServiceJs, /function threadTaskCardCanonicalTargetForCwd\(/);
+  assert.match(taskCardRouteServiceJs, /createThreadTaskCardRoutingService/);
+  assert.match(taskCardRouteServiceJs, /require\("\.\.\/services\/task-cards\/thread-task-card-routing-service"\)/);
+  assert.doesNotMatch(taskCardRouteServiceJs, /require\("\.\.\/adapters\/thread-task-card-routing-service"\)/);
+  assert.match(taskCardRouteServiceJs, /const threadTaskCardRoutingService = createThreadTaskCardRoutingService\(\{/);
+  assert.match(functionBody(taskCardRouteServiceJs, "resolveThreadTaskCardTargetReference"), /threadTaskCardRoutingService\.resolveTargetReference\(value, sourceThreadId, options\)/);
   assert.match(routingServiceJs, /function createThreadTaskCardRoutingService\(/);
   assert.match(routingServiceJs, /function resolveTargetReference\(/);
   assert.match(routingServiceJs, /const visibleThreads = visibleTargetThreads\(options\)/);
-  assert.match(serverJs, /function assertThreadTaskCardTargetDeliverable\(/);
+  assert.match(taskCardRouteServiceJs, /function assertThreadTaskCardTargetDeliverable\(/);
   assert.match(routingServiceJs, /target_thread_self/);
   assert.match(routingServiceJs, /target_thread_archived/);
   assert.match(routingServiceJs, /target_thread_not_visible/);
   assert.doesNotMatch(routingServiceJs, /return raw;/);
-  assert.match(functionBody(serverJs, "buildThreadTaskCardCreatePayload"), /if \(!targetThreadIds\.length\)/);
-  assert.match(functionBody(serverJs, "buildThreadTaskCardCreatePayload"), /target_thread_required/);
-  assert.match(serverJs, /thread-task-card-deploy-lane-policy-service/);
-  assert.match(functionBody(serverJs, "workspaceDelegationTargetHints"), /prioritizeDelegationTargetHints/);
-  assert.match(functionBody(serverJs, "normalizeThreadSummaryLiveStatus"), /normalizeHomeAiDeployLaneSummary/);
-  assert.match(functionBody(serverJs, "buildThreadTaskCardCreatePayload"), /applyHomeAiDeployLaneRoutingPolicy/);
-  assert.match(functionBody(serverJs, "applyHomeAiDeployLaneRoutingPolicy"), /planHomeAiDeployLaneRouting/);
-  assert.match(functionBody(serverJs, "applyHomeAiDeployLaneRoutingPolicy"), /deploy_lane_required/);
-  assert.match(functionBody(serverJs, "createThreadTaskCardsFromSourceThread"), /workspaceDelegationPublicSettings\(\)/);
-  assert.match(functionBody(serverJs, "createThreadTaskCardsFromSourceThread"), /workspaceDelegation\.enabled[\s\S]*body\.autoApprove !== false[\s\S]*body\.direct !== false[\s\S]*body\.pending !== true/);
-  assert.match(functionBody(serverJs, "threadTaskCardThreadCallIdempotencyKey"), /body\.requestId \|\| body\.request_id/);
-  assert.match(functionBody(serverJs, "threadTaskCardThreadCallIdempotencyKey"), /reasoningEffort: normalizeThreadTaskCardReasoningEffort/);
-  assert.doesNotMatch(functionBody(serverJs, "threadTaskCardThreadCallIdempotencyKey"), /body\.sourceTurnId \|\| body\.turnId/);
-  assert.match(functionBody(serverJs, "dynamicToolTextResponse"), /success/);
-  assert.match(functionBody(serverJs, "dynamicToolTextResponse"), /contentItems:\s*\[/);
-  assert.match(functionBody(serverJs, "dynamicToolTextResponse"), /type: "inputText"/);
-  assert.doesNotMatch(functionBody(serverJs, "dynamicToolTextResponse"), /content_items|input_text|\bcontent:\s*\[|type: "text"/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /Mandatory boundary when this tool is available/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /call this tool before doing that work/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /Do not inspect, cd into, edit, patch, run commands in, test, deploy/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /failed with sandbox, filesystem, permission denied, operation not permitted, cwd, or approval-policy errors/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /do not retry locally or merely report blocked/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /source model must call this tool/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /The model must decide from the user's request whether delegation is required/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /always creates source-direct cards/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /Archived, deleted, hidden, subagent, or non-detail-readable targetThreadId values are rejected/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /Several normal threads may share the same cwd\/workspace/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /reasoningEffort/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /REASONING_EFFORT_OPTIONS/);
-  assert.doesNotMatch(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /latest visible canonical thread/);
-  assert.doesNotMatch(functionBody(serverJs, "workspaceDelegationDynamicToolSpec"), /pending:\s*\{/);
-  assert.match(functionBody(serverJs, "taskCardReturnDynamicToolSpec"), /A plain final answer in the target thread is not a source-thread return card/);
-  assert.match(functionBody(serverJs, "taskCardReturnDynamicToolSpec"), /Task card id/);
-  assert.match(functionBody(serverJs, "taskCardRuntimeDynamicTools"), /taskCardReturnDynamicToolSpec\(\)/);
-  assert.match(functionBody(serverJs, "taskCardRuntimeDynamicTools"), /workspaceDelegationPublicSettings\(settings\)\.enabled/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolBody"), /body\.direct = true/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolBody"), /body\.autoApprove = true/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolBody"), /body\.pending = false/);
-  assert.doesNotMatch(functionBody(serverJs, "workspaceDelegationDynamicToolBody"), /params\.callId \|\| params\.call_id/);
-  assert.match(functionBody(serverJs, "attachWorkspaceDelegationRuntimeGuidance"), /attachTaskCardRuntimeDynamicTools\(params, settings\)/);
-  assert.match(functionBody(serverJs, "attachWorkspaceDelegationRuntimeGuidance"), /taskCardReturnScriptFallbackInstruction\(params\)/);
-  assert.match(functionBody(serverJs, "attachWorkspaceDelegationRuntimeGuidance"), /workspaceDelegationScriptFallbackInstruction\(params\)/);
-  assert.match(functionBody(serverJs, "taskCardReturnScriptFallbackInstruction"), /return-thread-task-card\.js/);
-  assert.match(functionBody(serverJs, "taskCardReturnScriptFallbackInstruction"), /local final answer in the target thread is not a source-thread return card/);
-  assert.match(functionBody(serverJs, "workspaceDelegationScriptFallbackInstruction"), /create-thread-task-card\.js/);
-  assert.match(functionBody(serverJs, "workspaceDelegationScriptFallbackInstruction"), /deferred tool discovery such as `tool_search`/);
-  assert.match(functionBody(serverJs, "workspaceDelegationScriptFallbackInstruction"), /first-class fallback path/);
-  assert.match(functionBody(serverJs, "workspaceDelegationScriptFallbackInstruction"), /multi_agent_v1\.spawn_agent/);
-  assert.match(functionBody(serverJs, "workspaceDelegationScriptFallbackInstruction"), /must not be used as a substitute/);
-  assert.match(functionBody(serverJs, "applyStartThreadRuntimeSettings"), /attachWorkspaceDelegationRuntimeGuidance\(params\)/);
-  assert.match(functionBody(serverJs, "applyTurnRuntimeSettings"), /attachWorkspaceDelegationRuntimeGuidance\(params\)/);
-  assert.match(functionBody(serverJs, "sendRpc"), /const serializedPayload = JSON\.stringify\(payload\)/);
-  assert.match(functionBody(serverJs, "sendRpc"), /logWorkspaceDelegationRpc\(method, params\);[\s\S]*this\.ws\.send\(serializedPayload\)/);
-  assert.match(functionBody(serverJs, "handleServerRequest"), /msg\.method === "item\/tool\/call"[\s\S]*answerDynamicToolServerRequest\(request\)/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /createThreadTaskCardsFromSourceThread\(body\.sourceThreadId, body\)/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /threadTaskCardService\.reply\(prepared\.taskCardId, prepared\.actorThreadId, prepared\.body\)/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /TASK_CARD_RETURN_TOOL_FULL_NAME/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /replyCardTerminal: Boolean/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /replyCardRequiresReturn: Boolean/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /replyCardAckPolicy:/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /forcedDirect: true/);
-  assert.match(functionBody(serverJs, "taskCardReturnDynamicToolBody"), /returnToSource: true/);
-  assert.match(functionBody(serverJs, "taskCardReturnDynamicToolBody"), /const status = normalizedTaskCardReturnStatus/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /logWorkspaceDelegationDynamicToolCall\(request, params, args, \{[\s\S]*outcome: "ok"/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /outcome: "unsupported_dynamic_tool"/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /outcome: "source_thread_id_required"/);
-  assert.match(functionBody(serverJs, "dynamicToolServerRequestResponsePayload"), /outcome: "target_thread_required"/);
-  assert.match(functionBody(serverJs, "workspaceDelegationRpcDiagnostics"), /dynamicToolsCount: toolNames\.length/);
-  assert.match(functionBody(serverJs, "workspaceDelegationRpcDiagnostics"), /hasWorkspaceDelegationTool: toolNames\.includes\(WORKSPACE_DELEGATION_TOOL_FULL_NAME\)/);
-  assert.match(functionBody(serverJs, "workspaceDelegationRpcDiagnostics"), /hasFallbackGuidance:/);
-  assert.match(functionBody(serverJs, "workspaceDelegationRpcDiagnostics"), /developerInstructionsChars:/);
-  assert.doesNotMatch(functionBody(serverJs, "workspaceDelegationRpcDiagnostics"), /developerInstructions:\s/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolCallDiagnostics"), /targetRefCount: threadTaskCardTargetReferences\(args\)\.length/);
-  assert.match(functionBody(serverJs, "workspaceDelegationDynamicToolCallDiagnostics"), /hasBody: Boolean/);
-  assert.doesNotMatch(functionBody(serverJs, "workspaceDelegationDynamicToolCallDiagnostics"), /bodyMarkdown:[\s\S]*args\.bodyMarkdown/);
+  assert.match(functionBody(taskCardRouteServiceJs, "buildThreadTaskCardCreatePayload"), /if \(!targetThreadIds\.length\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "buildThreadTaskCardCreatePayload"), /target_thread_required/);
+  assert.match(taskCardRouteServiceJs, /require\("\.\.\/services\/task-cards\/thread-task-card-deploy-lane-policy-service"\)/);
+  assert.doesNotMatch(taskCardRouteServiceJs, /require\("\.\.\/adapters\/thread-task-card-deploy-lane-policy-service"\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationTargetHints"), /prioritizeDelegationTargetHints/);
+  assert.match(functionBody(threadDetailStateBridgeServiceJs, "normalizeThreadSummaryLiveStatus"), /callThreadSummaryState\("normalizeThreadSummaryLiveStatus"/);
+  assert.match(functionBody(threadSummaryStateServiceJs, "normalizeThreadSummaryLiveStatus"), /normalizeHomeAiDeployLaneSummary/);
+  assert.match(functionBody(taskCardRouteServiceJs, "buildThreadTaskCardCreatePayload"), /applyHomeAiDeployLaneRoutingPolicy/);
+  assert.match(functionBody(taskCardRouteServiceJs, "applyHomeAiDeployLaneRoutingPolicy"), /planHomeAiDeployLaneRouting/);
+  assert.match(functionBody(taskCardRouteServiceJs, "applyHomeAiDeployLaneRoutingPolicy"), /deploy_lane_required/);
+  assert.match(functionBody(taskCardRouteServiceJs, "createThreadTaskCardsFromSourceThread"), /workspaceDelegationSettings\(\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "createThreadTaskCardsFromSourceThread"), /workspaceDelegation\.enabled[\s\S]*body\.autoApprove !== false[\s\S]*body\.direct !== false[\s\S]*body\.pending !== true/);
+  assert.match(taskCardRouteServiceJs, /task-card-idempotency-service/);
+  assert.match(taskCardIdempotencyServiceJs, /function threadTaskCardThreadCallIdempotencyKey/);
+  assert.match(functionBody(taskCardRouteServiceJs, "threadTaskCardThreadCallIdempotencyKey"), /canonicalThreadTaskCardThreadCallIdempotencyKey/);
+  assert.match(functionBody(taskCardRouteServiceJs, "threadTaskCardThreadCallIdempotencyKey"), /normalizeReasoningEffort: normalizeThreadTaskCardReasoningEffort/);
+  assert.match(taskCardIdempotencyServiceJs, /isSemanticPluginDeployment/);
+  assert.match(taskCardIdempotencyServiceJs, /!semanticPluginDeployment && requestId/);
+  assert.doesNotMatch(functionBody(taskCardRouteServiceJs, "threadTaskCardThreadCallIdempotencyKey"), /body\.sourceTurnId \|\| body\.turnId/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolTextResponse"), /success/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolTextResponse"), /contentItems:\s*\[/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolTextResponse"), /type: "inputText"/);
+  assert.doesNotMatch(functionBody(taskCardRouteServiceJs, "dynamicToolTextResponse"), /content_items|input_text|\bcontent:\s*\[|type: "text"/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /Mandatory boundary when this tool is available/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /call this tool before doing that work/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /Do not inspect, cd into, edit, patch, run commands in, test, deploy/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /failed with sandbox, filesystem, permission denied, operation not permitted, cwd, or approval-policy errors/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /do not retry locally or merely report blocked/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /source model must call this tool/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /The model must decide from the user's request whether delegation is required/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /always creates source-direct cards/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /Archived, deleted, hidden, subagent, or non-detail-readable targetThreadId values are rejected/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /Several normal threads may share the same cwd\/workspace/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /reasoningEffort/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /secretRef/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /targetPlugin/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /effortOptions/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /pluginId/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /replyToThreadId/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /multi-hop supplement/);
+  assert.match(functionBody(taskCardRouteServiceJs, "applyHomeAiDeployLaneRoutingPolicy"), /expectedDeployLaneTitle/);
+  assert.doesNotMatch(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /latest visible canonical thread/);
+  assert.doesNotMatch(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /pending:\s*\{/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardReturnDynamicToolSpec"), /A plain final answer in the target thread is not a source-thread return card/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardReturnDynamicToolSpec"), /Task card id/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardRuntimeDynamicTools"), /taskCardReturnDynamicToolSpec\(\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardRuntimeDynamicTools"), /workspaceDelegationSettings\(settings\)\.enabled/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolBody"), /body\.direct = true/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolBody"), /body\.autoApprove = true/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolBody"), /body\.pending = false/);
+  assert.doesNotMatch(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolBody"), /params\.callId \|\| params\.call_id/);
+  assert.match(functionBody(taskCardRouteServiceJs, "attachWorkspaceDelegationRuntimeGuidance"), /attachTaskCardRuntimeDynamicTools\(params, settings\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "attachWorkspaceDelegationRuntimeGuidance"), /taskCardReturnScriptFallbackInstruction\(params\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "attachWorkspaceDelegationRuntimeGuidance"), /workspaceDelegationScriptFallbackInstruction\(params\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardReturnScriptFallbackInstruction"), /return-thread-task-card\.js/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardReturnScriptFallbackInstruction"), /local final answer in the target thread is not a source-thread return card/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationScriptFallbackInstruction"), /create-thread-task-card\.js/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationScriptFallbackInstruction"), /deferred tool discovery such as `tool_search`/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationScriptFallbackInstruction"), /first-class fallback path/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationScriptFallbackInstruction"), /multi_agent_v1\.spawn_agent/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationScriptFallbackInstruction"), /must not be used as a substitute/);
+  assert.match(functionBody(taskCardRuntimePolicyServiceJs, "applyStartThreadRuntimeSettings"), /attachWorkspaceDelegationRuntimeGuidance\(params\)/);
+  assert.match(functionBody(taskCardRuntimePolicyServiceJs, "applyTurnRuntimeSettings"), /attachWorkspaceDelegationRuntimeGuidance\(params\)/);
+  assert.match(functionBody(codexAppServerClientServiceJs, "sendRpc"), /const serializedPayload = JSON\.stringify\(payload\)/);
+  assert.match(functionBody(codexAppServerClientServiceJs, "sendRpc"), /logWorkspaceDelegationRpc\(method, params\);[\s\S]*this\.ws\.send\(serializedPayload\)/);
+  assert.match(functionBody(codexAppServerClientServiceJs, "handleServerRequest"), /msg\.method === "item\/tool\/call"[\s\S]*answerDynamicToolServerRequest\(request\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /createThreadTaskCardsFromSourceThread\(body\.sourceThreadId, body\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /threadTaskCardService\.reply\(prepared\.taskCardId, prepared\.actorThreadId, prepared\.body\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /taskCardReturnToolFullName/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardReturnDynamicToolBody"), /workflowId/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /replyCardTerminal: Boolean/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /replyCardRequiresReturn: Boolean/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /replyCardAckPolicy:/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /forcedDirect: true/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardReturnDynamicToolBody"), /returnToSource: true/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardReturnDynamicToolBody"), /const status = normalizedTaskCardReturnStatus/);
+  assert.match(taskCardIdempotencyServiceJs, /replyToThreadId/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /logWorkspaceDelegationDynamicToolCall\(request, params, args, \{[\s\S]*outcome: "ok"/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /outcome: "unsupported_dynamic_tool"/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /outcome: "source_thread_id_required"/);
+  assert.match(functionBody(taskCardRouteServiceJs, "dynamicToolServerRequestResponsePayload"), /outcome: "target_thread_required"/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationRpcDiagnostics"), /dynamicToolsCount: toolNames\.length/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationRpcDiagnostics"), /hasWorkspaceDelegationTool: toolNames\.includes\(workspaceDelegationToolFullName\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationRpcDiagnostics"), /hasFallbackGuidance:/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationRpcDiagnostics"), /developerInstructionsChars:/);
+  assert.doesNotMatch(functionBody(taskCardRouteServiceJs, "workspaceDelegationRpcDiagnostics"), /developerInstructions:\s/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolCallDiagnostics"), /targetRefCount: threadTaskCardTargetReferences\(args\)\.length/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolCallDiagnostics"), /hasBody: Boolean/);
+  assert.doesNotMatch(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolCallDiagnostics"), /bodyMarkdown:[\s\S]*args\.bodyMarkdown/);
   assert.match(routingServiceJs, /targetWorkspace/);
   assert.match(routingServiceJs, /targetCwd/);
-  assert.match(routingServiceJs, /canonicalTargetForCwd\(rawPath, visibleThreads\)/);
-  assert.match(workspaceDelegationRoute, /details: err\.details/);
-  assert.match(serverJs, /"item\/tool\/call"/);
-  assert.match(serverJs, /const service = options\.threadTaskCardService \|\| threadTaskCardService/);
-  assert.match(serverJs, /service\.approveFromSource\(card\.id, payload\.sourceThreadId\)/);
-  assert.match(serverJs, /direct: autoApprove/);
-  assert.match(serverJs, /workspaceDelegationEnabled: workspaceDelegation\.enabled/);
-  assert.match(serverJs, /workspaceDelegation,\s+hermesPlugin:/);
+  assert.match(routingServiceJs, /visibleTargetsForCwd\(rawPath, visibleThreads, sourceThreadId\)/);
+  assert.match(routingServiceJs, /target_workspace_ambiguous/);
+  assert.match(functionBody(taskCardRouteServiceJs, "workspaceDelegationDynamicToolSpec"), /Thread identity is the exact targetThreadId/);
+  const sourceThreadTaskCardCreateRoute = taskCardRouteServiceJs.slice(
+    taskCardRouteServiceJs.indexOf('const sourceThreadTaskCardCreate = url.pathname.match(/^\\/api\\/threads\\/([^/]+)\\/task-cards$/);'),
+    taskCardRouteServiceJs.indexOf('if (url.pathname === "/api/thread-task-cards" && method === "POST")'),
+  );
+  assert.match(sourceThreadTaskCardCreateRoute, /details: err\.details/);
+  assert.match(appServerRequestPolicyServiceJs, /"item\/tool\/call"/);
+  assert.match(taskCardRouteServiceJs, /const service = options\.threadTaskCardService \|\| threadTaskCardService/);
+  assert.match(taskCardRouteServiceJs, /service\.approveFromSource\(card\.id, payload\.sourceThreadId\)/);
+  assert.match(taskCardRouteServiceJs, /direct: autoApprove/);
+  assert.match(taskCardRouteServiceJs, /workspaceDelegationEnabled: workspaceDelegation\.enabled/);
+  assert.match(coreApiRouteServiceJs, /workspaceDelegation,\s+hermesPlugin:/);
   assert.match(createThreadTaskCardScript, /\/api\/threads\/\$\{encodeURIComponent\(sourceThreadId\)\}\/task-cards/);
   assert.match(createThreadTaskCardScript, /CODEX_MOBILE_KEY_FILE/);
   assert.match(createThreadTaskCardScript, /--pending/);
   assert.match(createThreadTaskCardScript, /--reasoning-effort <value>/);
+  assert.match(createThreadTaskCardScript, /--secret-ref <sec_\.\.\.>/);
+  assert.match(createThreadTaskCardScript, /--reply-to-thread <id>/);
+  assert.match(createThreadTaskCardScript, /replyToThreadId/);
   assert.match(createThreadTaskCardScript, /Settings -> 跨工作区委派/);
   assert.match(returnThreadTaskCardScript, /\/api\/thread-task-cards\/\$\{encodeURIComponent\(taskCardId\)\}\/reply/);
   assert.match(returnThreadTaskCardScript, /CODEX_MOBILE_KEY_FILE/);
@@ -229,14 +317,15 @@ test("server exposes a thread-callable direct task-card interface", () => {
   assert.match(returnThreadTaskCardScript, /partially_completed/);
   assert.match(returnThreadTaskCardScript, /returnToSource = true/);
   assert.match(returnThreadTaskCardScript, /task-card-return:/);
-  assert.match(functionBody(serverJs, "taskCardReturnDynamicToolSpec"), /rejected/);
-  assert.match(functionBody(serverJs, "taskCardReturnDynamicToolSpec"), /partially_completed/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardReturnDynamicToolSpec"), /rejected/);
+  assert.match(functionBody(taskCardRouteServiceJs, "taskCardReturnDynamicToolSpec"), /partially_completed/);
 });
 
 test("thread task card routes preserve service status codes", () => {
-  const routeBlock = serverJs.slice(
-    serverJs.indexOf('if (url.pathname === "/api/thread-task-cards" && req.method === "POST")'),
-    serverJs.indexOf('if (url.pathname === "/api/workspaces" && req.method === "GET")'),
+  const routeStart = taskCardRouteServiceJs.indexOf('if (url.pathname === "/api/thread-task-cards" && method === "POST")');
+  const routeBlock = taskCardRouteServiceJs.slice(
+    routeStart,
+    taskCardRouteServiceJs.indexOf('return { handled: false };', routeStart),
   );
   assert.match(routeBlock, /threadTaskCardService\.createMany/);
   assert.match(routeBlock, /threadTaskCardService\.get/);
@@ -246,111 +335,425 @@ test("thread task card routes preserve service status codes", () => {
   assert.match(routeBlock, /threadTaskCardService\.reply/);
   assert.match(routeBlock, /threadTaskCardService\.pauseExecution/);
   assert.match(routeBlock, /threadTaskCardService\.cancelExecution/);
-  assert.match(serverJs, /function maybeAutoReplyThreadTaskCard\(/);
-  assert.match(serverJs, /threadTaskCardService\.maybeAutoReplyCompletedTurn/);
-  assert.match(serverJs, /threadTaskCardService\.maybeResumeInterruptedTaskCard/);
-  assert.match(serverJs, /maybeAutoReplyThreadTaskCard\(msg\.method, msg\.params \|\| null\)/);
-  const statusPreservingErrors = routeBlock.match(/sendJson\(res, err\.statusCode \|\| 500, \{ ok: false, error: err\.message \|\| String\(err\) \}\);/g) || [];
+  assert.match(serverJs, /createNotificationRuntimeService/);
+  assert.match(notificationRuntimeServiceJs, /runtimeTurnEventPipelineServiceFactory/);
+  assert.match(serverJs, /createServerEventRuntimeBoundaryService/);
+  assert.match(serverEventRuntimeBoundaryServiceJs, /"maybeAutoReplyThreadTaskCard"/);
+  assert.doesNotMatch(serverJs, /function maybeAutoReplyThreadTaskCard\(/);
+  assert.match(runtimeTurnEventPipelineServiceJs, /threadTaskCardService\.maybeAutoReplyCompletedTurn/);
+  assert.match(runtimeTurnEventPipelineServiceJs, /threadTaskCardService\.maybeResumeInterruptedTaskCard/);
+  assert.match(notificationRuntimeServiceJs, /maybeApplyQueuedThreadSideChat/);
+  assert.match(notificationRuntimeServiceJs, /threadTaskCardService: dependencies\.threadTaskCardService/);
+  assert.match(codexAppServerClientServiceJs, /maybeAutoReplyThreadTaskCard\(msg\.method, msg\.params \|\| null\)/);
+  const statusPreservingErrors = routeBlock.match(/sendJson\(err\.statusCode \|\| 500, \{ ok: false, error: err\.message \|\| String\(err\) \}\);/g) || [];
   assert.equal(statusPreservingErrors.length, 8);
 });
 
 test("approved task cards inherit target thread model and effort", () => {
-  const setupBlock = serverJs.slice(
-    serverJs.indexOf("const threadTaskCardService = createThreadTaskCardService"),
-    serverJs.indexOf("const PUSH_VAPID_FILE"),
-  );
+  const setupBlock = taskCardRuntimeCompositionServiceJs;
   assert.match(setupBlock, /const requestedReasoningEffort = String\(card && card\.delivery && card\.delivery\.reasoningEffort/);
-  assert.match(setupBlock, /const inheritedRuntimeSettings = await resolveThreadRuntimeSettings\(card\.target\.threadId\);/);
-  assert.match(setupBlock, /Object\.assign\(\{\}, inheritedRuntimeSettings, \{ reasoningEffort: requestedReasoningEffort \}\)/);
+  assert.match(setupBlock, /const inheritedRuntimeSettings = await dependencies\.resolveThreadRuntimeSettings\(card\.target\.threadId\);/);
+  assert.match(setupBlock, /const targetThread = readThreadTaskCardExecutionTargetSummary\(card\);/);
+  assert.match(setupBlock, /const targetIsDeployLane = isHomeAiDeployLaneThread\(targetThread\);/);
+  assert.match(setupBlock, /const baseRuntimeSettings = targetIsDeployLane/);
+  assert.match(setupBlock, /dependencies\.applyPermissionModeOverride\(inheritedRuntimeSettings, "full", targetThread && targetThread\.cwd \|\| null\)/);
+  assert.match(setupBlock, /Object\.assign\(\{\}, baseRuntimeSettings, \{ reasoningEffort: requestedReasoningEffort \}\)/);
   assert.match(setupBlock, /thread\/resume", applyResumeRuntimeSettings\(/);
   assert.match(setupBlock, /const turnParams = applyTurnRuntimeSettings\(/);
   assert.match(setupBlock, /codex\.request\("turn\/start", turnParams/);
   assert.match(setupBlock, /requestedReasoningEffort/);
   assert.match(setupBlock, /runtime:\s*\{[\s\S]*reasoningEffort: runtimeSettings\.reasoningEffort \|\| ""/);
+  assert.match(setupBlock, /approvalPolicy: runtimeSettings\.approvalPolicy \|\| ""/);
+  assert.match(setupBlock, /sandboxPolicyType: runtimeSettings\.sandboxPolicy && runtimeSettings\.sandboxPolicy\.type \|\| ""/);
+  assert.match(setupBlock, /deployLaneNoApproval: targetIsDeployLane/);
   assert.match(setupBlock, /notifyLocalTurnStarted\(card\.target\.threadId, result, \{/);
   assert.match(setupBlock, /source: "thread-task-card-approval"/);
-  assert.match(functionBody(serverJs, "applyTurnRuntimeSettings"), /if \(settings\.reasoningEffort\) params\.effort = settings\.reasoningEffort;/);
-  assert.match(functionBody(serverJs, "applyTurnRuntimeSettings"), /if \(settings\.model\) params\.model = settings\.model;/);
+  assert.match(notificationRuntimeServiceJs, /const webPushRuntimeService = webPushRuntimeServiceFactory/);
+  assert.match(webPushRuntimeServiceJs, /function maybeSendTurnCompletedPush\(method, params\)/);
+  assert.match(functionBody(taskCardRuntimePolicyServiceJs, "applyTurnRuntimeSettings"), /if \(settings\.reasoningEffort\) params\.effort = settings\.reasoningEffort;/);
+  assert.match(functionBody(taskCardRuntimePolicyServiceJs, "applyTurnRuntimeSettings"), /if \(settings\.model\) params\.model = settings\.model;/);
+});
+
+test("approved task-card deploy lane runtime uses visible target metadata when stored summary is sparse", () => {
+  const helperBody = functionBody(taskCardRouteServiceJs, "readThreadTaskCardExecutionTargetSummary");
+  assert.match(helperBody, /const stored = readThreadTaskCardTargetSummary\(threadId\) \|\| null;/);
+  assert.match(helperBody, /const visible = readThreadTaskCardVisibleTargetSummary\(threadId\) \|\| null;/);
+  assert.match(helperBody, /Object\.assign\(\{\}, stored \|\| \{\}, target, visible \|\| \{\}\)/);
+  assert.match(helperBody, /if \(!String\(merged\.cwd \|\| ""\)\.trim\(\) && targetWorkspace\) merged\.cwd = targetWorkspace;/);
+  assert.match(helperBody, /const visibleTitle = String\(visible && \(visible\.name \|\| visible\.title/);
+  assert.match(helperBody, /const title = visibleTitle \|\| storedTitle \|\| targetTitle;/);
+  const visibleHelperBody = functionBody(taskCardRouteServiceJs, "readThreadTaskCardVisibleTargetSummary");
+  assert.match(visibleHelperBody, /threadTaskCardVisibleTargetThreads\(\)/);
+  assert.match(visibleHelperBody, /Array\.isArray\(visibleThreads\) \? visibleThreads : \[\]/);
+});
+
+test("approved task-card deploy lane runtime prefers live visible lane title over sparse stored summary", () => {
+  const service = createThreadTaskCardRouteService({
+    threadTaskCardService: {},
+    readStateDbThread: () => ({ id: "thread-movie", title: "019f16e6-9b3d-7ec1-b593-3a6a41a24fb1" }),
+    readStartedThread: () => null,
+    readRolloutSessionFallbackThread: () => null,
+    readThreadListFallback: () => [
+      { id: "thread-movie", name: "Movie Deploy Lane", cwd: "/Users/hermes-dev/HermesMobileDev/app" },
+    ],
+    threadDisplayTitle: (thread) => thread && (thread.name || thread.title || thread.preview || thread.id) || "",
+  });
+
+  const summary = service.readThreadTaskCardExecutionTargetSummary({
+    target: {
+      threadId: "thread-movie",
+      workspaceId: "/Users/hermes-dev/HermesMobileDev/app",
+      title: "Home AI Deploy",
+    },
+  });
+
+  assert.equal(summary.name, "Movie Deploy Lane");
+  assert.equal(summary.title, "Movie Deploy Lane");
+  assert.equal(summary.preview, "Movie Deploy Lane");
+  assert.equal(summary.cwd, "/Users/hermes-dev/HermesMobileDev/app");
+});
+
+test("approved task-card visible target summary helper is runtime executable", () => {
+  const service = createThreadTaskCardRouteService({
+    threadTaskCardService: {},
+    readThreadListFallback: () => [
+      { id: "thread-other", name: "Other" },
+      { id: "thread-movie", name: "Movie Deploy Lane", cwd: "/Users/hermes-dev/HermesMobileDev/app" },
+    ],
+  });
+
+  assert.equal(service.readThreadTaskCardVisibleTargetSummary("thread-movie").name, "Movie Deploy Lane");
+
+  const emptyService = createThreadTaskCardRouteService({
+    threadTaskCardService: {},
+    readThreadListFallback: () => null,
+  });
+
+  assert.equal(emptyService.readThreadTaskCardVisibleTargetSummary("thread-movie"), null);
+});
+
+test("workspace delegation RPC diagnostics are route-owned and bounded", () => {
+  const lines = [];
+  const service = createThreadTaskCardRouteService({
+    threadTaskCardService: {},
+    workspaceDelegationPublicSettings: () => ({ enabled: true }),
+    logger: {
+      log: (line) => lines.push(line),
+      error: (line) => lines.push(line),
+    },
+  });
+
+  const diagnostics = service.workspaceDelegationRpcDiagnostics("turn/start", {
+    thread_id: "thread-1234567890",
+    cwd: "/Users/hermes-dev/HermesMobileDev/plugins/codex-mobile-web",
+    dynamicTools: [
+      { namespace: "codex_mobile", name: "delegate_to_thread" },
+      { fullName: "codex_mobile.delegate_to_thread" },
+      { toolNamespace: "codex_mobile", toolName: "return_to_source" },
+    ],
+    developerInstructions: "Codex Mobile cross-thread delegation fallback:\nprivate body omitted",
+    sandboxPolicy: { type: "dangerFullAccess" },
+    permissionProfile: { type: "disabled" },
+    approval_policy: "never",
+  });
+
+  assert.equal(diagnostics.method, "turn/start");
+  assert.equal(diagnostics.workspaceDelegationEnabled, true);
+  assert.equal(diagnostics.dynamicToolsCount, 2);
+  assert.deepEqual(diagnostics.dynamicToolNames, [
+    "codex_mobile.delegate_to_thread",
+    "codex_mobile.return_to_source",
+  ]);
+  assert.equal(diagnostics.hasWorkspaceDelegationTool, true);
+  assert.equal(diagnostics.hasFallbackGuidance, true);
+  assert.equal(diagnostics.developerInstructions, undefined);
+  assert.equal(diagnostics.sandboxPolicyType, "dangerFullAccess");
+  assert.equal(diagnostics.permissionProfileType, "disabled");
+
+  service.logWorkspaceDelegationRpc("turn/start", {
+    dynamicTools: [{ namespace: "codex_mobile", name: "delegate_to_thread" }],
+  });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^\[workspace-delegation-rpc\] /);
+  assert.doesNotMatch(lines[0], /private body omitted/);
+});
+
+test("return_to_source dynamic tool prefers explicit target thread over app-server params thread", async () => {
+  const calls = [];
+  const service = createThreadTaskCardRouteService({
+    threadTaskCardService: {
+      reply: async (cardId, actorThreadId, body) => {
+        calls.push({ cardId, actorThreadId, body });
+        assert.equal(cardId, "ttc_xcode_to_health");
+        assert.equal(actorThreadId, "health-thread");
+        assert.equal(body.threadId, "health-thread");
+        return {
+          card: { status: "replied" },
+          replyCard: {
+            id: "ttc_return_card",
+            status: "approved",
+            terminal: true,
+            requiresReturn: false,
+            ackPolicy: "none",
+            source: { threadId: "health-thread" },
+            target: { threadId: "xcode-thread" },
+          },
+        };
+      },
+    },
+    stableTextHash,
+    logger: { log() {}, error() {} },
+  });
+
+  const response = await service.dynamicToolServerRequestResponsePayload({
+    id: "request-return",
+    params: {
+      fullName: "codex_mobile.return_to_source",
+      threadId: "xcode-thread",
+      arguments: {
+        taskCardId: "ttc_xcode_to_health",
+        threadId: "health-thread",
+        workflowId: "health-return-workflow",
+        status: "completed",
+        title: "Health result",
+        body: "Completed in Health.",
+      },
+    },
+  });
+  const payloadText = response.result.contentItems[0].text;
+  const payload = JSON.parse(payloadText);
+
+  assert.equal(payload.ok, true);
+  assert.equal(payload.actorThreadId, "health-thread");
+  assert.equal(payload.replyCardId, "ttc_return_card");
+  assert.equal(calls[0].body.workflowId, "health-return-workflow");
+  assert.equal(calls.length, 1);
+});
+
+test("return_to_source dynamic tool reports workflow actor mismatch evidence", async () => {
+  const service = createThreadTaskCardRouteService({
+    threadTaskCardService: {
+      reply: async (cardId, actorThreadId, body) => {
+        assert.equal(cardId, "ttc_stale_home_ai_card");
+        assert.equal(actorThreadId, "home-ai-task-intake");
+        assert.equal(body.workflowId, "home-ai-intake-workflow");
+        const err = new Error("workflow_actor_mismatch");
+        err.statusCode = 403;
+        err.details = {
+          workflowId: "home-ai-intake-workflow",
+          taskCardId: "ttc_stale_home_ai_card",
+          requestedActorThreadId: "home-ai-task-intake",
+          expectedActorThreadId: "home-ai-implementation",
+          resolverVersion: "task-card-exact-routing-v1",
+        };
+        throw err;
+      },
+    },
+    stableTextHash,
+    logger: { log() {}, error() {} },
+  });
+
+  const response = await service.dynamicToolServerRequestResponsePayload({
+    id: "request-return",
+    params: {
+      fullName: "codex_mobile.return_to_source",
+      threadId: "home-ai-task-intake",
+      workflowId: "home-ai-intake-workflow",
+      arguments: {
+        taskCardId: "ttc_stale_home_ai_card",
+        status: "completed",
+        title: "Owner Console result",
+        body: "Completed in Home AI implementation.",
+      },
+    },
+  });
+  const payload = JSON.parse(response.result.contentItems[0].text);
+
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error, "workflow_actor_mismatch");
+  assert.equal(payload.statusCode, 403);
+  assert.equal(payload.details.workflowId, "home-ai-intake-workflow");
+  assert.equal(payload.details.requestedActorThreadId, "home-ai-task-intake");
+  assert.equal(payload.details.expectedActorThreadId, "home-ai-implementation");
+  assert.equal(payload.details.resolverVersion, "task-card-exact-routing-v1");
+});
+
+test("source-thread task-card route uses semantic idempotency for routine plugin deployments", () => {
+  const service = createThreadTaskCardRouteService({
+    threadTaskCardService: {},
+    stableTextHash,
+    readThreadListFallback: () => [
+      { id: "source-thread", name: "Codex Mobile Implementation", cwd: "/Users/hermes-dev/HermesMobileDev/plugins/codex-mobile-web" },
+      { id: "deploy-lane", name: "Codex Mobile Deploy Lane", cwd: "/Users/hermes-dev/HermesMobileDev/app" },
+    ],
+    readStateDbThread: (threadId) => {
+      if (threadId === "source-thread") return { id: "source-thread", title: "Codex Mobile Implementation", cwd: "/Users/hermes-dev/HermesMobileDev/plugins/codex-mobile-web" };
+      if (threadId === "deploy-lane") return { id: "deploy-lane", title: "deploy-lane" };
+      return null;
+    },
+    threadDisplayTitle: (thread) => thread && (thread.name || thread.title || thread.preview || thread.id) || "",
+  });
+  const deployBody = {
+    targetThreadId: "deploy-lane",
+    cardKind: "plugin_deployment",
+    pluginId: "codex-mobile-web",
+    title: "Deploy Codex Mobile",
+    body: "Deploy source ref fd39e541 for reason runtime-boundary-fix",
+    workflowMode: "autonomous",
+  };
+  const firstDeploy = service.buildThreadTaskCardCreatePayload(Object.assign({}, deployBody, { requestId: "dynamic-tool-call" }), "source-thread");
+  const retryDeploy = service.buildThreadTaskCardCreatePayload(Object.assign({}, deployBody, { requestId: "fallback-script-retry" }), "source-thread");
+  assert.equal(firstDeploy.idempotencyKey, retryDeploy.idempotencyKey);
+
+  const ordinaryBody = {
+    targetThreadId: "deploy-lane",
+    title: "Repair Codex Mobile",
+    body: "Investigate an implementation issue",
+    workflowMode: "autonomous",
+  };
+  const firstOrdinary = service.buildThreadTaskCardCreatePayload(Object.assign({}, ordinaryBody, { requestId: "dynamic-tool-call" }), "source-thread");
+  const retryOrdinary = service.buildThreadTaskCardCreatePayload(Object.assign({}, ordinaryBody, { requestId: "fallback-script-retry" }), "source-thread");
+  assert.notEqual(firstOrdinary.idempotencyKey, retryOrdinary.idempotencyKey);
+});
+
+test("source-thread task-card route persists exact role routing evidence", () => {
+  const service = createThreadTaskCardRouteService({
+    threadTaskCardService: {},
+    stableTextHash,
+    readThreadListFallback: () => [
+      { id: "source-thread", name: "Home AI Task Intake", cwd: "/Users/hermes-dev/HermesMobileDev/app", role: "home_ai_task_intake" },
+      { id: "implementation-thread", name: "Home AI 06-22", cwd: "/Users/hermes-dev/HermesMobileDev/app", role: "home_ai_implementation" },
+      { id: "audit-thread", name: "Plugin Workspace Audit", cwd: "/Users/hermes-dev/HermesMobileDev/app", role: "plugin_workspace_audit" },
+    ],
+    readStateDbThread: (threadId) => {
+      if (threadId === "source-thread") return { id: "source-thread", title: "Home AI Task Intake", cwd: "/Users/hermes-dev/HermesMobileDev/app", role: "home_ai_task_intake" };
+      if (threadId === "implementation-thread") return { id: "implementation-thread", title: "Home AI 06-22", cwd: "/Users/hermes-dev/HermesMobileDev/app", role: "home_ai_implementation" };
+      if (threadId === "audit-thread") return { id: "audit-thread", title: "Plugin Workspace Audit", cwd: "/Users/hermes-dev/HermesMobileDev/app", role: "plugin_workspace_audit" };
+      return null;
+    },
+    threadDisplayTitle: (thread) => thread && (thread.name || thread.title || thread.preview || thread.id) || "",
+  });
+
+  const payload = service.buildThreadTaskCardCreatePayload({
+    targetRole: "home_ai_implementation",
+    title: "Repair Home AI",
+    body: "Repair and return with bounded evidence.",
+    workflowMode: "autonomous",
+    requestId: "exact-role-call",
+  }, "source-thread");
+
+  assert.deepEqual(payload.targetThreadIds, ["implementation-thread"]);
+  assert.equal(payload.sourceRole, "home_ai_task_intake");
+  assert.equal(payload.targetRole, "home_ai_implementation");
+  assert.equal(payload.routeKind, "implementation");
+  assert.equal(payload.resolverVersion, "task-card-exact-routing-v1");
+  assert.equal(payload.routeResolution.resolverVersion, "task-card-exact-routing-v1");
+  assert.equal(payload.routeResolution.inputReferenceKind, "role");
+  assert.deepEqual(payload.routeResolution.inputReferenceKinds, ["role"]);
+  assert.deepEqual(payload.routeResolution.matchedThreadIds, ["implementation-thread"]);
+  assert.equal(payload.routeResolution.sourceThreadId, "source-thread");
+  assert.equal(payload.routeResolution.targetThreadId, "implementation-thread");
+  assert.equal(payload.routeResolution.code, "exact_thread_resolved");
 });
 
 test("server broadcasts lightweight thread status for background turn notifications", () => {
-  const broadcastBody = functionBody(serverJs, "broadcast");
+  const broadcastBody = functionBody(threadEventNotificationServiceJs, "broadcast");
   assert.match(broadcastBody, /threadStatusChangedPayloadFromTurnNotification\(payload\)/);
   assert.match(broadcastBody, /applyThreadStatusPayloadToThreadListFallbackCache\(statusPayload\);\s*broadcast\(statusPayload\);/);
 
-  const statusPayloadBody = functionBody(serverJs, "threadStatusChangedPayloadFromTurnNotification");
+  const statusPayloadBody = functionBody(threadEventNotificationServiceJs, "threadStatusChangedPayloadFromTurnNotification");
   assert.match(statusPayloadBody, /method !== "turn\/started" && method !== "turn\/completed"/);
   assert.match(statusPayloadBody, /method === "turn\/started"[\s\S]*\{ type: "active" \}/);
   assert.match(statusPayloadBody, /turn\.status \|\| payload\.params\.status \|\| \{ type: "completed" \}/);
 
-  const eventFilterBody = functionBody(serverJs, "shouldSendEventToClient");
+  const eventFilterBody = functionBody(threadEventNotificationServiceJs, "shouldSendEventToClient");
   assert.match(eventFilterBody, /payload\.method === "thread\/status\/changed"[\s\S]*return true;/);
-  assert.match(functionBody(serverJs, "broadcastThreadStatusChanged"), /applyThreadStatusPayloadToThreadListFallbackCache\(payload\);\s*broadcast\(payload\);/);
+  assert.match(functionBody(threadEventNotificationServiceJs, "broadcastThreadStatusChanged"), /applyThreadStatusPayloadToThreadListFallbackCache\(payload\);\s*broadcast\(payload\);/);
 });
 
 test("server broadcasts active status immediately for local turn starts", () => {
-  const helperBody = functionBody(serverJs, "notifyLocalTurnStarted");
+  const helperBody = functionBody(threadEventNotificationServiceJs, "notifyLocalTurnStarted");
   assert.match(helperBody, /const turnId = turnStartResultTurnId\(result\)/);
   assert.match(helperBody, /rememberLocalActiveThreadStatus\(id, turnId/);
   assert.match(helperBody, /threadDetailProjectionService\.applyNotification\("turn\/started"/);
   assert.match(helperBody, /broadcastThreadStatusChanged\(id, \{ type: "active" \}/);
   assert.match(helperBody, /source: String\(meta\.source \|\| "local-turn-start"\)/);
 
-  assert.match(serverJs, /const localActiveThreadStatuses = new Map\(\);/);
-  assert.match(serverJs, /function applyLocalActiveThreadStatusToSummary\(/);
-  assert.match(serverJs, /function updateLocalActiveThreadStatusFromNotification\(/);
-  assert.match(functionBody(serverJs, "broadcast"), /updateLocalActiveThreadStatusFromNotification\(payload\)/);
-  assert.match(functionBody(serverJs, "prepareThreadDetailResponseResult"), /applyLocalActiveThreadStatusToResult/);
-  assert.match(functionBody(serverJs, "normalizeThreadListResultStatuses"), /normalizeThreadSummaryLiveStatus/);
+  assert.match(threadSummaryStateServiceJs, /const localActiveThreadStatuses = dependencies\.localActiveThreadStatuses instanceof Map/);
+  assert.match(serverJs, /applyLocalActiveThreadStatusToSummary,/);
+  assert.match(functionBody(threadDetailStateBridgeServiceJs, "applyLocalActiveThreadStatusToSummary"), /callThreadSummaryState\("applyLocalActiveThreadStatusToSummary"/);
+  assert.match(threadEventNotificationServiceJs, /function updateLocalActiveThreadStatusFromNotification\(/);
+  assert.match(functionBody(threadEventNotificationServiceJs, "broadcast"), /updateLocalActiveThreadStatusFromNotification\(payload\)/);
+  assert.match(functionBody(threadDetailRuntimeServiceJs, "prepareThreadDetailResponseResult"), /requireResponsePreparationService\(\)\.prepareThreadDetailResponseResult/);
+  assert.match(functionBody(threadDetailResponsePreparationServiceJs, "prepareThreadDetailResponseResult"), /applyLocalActiveThreadStatusToResult/);
+  assert.match(functionBody(threadListRuntimeServiceJs, "normalizeThreadListResultStatuses"), /normalizeThreadSummaryLiveStatus/);
 
-  assert.match(serverJs, /notifyLocalTurnStarted\(card\.target\.threadId, result, \{[\s\S]*source: "thread-task-card-approval"/);
-  assert.match(serverJs, /notifyLocalTurnStarted\(threadId, turnResult, \{ source: "message-submit" \}\)/);
-  assert.match(serverJs, /notifyLocalTurnStarted\(threadId, turnResult, \{ source: "new-thread-message" \}\)/);
-  assert.match(serverJs, /notifyLocalTurnStarted\(id, result, \{ source: "auto-turn-recovery" \}\)/);
+  assert.match(taskCardRuntimeCompositionServiceJs, /notifyLocalTurnStarted\(card\.target\.threadId, result, \{[\s\S]*source: "thread-task-card-approval"/);
+  assert.match(threadMessageRouteServiceJs, /notifyLocalTurnStarted\(threadId, turnResult, \{ source: "message-submit" \}\)/);
+  assert.match(threadMessageRouteServiceJs, /notifyLocalTurnStarted\(threadId, turnResult, \{ source: "new-thread-message" \}\)/);
+  assert.match(autoTurnRecoveryServiceJs, /notifyLocalTurnStarted\(id, result, \{ source: "auto-turn-recovery" \}\)/);
   assert.match(serverJs, /notifyLocalTurnStarted\(threadId, result, \{ source: "side-chat-apply" \}\)/);
-  assert.match(serverJs, /notifyLocalTurnStarted\(threadId, result, \{ source: "continuation-source-handoff" \}\)/);
-  assert.match(serverJs, /notifyLocalTurnStarted\(threadId, bootstrap, \{ source: "continuation-bootstrap" \}\)/);
+  assert.match(continuationThreadServiceJs, /notifyLocalTurnStarted\(threadId, result, \{ source: "continuation-source-handoff" \}\)/);
+  assert.match(continuationThreadServiceJs, /notifyLocalTurnStarted\(threadId, bootstrap, \{ source: "continuation-bootstrap" \}\)/);
 });
 
 test("server materializes structured task-card drafts from thread detail", () => {
-  assert.match(serverJs, /const THREAD_TASK_CARD_DRAFT_TAG = "codex-mobile-thread-task-card-draft"/);
-  assert.match(serverJs, /const THREAD_TASK_CARD_BODY_MAX_CHARS = 8_000/);
-  assert.match(serverJs, /const THREAD_TASK_CARD_DRAFT_TURN_LOOKBACK = 4/);
-  assert.match(serverJs, /function parseThreadTaskCardDraftText\(/);
-  assert.match(serverJs, /function truncateThreadTaskCardBody\(/);
-  assert.match(serverJs, /function materializeThreadTaskCardDraftsForThread\(/);
-  assert.match(serverJs, /function maybeMaterializeThreadTaskCardDrafts\(/);
-  assert.match(serverJs, /function prepareThreadTaskCardsToResult\(/);
-  assert.match(functionBody(serverJs, "maybeMaterializeThreadTaskCardDrafts"), /method !== "turn\/completed"/);
-  assert.match(functionBody(serverJs, "maybeMaterializeThreadTaskCardDrafts"), /codex\.request\("thread\/turns\/list"/);
-  assert.match(functionBody(serverJs, "maybeMaterializeThreadTaskCardDrafts"), /await materializeThreadTaskCardDraftsForThread\(thread\)/);
-  assert.match(functionBody(serverJs, "materializeThreadTaskCardDraftsForThread"), /const itemText = threadTaskCardItemText\(item\);/);
-  assert.match(functionBody(serverJs, "materializeThreadTaskCardDraftsForThread"), /if \(!itemText\.includes\(THREAD_TASK_CARD_DRAFT_TAG\)\) continue;/);
-  assert.match(functionBody(serverJs, "materializeThreadTaskCardDraftsForThread"), /const draft = parseThreadTaskCardDraftText\(itemText\);/);
-  assert.match(functionBody(serverJs, "materializeThreadTaskCardDraftsForThread"), /readStateDbThread\(targetThreadId\) \|\| readStartedThread\(targetThreadId\)/);
-  assert.match(functionBody(serverJs, "materializeThreadTaskCardDraftsForThread"), /const body = truncateThreadTaskCardBody\(draft\.body\)/);
-  assert.match(functionBody(serverJs, "materializeThreadTaskCardDraftsForThread"), /threadTaskCardService\.createMany/);
-  assert.match(functionBody(serverJs, "materializeThreadTaskCardDraftsForThread"), /threadTaskCardDraftIdempotencyKey\(sourceThreadId, turnId, draft\)/);
-  assert.doesNotMatch(functionBody(serverJs, "materializeThreadTaskCardDraftsForThread"), /body: draft\.body/);
-  assert.match(functionBody(serverJs, "prepareThreadTaskCardsToResult"), /await materializeThreadTaskCardDraftsForThread\(result\.thread\)/);
-  assert.match(functionBody(serverJs, "prepareThreadTaskCardsToResult"), /attachThreadTaskCardsToResult\(result\)/);
-  assert.match(functionBody(serverJs, "prepareThreadTaskCardsToResult"), /attachPendingServerRequestsToResult/);
-  assert.doesNotMatch(functionBody(serverJs, "prepareThreadTaskCardsToResult"), /prepareThreadTaskCardsToResult\(result\)/);
-  assert.match(functionBody(serverJs, "prepareThreadDetailResponseResult"), /const completionBackfilled = backfillMissingRolloutCompletionTurnsForDetailResult\(result, details\);/);
-  assert.match(functionBody(serverJs, "prepareThreadDetailResponseResult"), /const detailResult = attachRolloutUsageSummariesToDetailResult\(completionBackfilled\);/);
-  assert.match(functionBody(serverJs, "prepareThreadDetailResponseResult"), /await prepareThreadTaskCardsToResult\(applyLocalActiveThreadStatusToResult\(detailResult, details\)\)/);
-  assert.match(functionBody(serverJs, "prepareThreadDetailResponseResult"), /finalizeThreadDetailProjectionResult/);
-  assert.match(functionBody(serverJs, "turnsListThreadReadResult"), /return prepareThreadDetailResponseResult\(result/);
-  assert.match(serverJs, /maybeMaterializeThreadTaskCardDrafts\(msg\.method, msg\.params \|\| null\)/);
-  assert.match(serverJs, /prepareResponse: prepareThreadDetailResponseResult/);
-  assert.match(serverJs, /threadDetailReadOrchestrationService\.readThreadDetail/);
-  assert.match(serverJs, /handleThreadDetailReadRoute\(\{/);
+  assert.match(serverRuntimeConfigServiceJs, /THREAD_TASK_CARD_DRAFT_TAG: "codex-mobile-thread-task-card-draft"/);
+  assert.match(serverRuntimeConfigServiceJs, /THREAD_TASK_CARD_BODY_MAX_CHARS: 8_000/);
+  assert.match(serverRuntimeConfigServiceJs, /THREAD_TASK_CARD_DRAFT_TURN_LOOKBACK: 4/);
+  assert.match(taskCardRouteServiceJs, /function parseThreadTaskCardDraftText\(/);
+  assert.match(taskCardRouteServiceJs, /function truncateThreadTaskCardBody\(/);
+  assert.match(taskCardRouteServiceJs, /function materializeThreadTaskCardDraftsForThread\(/);
+  assert.match(serverJs, /createNotificationRuntimeService/);
+  assert.match(notificationRuntimeServiceJs, /runtimeTurnEventPipelineServiceFactory/);
+  assert.match(serverEventRuntimeBoundaryServiceJs, /"maybeMaterializeThreadTaskCardDrafts"/);
+  assert.doesNotMatch(serverJs, /function maybeMaterializeThreadTaskCardDrafts\(/);
+  assert.match(taskCardRouteServiceJs, /function prepareThreadTaskCardsToResult\(/);
+  assert.match(functionBody(runtimeTurnEventPipelineServiceJs, "maybeMaterializeThreadTaskCardDrafts"), /method !== "turn\/completed"/);
+  assert.match(functionBody(runtimeTurnEventPipelineServiceJs, "maybeMaterializeThreadTaskCardDrafts"), /codex\.request\("thread\/turns\/list"/);
+  assert.match(functionBody(runtimeTurnEventPipelineServiceJs, "maybeMaterializeThreadTaskCardDrafts"), /await options\.materializeThreadTaskCardDraftsForThread\(thread\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "materializeThreadTaskCardDraftsForThread"), /const itemText = threadTaskCardItemText\(item\);/);
+  assert.match(functionBody(taskCardRouteServiceJs, "materializeThreadTaskCardDraftsForThread"), /if \(!itemText\.includes\(threadTaskCardDraftTag\)\) continue;/);
+  assert.match(functionBody(taskCardRouteServiceJs, "materializeThreadTaskCardDraftsForThread"), /const draft = parseThreadTaskCardDraftText\(itemText\);/);
+  assert.match(functionBody(taskCardRouteServiceJs, "materializeThreadTaskCardDraftsForThread"), /readStateDbThread\(targetThreadId\) \|\| readStartedThread\(targetThreadId\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "materializeThreadTaskCardDraftsForThread"), /const body = truncateThreadTaskCardBody\(draft\.body\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "materializeThreadTaskCardDraftsForThread"), /threadTaskCardService\.createMany/);
+  assert.match(functionBody(taskCardRouteServiceJs, "materializeThreadTaskCardDraftsForThread"), /threadTaskCardDraftIdempotencyKey\(sourceThreadId, turnId, draft\)/);
+  assert.doesNotMatch(functionBody(taskCardRouteServiceJs, "materializeThreadTaskCardDraftsForThread"), /body: draft\.body/);
+  assert.match(functionBody(taskCardRouteServiceJs, "prepareThreadTaskCardsToResult"), /await materializeThreadTaskCardDraftsForThread\(result\.thread\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "prepareThreadTaskCardsToResult"), /attachThreadTaskCardsToResult\(result\)/);
+  assert.match(functionBody(taskCardRouteServiceJs, "prepareThreadTaskCardsToResult"), /attachPendingServerRequestsToResult/);
+  assert.doesNotMatch(functionBody(taskCardRouteServiceJs, "prepareThreadTaskCardsToResult"), /prepareThreadTaskCardsToResult\(result\)/);
+  const prepareDetailBody = functionBody(threadDetailResponsePreparationServiceJs, "prepareThreadDetailResponseResult");
+  assert.match(functionBody(threadDetailRuntimeServiceJs, "prepareThreadDetailResponseResult"), /requireResponsePreparationService\(\)\.prepareThreadDetailResponseResult/);
+  assert.match(prepareDetailBody, /const completionBackfilled = backfillMissingRolloutCompletionTurnsForDetailResult\(result, details\);/);
+  assert.match(prepareDetailBody, /const usageDecorated = attachRolloutUsageSummariesToDetailResult\(completionBackfilled\);/);
+  assert.match(prepareDetailBody, /const inputAnchored = appendRolloutUserInputAnchorsToDetailResult\(usageDecorated\);/);
+  assert.match(prepareDetailBody, /const activeAssistantDecorated = appendRolloutActiveAssistantItemsToDetailResult\(inputAnchored\);/);
+  assert.match(prepareDetailBody, /const detailResult = finalizeActiveAssistantProjectionDetailResult\(activeAssistantDecorated\);/);
+  assert.match(prepareDetailBody, /await prepareThreadTaskCardsToResult\(applyLocalActiveThreadStatusToResult\(detailResult, details\)\)/);
+  assert.match(prepareDetailBody, /finalizeThreadDetailProjectionResult/);
+  assert.match(prepareDetailBody, /const budgetOptions = Object\.assign\(\{\}, responseBudgetOptions\(\) \|\| \{\}, \{/);
+  assert.doesNotMatch(prepareDetailBody, /THREAD_DETAIL_|MAX_LIVE_OPERATION_ITEMS/);
+  assert.match(functionBody(threadDetailRuntimeServiceJs, "turnsListThreadReadResult"), /requireResponsePreparationService\(\)\.turnsListThreadReadResult/);
+  assert.match(functionBody(threadDetailResponsePreparationServiceJs, "turnsListThreadReadResult"), /return prepareThreadDetailResponseResult\(result/);
+  assert.match(notificationRuntimeServiceJs, /materializeThreadTaskCardDraftsForThread: dependencies\.materializeThreadTaskCardDraftsForThread/);
+  assert.match(notificationRuntimeServiceJs, /threadTaskCardService: dependencies\.threadTaskCardService/);
+  assert.match(codexAppServerClientServiceJs, /maybeMaterializeThreadTaskCardDrafts\(msg\.method, msg\.params \|\| null\)/);
+  assert.match(threadDetailRuntimeServiceJs, /prepareResponse: prepareThreadDetailResponseResult/);
+  assert.match(apiDispatchRouteServiceJs, /threadDetailReadOrchestrationService\.readThreadDetail/);
+  assert.match(apiDispatchRouteServiceJs, /handleThreadDetailReadRoute\(\{/);
   assert.match(threadDetailRouteServiceJs, /const preferRecentTurns = detailModeFromUrl\(url\) === "recent"/);
   assert.match(threadDetailRouteServiceJs, /sendJson\(status, body\)/);
+  assert.match(serverJs, /require\("\.\/server-routes\/server-route-composition-service"\)/);
+  assert.match(serverRouteCompositionServiceJs, /require\("\.\/api-dispatch-route-service"\)/);
+  assert.match(apiDispatchRouteAdapterJs, /require\("\.\.\/server-routes\/api-dispatch-route-service"\)/);
+  assert.match(serverJs, /require\("\.\/server-routes\/thread-detail-route-service"\)/);
+  assert.match(threadDetailRouteAdapterJs, /require\("\.\.\/server-routes\/thread-detail-route-service"\)/);
 });
 
 test("conversation render includes task card signature, toolbar, and action handlers", () => {
-  assert.match(appJs, /CLIENT_BUILD_ID = "0\.1\.11\|codex-mobile-shell-v\d+"/);
+  assert.match(appJs, /clientBuildId": "0\.1\.12\|codex-mobile-shell-v\d+(?:-[a-f0-9]{12})?"/);
   assert.match(appJs, /function threadTaskCardsForThread\(/);
   assert.match(appJs, /filter\(\(card\) => String\(card && card\.status \|\| ""\) === "pending"\)/);
   assert.match(appJs, /filter\(\(card\) => String\(card && card\.threadRole \|\| ""\) === "target"\)/);
@@ -360,7 +763,7 @@ test("conversation render includes task card signature, toolbar, and action hand
   assert.match(appJs, /settleThreadTaskCardForThread\(threadId, id, action === "approve" \? "approved" : action === "delete" \? "deleted" : action === "revoke" \? "revoked" : "replied"/);
   assert.match(appJs, /function threadTaskCardsSignature\(/);
   assert.match(appJs, /taskCards: threadTaskCardsSignature\(thread\)/);
-  assert.match(appJs, /thread-card-task-badge/);
+  assert.match(threadListRuntimeJs, /thread-card-task-badge/);
   assert.match(appJs, /function renderThreadTaskToolbar\(/);
   assert.match(appJs, /data-create-thread-task-card/);
   assert.match(functionBody(appJs, "renderThreadTaskToolbar"), /data-thread-action-thread-id/);
@@ -379,7 +782,7 @@ test("conversation render includes task card signature, toolbar, and action hand
   assert.match(appJs, /function loadThreadTaskCardBody\(/);
   assert.match(functionBody(appJs, "loadThreadTaskCardBody"), /\/api\/thread-task-cards\/\$\{encodeURIComponent\(id\)\}\?threadId=\$\{encodeURIComponent\(ownerThreadId\)\}/);
   assert.match(appJs, /handleThreadTaskCardDetailsToggle/);
-  assert.match(appJs, /const threadDetailActionsApi = window\.CodexThreadDetailActions/);
+  assert.match(appJs, /(?:const|var) threadDetailActionsApi = window\.CodexThreadDetailActions/);
   assert.match(appJs, /threadDetailActionsApi\.resolveThreadDetailClickAction/);
   assert.match(appJs, /function createThreadTaskCardFromCurrent\(/);
   assert.match(appJs, /function createThreadTaskCardFromThread\(/);
@@ -397,11 +800,11 @@ test("conversation render includes task card signature, toolbar, and action hand
   assert.match(functionBody(appJs, "bindCurrentThreadActions"), /threadActionContextFromElement\(button\)/);
   assert.match(appJs, /function isThreadTaskCardCommandText\(/);
   assert.match(appJs, /function sendThreadTaskCardCommand\(/);
-  assert.match(functionBody(appJs, "sendMessage"), /await sendThreadTaskCardCommand\(text\)/);
-  assert.match(appJs, /const THREAD_TASK_CARD_COMMAND_PREFIX = "#"/);
-  assert.match(appJs, /const THREAD_TASK_CARD_LEGACY_COMMAND_PREFIX = "#自由协作"/);
-  assert.match(appJs, /const THREAD_TASK_CARD_MENTION_PATTERN = \/\^@\(任务卡片\|Task\\s\*Card\|TaskCard\)/);
-  assert.match(appJs, /const THREAD_TASK_CARD_AUTONOMOUS_MENTION_PATTERN = \/\^@\(自由协作\|Autonomous\|Auto\\s\*Task\\s\*Card\|AutoTaskCard\)/);
+  assert.match(functionBody(composerRuntimeJs, "sendMessage"), /await sendThreadTaskCardCommand\(text\)/);
+  assert.match(appJs, /(?:const|var) THREAD_TASK_CARD_COMMAND_PREFIX = "#"/);
+  assert.match(appJs, /(?:const|var) THREAD_TASK_CARD_LEGACY_COMMAND_PREFIX = "#自由协作"/);
+  assert.match(appJs, /(?:const|var) THREAD_TASK_CARD_MENTION_PATTERN = \/\^@\(任务卡片\|Task\\s\*Card\|TaskCard\)/);
+  assert.match(appJs, /(?:const|var) THREAD_TASK_CARD_AUTONOMOUS_MENTION_PATTERN = \/\^@\(自由协作\|Autonomous\|Auto\\s\*Task\\s\*Card\|AutoTaskCard\)/);
   assert.match(functionBody(appJs, "isThreadTaskCardCommandText"), /startsWith\(THREAD_TASK_CARD_COMMAND_PREFIX\)/);
   assert.match(functionBody(appJs, "isThreadTaskCardCommandText"), /THREAD_TASK_CARD_MENTION_PATTERN\.test\(text\)/);
   assert.match(functionBody(appJs, "isThreadTaskCardCommandText"), /THREAD_TASK_CARD_AUTONOMOUS_MENTION_PATTERN\.test\(text\)/);
@@ -423,22 +826,22 @@ test("conversation render includes task card signature, toolbar, and action hand
   assert.match(indexHtml, /id="composerIntentMenu"/);
   assert.match(indexHtml, /id="composerIntentDialog"/);
   assert.match(indexHtml, /id="composerIntentBodyInput"[\s\S]*maxlength="12000"/);
-  assert.match(appJs, /function composerIntentOptions\(/);
+  assert.match(composerRuntimeJs, /function composerIntentOptions\(/);
   assert.match(appJs, /@任务卡片/);
   assert.match(appJs, /@自由协作/);
-  assert.match(appJs, /function normalizedComposerIntentText\(/);
-  assert.match(functionBody(appJs, "normalizedComposerIntentText"), /\\u200B-\\u200D\\uFEFF/);
-  assert.match(functionBody(appJs, "shouldShowComposerIntentMenu"), /normalizedComposerIntentText\(composerText\(\)\) === "@"/);
+  assert.match(composerRuntimeJs, /function normalizedComposerIntentText\(/);
+  assert.match(functionBody(composerRuntimeJs, "normalizedComposerIntentText"), /\\u200B-\\u200D\\uFEFF/);
+  assert.match(functionBody(composerRuntimeJs, "shouldShowComposerIntentMenu"), /normalizedComposerIntentText\(composerText\(\)\) === "@"/);
   assert.match(appJs, /function queueComposerIntentMenuUpdate\(/);
   assert.match(appJs, /addEventListener\("keyup", queueComposerIntentMenuUpdate\)/);
   assert.match(appJs, /addEventListener\("focus", queueComposerIntentMenuUpdate\)/);
   assert.match(appJs, /addEventListener\("compositionstart", \(\) => \{[\s\S]*state\.composerComposing = true;/);
   assert.match(appJs, /addEventListener\("compositionend", \(event\) => \{[\s\S]*state\.composerComposing = false;/);
   assert.match(appJs, /addEventListener\("compositionend", \(event\) => \{[\s\S]*queueComposerIntentMenuUpdate\(\);/);
-  assert.match(functionBody(appJs, "positionComposerIntentMenu"), /const anchor = \$\("messageInput"\) \|\| \$\("composer"\)/);
-  assert.match(functionBody(appJs, "positionComposerIntentMenu"), /fitComposerPopupToAnchor\(menu, anchor, \{ minWidth: 280, maxWidth: 420 \}\)/);
-  assert.match(functionBody(appJs, "sendMessage"), /const normalizedIntentText = normalizedComposerIntentText\(text\)/);
-  assert.match(functionBody(appJs, "sendMessage"), /if \(normalizedIntentText === "@"\)/);
+  assert.match(functionBody(composerRuntimeJs, "positionComposerIntentMenu"), /const anchor = \$\("messageInput"\) \|\| \$\("composer"\)/);
+  assert.match(functionBody(composerRuntimeJs, "positionComposerIntentMenu"), /fitComposerPopupToAnchor\(menu, anchor, \{ minWidth: 280, maxWidth: 420 \}\)/);
+  assert.match(functionBody(composerRuntimeJs, "sendMessage"), /const normalizedIntentText = normalizedComposerIntentText\(text\)/);
+  assert.match(functionBody(composerRuntimeJs, "sendMessage"), /if \(normalizedIntentText === "@"\)/);
   assert.match(appJs, /function openComposerIntentDialog\(/);
   assert.match(appJs, /function saveComposerIntentDialogDraft\(/);
   assert.ok(indexHtml.indexOf('id="composerIntentMenu"') > indexHtml.indexOf('</form>\n    </main>'), "intent menu should be a page-level overlay, not a composer child");
@@ -448,7 +851,7 @@ test("conversation render includes task card signature, toolbar, and action hand
   assert.match(stylesCss, /\.composer-intent-menu\s*{[\s\S]*max-height:\s*min\(var\(--composer-popup-max-height/);
   assert.match(stylesCss, /\.composer-intent-option/);
   assert.match(appJs, /function parseThreadTaskCardDraftText\(/);
-  assert.match(appJs, /const THREAD_TASK_CARD_BODY_MAX_CHARS = 8000/);
+  assert.match(appJs, /(?:const|var) THREAD_TASK_CARD_BODY_MAX_CHARS = 8000/);
   assert.match(appJs, /function truncateThreadTaskCardBody\(/);
   assert.match(appJs, /function renderPendingThreadTaskCardDraft\(/);
   assert.match(appJs, /function renderTurnThreadTaskCardDraft\(/);
@@ -464,7 +867,7 @@ test("conversation render includes task card signature, toolbar, and action hand
   assert.match(appJs, /matchingThreadTaskCardsForDraft\(draft, turn, contextThread\)/);
   assert.match(functionBody(appJs, "matchingThreadTaskCardsForDraft"), /const contextThread = renderContextThread\(thread\)/);
   assert.match(appJs, /function renderThreadTaskCardExpandable\(/);
-  assert.match(appJs, /const STORAGE_TASK_CARD_DRAFT_STATES = "codexMobileThreadTaskCardDraftStates"/);
+  assert.match(appJs, /(?:const|var) STORAGE_TASK_CARD_DRAFT_STATES = "codexMobileThreadTaskCardDraftStates"/);
   assert.match(appJs, /THREAD_TASK_CARD_DRAFT_CREATE_STALE_MS/);
   assert.match(appJs, /THREAD_TASK_CARD_DRAFT_CREATE_MAX_ATTEMPTS/);
   assert.match(appJs, /activeThreadTaskCardDraftCreations: new Set\(\)/);
@@ -509,7 +912,7 @@ test("conversation render includes task card signature, toolbar, and action hand
   assert.match(appJs, /\$\{items\}\$\{approvalsHtml\}[\s\S]*\$\{showStatusLine \? [\s\S]*: ""\}[\s\S]*\$\{draftHtml\}\$\{pendingDraftHtml\}/);
   assert.match(functionBody(appJs, "renderCurrentThread"), /threadDetailRenderPlanApi\.planSingleThreadFullRenderShell/);
   assert.match(functionBody(appJs, "renderCurrentThread"), /taskCardsHtml/);
-  assert.match(appJs, /Task card draft request/);
+  assert.match(composerRuntimeJs, /Task card draft request/);
   assert.match(indexHtml, /id="workspaceDelegationSettings"/);
   assert.match(stylesCss, /\.workspace-delegation-row/);
   assert.match(appJs, /function renderWorkspaceDelegationSettings\(/);
@@ -518,8 +921,8 @@ test("conversation render includes task card signature, toolbar, and action hand
   assert.match(appJs, /data-workspace-delegation-toggle/);
   assert.doesNotMatch(appJs, /function shouldPreflightWorkspaceDelegation\(/);
   assert.doesNotMatch(appJs, /function maybeDelegateCrossWorkspaceMessage\(/);
-  assert.doesNotMatch(functionBody(appJs, "sendMessage"), /maybeDelegateCrossWorkspaceMessage/);
-  assert.doesNotMatch(functionBody(appJs, "sendMessage"), /workspaceDelegation/);
+  assert.doesNotMatch(functionBody(composerRuntimeJs, "sendMessage"), /maybeDelegateCrossWorkspaceMessage/);
+  assert.doesNotMatch(functionBody(composerRuntimeJs, "sendMessage"), /workspaceDelegation/);
 });
 
 test("client pane toolbar actions use the owning pane thread", async () => {

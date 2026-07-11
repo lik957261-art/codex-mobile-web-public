@@ -4,9 +4,21 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
+const { readFrontendSources } = require("./frontend-source-helper");
+const { createServerHttpRuntimeService } = require("../services/runtime/server-http-runtime-service");
 
 const serverJs = fs.readFileSync(path.resolve(__dirname, "..", "server.js"), "utf8");
-const appJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "app.js"), "utf8");
+const serverRuntimeConfigServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "services", "runtime", "server-runtime-config-service.js"),
+  "utf8",
+);
+const serverRouteCompositionServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "server-routes", "server-route-composition-service.js"), "utf8");
+const coreApiRouteServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "server-routes", "core-api-route-service.js"), "utf8");
+const notificationRuntimeServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "runtime", "notification-runtime-service.js"), "utf8");
+const webPushRuntimeServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "web-push-runtime-service.js"), "utf8");
+const staticFileServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "static-file-service.js"), "utf8");
+const serverHttpRuntimeServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "services", "runtime", "server-http-runtime-service.js"), "utf8");
+const appJs = readFrontendSources(path.resolve(__dirname, ".."));
 const pluginEmbedJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "plugin-embed.js"), "utf8");
 const indexHtml = fs.readFileSync(path.resolve(__dirname, "..", "public", "index.html"), "utf8");
 const stylesCss = fs.readFileSync(path.resolve(__dirname, "..", "public", "styles.css"), "utf8");
@@ -32,30 +44,54 @@ function functionBody(source, name) {
 }
 
 test("server exposes Hermes plugin manifest, registration, origin, launch, session, and notification routes", () => {
-  assert.match(serverJs, /"\/api\/v1\/hermes\/plugin\/manifest"/);
-  assert.match(serverJs, /"\/api\/v1\/hermes\/plugin\/workspaces"/);
-  assert.match(serverJs, /"\/api\/v1\/hermes\/plugin\/callbacks"/);
-  assert.match(serverJs, /"\/api\/v1\/hermes\/plugin\/origins"/);
-  assert.match(serverJs, /"\/api\/v1\/hermes\/plugin\/launch"/);
-  assert.match(serverJs, /"\/api\/v1\/hermes\/plugin\/session"/);
-  assert.match(serverJs, /"\/api\/v1\/hermes\/plugin\/notifications"/);
+  assert.match(serverJs, /createServerRouteCompositionService/);
+  assert.match(serverRouteCompositionServiceJs, /createCoreApiRouteService/);
+  assert.match(coreApiRouteServiceJs, /"\/api\/v1\/hermes\/plugin\/manifest"/);
+  assert.match(coreApiRouteServiceJs, /"\/api\/v1\/hermes\/plugin\/workspaces"/);
+  assert.match(coreApiRouteServiceJs, /"\/api\/v1\/hermes\/plugin\/callbacks"/);
+  assert.match(coreApiRouteServiceJs, /"\/api\/v1\/hermes\/plugin\/origins"/);
+  assert.match(coreApiRouteServiceJs, /"\/api\/v1\/hermes\/plugin\/launch"/);
+  assert.match(coreApiRouteServiceJs, /"\/api\/v1\/hermes\/plugin\/session"/);
+  assert.match(coreApiRouteServiceJs, /"\/api\/v1\/hermes\/plugin\/notifications"/);
   assert.match(serverJs, /createHermesNotificationDelegateService/);
-  assert.match(serverJs, /buildTurnCompletionDetailMessage/);
-  assert.match(serverJs, /detailMessage/);
-  assert.match(serverJs, /CODEX_MOBILE_HERMES_PLUGIN_NOTIFICATION_BASE_URL/);
-  assert.match(serverJs, /CODEX_MOBILE_HERMES_PLUGIN_NOTIFICATION_KEY_FILE/);
-  assert.match(serverJs, /notificationDelegateConfigured/);
-  assert.match(serverJs, /delegateTurnCompletedNotification/);
-  assert.match(serverJs, /isAccessKeyAuthorized\(req\)/);
-  assert.match(serverJs, /const tokens = requestAuthTokens\(req\);[\s\S]*tokens\.some\(\(token\) => hermesPluginService\.isSessionAuthorized\(token\)\)/);
-  assert.match(serverJs, /codex_mobile_plugin_session/);
-  assert.match(serverJs, /pluginSessionCookieHeader\(req, session\)/);
-  assert.match(serverJs, /Authorization/);
-  assert.match(serverJs, /CODEX_MOBILE_HERMES_PLUGIN_BASE_URL/);
-  assert.match(serverJs, /CODEX_MOBILE_PUBLIC_BASE_URL/);
-  assert.match(serverJs, /CODEX_MOBILE_HERMES_PLUGIN_FRAME_ORIGINS/);
-  assert.match(serverJs, /Content-Security-Policy/);
-  assert.match(serverJs, /frameAncestorsHeader\(\)/);
+  assert.match(serverJs, /createNotificationRuntimeService/);
+  assert.match(notificationRuntimeServiceJs, /webPushRuntimeServiceFactory/);
+  assert.match(notificationRuntimeServiceJs, /buildTurnCompletionDetailMessage/);
+  assert.match(webPushRuntimeServiceJs, /detailMessage/);
+  assert.match(webPushRuntimeServiceJs, /delegateTurnCompletedNotification/);
+  assert.match(serverRuntimeConfigServiceJs, /CODEX_MOBILE_HERMES_PLUGIN_NOTIFICATION_BASE_URL/);
+  assert.match(serverRuntimeConfigServiceJs, /CODEX_MOBILE_HERMES_PLUGIN_NOTIFICATION_KEY_FILE/);
+  assert.match(coreApiRouteServiceJs, /notificationDelegateConfigured/);
+  assert.match(coreApiRouteServiceJs, /isAccessKeyAuthorized\(req\)/);
+  assert.match(serverHttpRuntimeServiceJs, /const tokens = requestAuthTokens\(req\);[\s\S]*tokens\.some\(\(token\) => hermesPluginService\.isSessionAuthorized\(token\)\)/);
+  assert.match(coreApiRouteServiceJs, /pluginSessionCookieHeader\(req, session\)/);
+  assert.match(serverHttpRuntimeServiceJs, /Authorization/);
+  assert.match(serverRuntimeConfigServiceJs, /CODEX_MOBILE_HERMES_PLUGIN_BASE_URL/);
+  assert.match(serverRuntimeConfigServiceJs, /CODEX_MOBILE_PUBLIC_BASE_URL/);
+  assert.match(serverRuntimeConfigServiceJs, /CODEX_MOBILE_HERMES_PLUGIN_FRAME_ORIGINS/);
+  assert.match(staticFileServiceJs, /Content-Security-Policy/);
+  assert.match(staticFileServiceJs, /frameAncestorsHeader\(\)/);
+});
+
+test("HTTP runtime accepts Hermes plugin session cookies as auth tokens", () => {
+  const httpRuntime = createServerHttpRuntimeService({
+    disableAuth: false,
+    getAuthKey: () => "mobile-access-key",
+    getHermesPluginService: () => ({
+      isSessionAuthorized: (token) => token === "plugin-session-key",
+      isLaunchTokenAuthorized: () => false,
+    }),
+  });
+  const req = {
+    url: "/api/threads",
+    headers: {
+      host: "127.0.0.1:8787",
+      cookie: "codex_mobile_plugin_session=plugin-session-key",
+    },
+  };
+  assert.deepEqual(httpRuntime.requestAuthTokens(req), ["plugin-session-key"]);
+  assert.equal(httpRuntime.isAccessKeyAuthorized(req), false);
+  assert.equal(httpRuntime.isAuthorized(req), true);
 });
 
 test("Hermes plugin launch token is a browser-session key, not local storage login state", () => {
@@ -77,6 +113,7 @@ test("Hermes plugin launch token is a browser-session key, not local storage log
   assert.match(appJs, /function normalizePluginRouteHint\(value\)/);
   assert.match(appJs, /function applyUrlPluginRouteHint\(options = \{\}\)/);
   assert.match(appJs, /async function openHermesPluginRouteHint\(hint\)/);
+  assert.match(appJs, /openExternalThreadSelection\(plan\.threadId, \{[\s\S]*source: "route-hint",[\s\S]*suppressLoadFailureDiagnostic: true,[\s\S]*\}\)/);
   assert.match(appJs, /pluginRouteHintFromUrl\(window\.location\.href\)/);
   assert.match(appJs, /pluginEmbedApi\.routeHintOpenPlan\(hint\)/);
   assert.match(appJs, /pluginEmbedApi\.routeHintFocusPlan\(hint/);
@@ -94,7 +131,7 @@ test("embedded plugin mode hides standalone chrome and installs navigation/windo
   assert.match(indexHtml, /localStorage\.getItem\("codexMobileFontSize"\)[\s\S]*if \(allowedFontSizes\[value\]\) return value;[\s\S]*var pluginAppearance = readPluginAppearance\(\);/);
   assert.match(appJs, /fontSize: localStorage\.getItem\("codexMobileFontSize"\)[\s\S]*INITIAL_PLUGIN_EMBED\.appearance && INITIAL_PLUGIN_EMBED\.appearance\.fontSize/);
   assert.match(appJs, /function storedFontSizePreference\(\)/);
-  assert.match(appJs, /const storedFontSize = storedFontSizePreference\(\);[\s\S]*if \(appearance\.fontSize && !storedFontSize\)/);
+  assert.match(appJs, /(?:const|var) storedFontSize = storedFontSizePreference\(\);[\s\S]*if \(appearance\.fontSize && !storedFontSize\)/);
   assert.match(appJs, /if \(storedFontSize\) \{[\s\S]*state\.pluginAppearance = Object\.assign\([\s\S]*fontSize: storedFontSize/);
   assert.match(appJs, /if \(isHermesEmbedMode\(\)\) \{[\s\S]*syncPluginAppearanceStateFromPreferences\(\);[\s\S]*scrubPluginLaunchUrl\(\);[\s\S]*publishPluginNavigationState\(\{ force: true \}\);/);
   assert.match(indexHtml, /document\.documentElement\.setAttribute\("data-font-size", initialFontSize\)/);
@@ -157,7 +194,7 @@ test("embedded plugin mode hides standalone chrome and installs navigation/windo
   assert.match(appJs, /function normalizePluginParentOrigin\(value\) \{\s*const liveParentOrigin = currentPluginParentWindowOrigin\(\);/);
   assert.match(appJs, /function publishPluginNavigationState\(options = \{\}\) \{[\s\S]*const targetOrigin = normalizePluginParentOrigin\(state\.pluginParentOrigin\);[\s\S]*targetOrigin: targetOrigin \|\| "\*"/);
   assert.match(appJs, /function postPluginBackResult\(handled, reason\) \{[\s\S]*const targetOrigin = normalizePluginParentOrigin\(state\.pluginParentOrigin\);[\s\S]*targetOrigin: targetOrigin \|\| "\*"/);
-  assert.match(appJs, /const hermesOrigin = normalizePluginParentOrigin\(result && result\.hermes_origin\)/);
+  assert.match(appJs, /(?:const|var) hermesOrigin = normalizePluginParentOrigin\(result && result\.hermes_origin\)/);
   assert.match(appJs, /state\.pluginParentOrigin = hermesOrigin/);
   assert.match(appJs, /if \(assetsChanged && !serverBuildNeedsRefresh\) \{[\s\S]*state\.serverAssetBuildId = nextAssetBuildId;[\s\S]*return;/);
   assert.match(appJs, /if \(serverBuildNeedsRefresh\) \{\s*if \(isHermesEmbedMode\(\)\) \{[\s\S]*requestHermesPluginRefresh\("server_build_changed"\);[\s\S]*return;/);

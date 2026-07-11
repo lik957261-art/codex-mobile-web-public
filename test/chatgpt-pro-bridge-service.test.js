@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
+const { readFrontendSources } = require("./frontend-source-helper");
 
 const {
   buildChatGptProPrompt,
@@ -15,7 +16,13 @@ const {
 
 const root = path.resolve(__dirname, "..");
 const serverJs = fs.readFileSync(path.join(root, "server.js"), "utf8");
-const appJs = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
+const serverRuntimeConfigServiceJs = fs.readFileSync(path.join(root, "services", "runtime", "server-runtime-config-service.js"), "utf8");
+const chatGptProRuntimeServiceJs = fs.readFileSync(path.join(root, "services", "runtime", "chatgpt-pro-runtime-service.js"), "utf8");
+const apiDispatchRouteServiceJs = fs.readFileSync(path.join(root, "server-routes", "api-dispatch-route-service.js"), "utf8");
+const chatGptProRouteServiceJs = fs.readFileSync(path.join(root, "server-routes", "chatgpt-pro-route-service.js"), "utf8");
+const coreApiRouteServiceJs = fs.readFileSync(path.join(root, "server-routes", "core-api-route-service.js"), "utf8");
+const appJs = readFrontendSources(root);
+const composerRuntimeJs = fs.readFileSync(path.join(root, "public", "composer-runtime.js"), "utf8");
 const packageJson = fs.readFileSync(path.join(root, "package.json"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 
@@ -76,37 +83,43 @@ test("server and client wire @ChatGPT Pro without normal message submission", ()
   assert.match(packageJson, /adapters\/chatgpt-pro-bridge-service\.js/);
   assert.match(packageJson, /adapters\/chatgpt-pro-planner-service\.js/);
   assert.match(packageJson, /adapters\/chatgpt-pro-mcp-service\.js/);
-  assert.match(serverJs, /createChatGptProBridgeService/);
-  assert.match(serverJs, /createChatGptProPlannerService/);
-  assert.match(serverJs, /createChatGptProMcpService/);
-  assert.match(serverJs, /\/api\/chatgpt-pro\/status/);
-  assert.match(serverJs, /\/api\/chatgpt-pro\/generate/);
-  assert.match(serverJs, /\/api\/chatgpt-pro\/planner\/status/);
-  assert.match(serverJs, /\/api\/chatgpt-pro\/planner\/artifacts/);
-  assert.match(serverJs, /\/api\/chatgpt-pro\/mcp/);
-  assert.match(serverJs, /CODEX_MOBILE_CHATGPT_PRO_MCP_TOKEN_FILE/);
-  assert.match(serverJs, /CODEX_MOBILE_CHATGPT_PRO_MCP_ALLOW_DIRECT_TASK_CARDS/);
-  assert.match(serverJs, /delegateTaskCard: async \(input = \{\}\) => createThreadTaskCardsFromSourceThread\(input\.sourceThreadId, input\)/);
-  assert.match(serverJs, /allowDirectTaskCards: CHATGPT_PRO_MCP_ALLOW_DIRECT_TASK_CARDS/);
+  assert.match(packageJson, /services\/runtime\/chatgpt-pro-runtime-service\.js/);
+  assert.match(packageJson, /adapters\/chatgpt-pro-runtime-service\.js/);
+  assert.match(packageJson, /test\/chatgpt-pro-runtime-service\.test\.js/);
+  assert.match(serverJs, /createChatGptProRuntimeService/);
+  assert.match(chatGptProRuntimeServiceJs, /createChatGptProBridgeService/);
+  assert.match(chatGptProRuntimeServiceJs, /createChatGptProPlannerService/);
+  assert.match(chatGptProRuntimeServiceJs, /createChatGptProMcpService/);
+  assert.match(chatGptProRouteServiceJs, /\/api\/chatgpt-pro\/status/);
+  assert.match(chatGptProRouteServiceJs, /\/api\/chatgpt-pro\/generate/);
+  assert.match(chatGptProRouteServiceJs, /\/api\/chatgpt-pro\/planner\/status/);
+  assert.match(chatGptProRouteServiceJs, /\/api\/chatgpt-pro\/planner\/artifacts/);
+  assert.match(coreApiRouteServiceJs, /\/api\/chatgpt-pro\/mcp/);
+  assert.match(serverRuntimeConfigServiceJs, /CODEX_MOBILE_CHATGPT_PRO_MCP_TOKEN_FILE/);
+  assert.match(serverRuntimeConfigServiceJs, /CODEX_MOBILE_CHATGPT_PRO_MCP_ALLOW_DIRECT_TASK_CARDS/);
+  assert.match(chatGptProRuntimeServiceJs, /delegateTaskCard: async \(input = \{\}\) => dependencies\.createThreadTaskCardsFromSourceThread\(input\.sourceThreadId, input\)/);
+  assert.match(serverJs, /mcpAllowDirectTaskCards: CHATGPT_PRO_MCP_ALLOW_DIRECT_TASK_CARDS/);
   assert.ok(
-    serverJs.indexOf('url.pathname === "/api/chatgpt-pro/mcp"') < serverJs.indexOf("if (!isAuthorized(req))"),
+    apiDispatchRouteServiceJs.indexOf("coreApiRouteService.handlePublicRoute") < apiDispatchRouteServiceJs.indexOf("if (!isAuthorized(req))")
+      && coreApiRouteServiceJs.includes('url.pathname === "/api/chatgpt-pro/mcp"'),
     "MCP connector route should use its own token before normal browser auth",
   );
   assert.match(serverJs, /chatGptProSourceSummary/);
-  assert.match(serverJs, /createThread: async \(\{ cwd \}\) => \{\s*const runtimeSettings = applyPermissionModeOverride\(\{\}, "full", cwd \|\| APP_ROOT\);/);
-  assert.match(serverJs, /startTurn: async \(\{ threadId, cwd, input \}\) => \{\s*const runtimeSettings = applyPermissionModeOverride\(await resolveThreadRuntimeSettings\(threadId\), "full", cwd \|\| APP_ROOT\);/);
-  assert.doesNotMatch(serverJs, /createThread: async \(\{ cwd \}\) => \{\s*const runtimeSettings = applyPermissionModeOverride\(\{\}, "auto", cwd \|\| APP_ROOT\);/);
-  assert.doesNotMatch(serverJs, /startTurn: async \(\{ threadId, cwd, input \}\) => \{\s*const runtimeSettings = applyPermissionModeOverride\(await resolveThreadRuntimeSettings\(threadId\), "auto", cwd \|\| APP_ROOT\);/);
+  assert.match(chatGptProRuntimeServiceJs, /createThread: async \(\{ cwd \}\) => \{\s*const runtimeSettings = dependencies\.applyPermissionModeOverride\(\{\}, "full", cwd \|\| appRoot\);/);
+  assert.match(chatGptProRuntimeServiceJs, /startTurn: async \(\{ threadId, cwd, input \}\) => \{\s*const runtimeSettings = dependencies\.applyPermissionModeOverride\(/);
+  assert.doesNotMatch(chatGptProRuntimeServiceJs, /applyPermissionModeOverride\(\{\}, "auto", cwd \|\| appRoot\);/);
+  assert.doesNotMatch(chatGptProRuntimeServiceJs, /applyPermissionModeOverride\([\s\S]*"auto"[\s\S]*cwd \|\| appRoot/);
   assert.match(appJs, /function isChatGptProCommandText\(/);
   assert.match(appJs, /async function submitChatGptProRequest\(text, options = \{\}\)/);
   assert.match(appJs, /api\("\/api\/chatgpt-pro\/generate"/);
-  assert.match(appJs, /function composerIntentBareTagKind\(/);
-  assert.match(appJs, /function openComposerIntentDialog\(/);
-  assert.match(appJs, /submitChatGptProRequest\(`\$\{option\.tag\} \$\{body\}`, \{ rethrow: true \}\)/);
+  assert.match(appJs, /function openComposerIntentDialog\(\.\.\.args\) \{\s*return composerRuntime\.openComposerIntentDialog\(\.\.\.args\);/);
+  assert.match(composerRuntimeJs, /function composerIntentBareTagKind\(/);
+  assert.match(composerRuntimeJs, /function openComposerIntentDialog\(/);
+  assert.match(composerRuntimeJs, /submitChatGptProRequest\(`\$\{option\.tag\} \$\{body\}`, \{ rethrow: true \}\)/);
   assert.match(appJs, /@ChatGPT Pro/);
-  const sendStart = appJs.indexOf("async function sendMessage");
-  const sendEnd = appJs.indexOf("async function sendNewThreadMessage", sendStart);
-  const sendBody = appJs.slice(sendStart, sendEnd);
+  const sendStart = composerRuntimeJs.indexOf("async function sendMessage");
+  const sendEnd = composerRuntimeJs.indexOf("async function sendNewThreadMessage", sendStart);
+  const sendBody = composerRuntimeJs.slice(sendStart, sendEnd);
   assert.ok(sendBody.indexOf("isChatGptProCommandText(text)") < sendBody.indexOf("sendNewThreadMessage(text"), "Pro command should intercept before new-thread send");
   assert.ok(sendBody.indexOf("isChatGptProCommandText(text)") < sendBody.indexOf("/api/threads/${encodeURIComponent(targetThreadId)}/messages"), "Pro command should intercept before normal message send");
 });

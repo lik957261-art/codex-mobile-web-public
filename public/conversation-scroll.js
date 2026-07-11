@@ -242,6 +242,100 @@
     };
   }
 
+  function planReadingViewportPreservation(options = {}) {
+    if (options.nearBottom) {
+      return {
+        preserve: false,
+        reason: "near-bottom",
+      };
+    }
+    if (options.userReadingCurrentTurn) {
+      return {
+        preserve: true,
+        reason: "user-reading-current-turn",
+      };
+    }
+    if (options.autoScrollHold) {
+      return {
+        preserve: true,
+        reason: "auto-scroll-hold",
+      };
+    }
+    if (options.userReadingAwayFromBottom) {
+      return {
+        preserve: true,
+        reason: "user-reading-away-from-bottom",
+      };
+    }
+    if (options.recentScrollIntent) {
+      return {
+        preserve: true,
+        reason: "recent-scroll-intent",
+      };
+    }
+    return {
+      preserve: false,
+      reason: "no-user-scroll-protection",
+    };
+  }
+
+  function planAutomaticConversationRefresh(options = {}) {
+    if (options.userInitiated) {
+      return {
+        allowRefresh: true,
+        cancelScheduled: false,
+        reason: "user-initiated",
+      };
+    }
+    if (!options.hasThread) {
+      return {
+        allowRefresh: true,
+        cancelScheduled: false,
+        reason: "no-current-thread",
+      };
+    }
+    if (options.nearBottom) {
+      return {
+        allowRefresh: true,
+        cancelScheduled: false,
+        reason: "near-bottom",
+      };
+    }
+    if (options.userReadingCurrentTurn) {
+      return {
+        allowRefresh: false,
+        cancelScheduled: true,
+        reason: "user-reading-current-turn",
+      };
+    }
+    if (options.autoScrollHold) {
+      return {
+        allowRefresh: false,
+        cancelScheduled: true,
+        reason: "auto-scroll-hold",
+      };
+    }
+    if (options.userReadingAwayFromBottom) {
+      return {
+        allowRefresh: false,
+        cancelScheduled: true,
+        reason: "user-reading-away-from-bottom",
+      };
+    }
+    if (options.recentScrollIntent) {
+      return {
+        allowRefresh: false,
+        cancelScheduled: true,
+        reason: "recent-scroll-intent",
+      };
+    }
+    return {
+      allowRefresh: true,
+      cancelScheduled: false,
+      reason: "no-user-scroll-protection",
+    };
+  }
+
   function planFullRenderScroll(options = {}) {
     const explicitNoStickToBottom = options.stickToBottom === false || Boolean(options.scrollToTurnReceiptStart);
     if (explicitNoStickToBottom) {
@@ -318,9 +412,11 @@
     planBottomFollowLeaseEvaluation,
     planBottomFollowScrollSchedule,
     planConversationAutoScrollHoldFromScroll,
+    planAutomaticConversationRefresh,
     planConversationJumpButtons,
     planFullRenderScroll,
     planLocalPatchScrollCompletion,
+    planReadingViewportPreservation,
     planUserReadingCurrentTurn,
     shouldFollowViewport,
     shouldFollowSubmittedMessage,

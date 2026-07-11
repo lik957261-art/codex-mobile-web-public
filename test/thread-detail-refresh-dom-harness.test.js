@@ -173,8 +173,17 @@ test("refresh DOM harness treats tile patch success as terminal", () => {
     tryLocalPatch: patchExecution.tryLocalPatch,
   });
   const calls = [];
-  const patchAttempt = reducePatchEffects(effectPlan.effects, (effect) => {
+  const patchAttempt = reducePatchEffects(effectPlan.effects, (effect, context) => {
     calls.push(effect.type);
+    if (effect.type === "local-patch") {
+      assert.equal(context.tilePanePatchedDetail, true);
+      assert.equal(effect.skipWhenTilePanePatched, true);
+      return {
+        localPatchAttempted: false,
+        locallyPatchedDetail: false,
+        localPatchMs: 0,
+      };
+    }
     assert.equal(effect.type, "tile-pane-patch");
     return {
       tilePanePatchAttempted: true,
@@ -184,7 +193,7 @@ test("refresh DOM harness treats tile patch success as terminal", () => {
   });
   const result = renderOutcomeFromPatchAttempt(patchAttempt);
 
-  assert.deepEqual(calls, ["tile-pane-patch"]);
+  assert.deepEqual(calls, ["tile-pane-patch", "local-patch"]);
   assert.equal(patchAttempt.localPatchAttempted, false);
   assert.equal(result.patchAttemptResult.patchResult, "tile-pane-patched");
   assert.equal(result.renderOutcome.renderAction, "tile-pane-patch");
@@ -196,6 +205,7 @@ function runSingleThreadLocalPatchTransaction() {
   const article = createElement("article", { "data-render-key": "turn-a" }, [
     createElement("div", { "data-render-key": "item-agent" }, [createTextNode("old")]),
   ]);
+  const conversation = createElement("div", {}, [article]);
   const itemPatchPlan = patchPlan.planVisibleItemRefreshPatch(
     [{ key: "item-agent", signature: { type: "agentMessage", text: "old" } }],
     [{ key: "item-agent", signature: { type: "agentMessage", text: "new" } }],
@@ -212,7 +222,10 @@ function runSingleThreadLocalPatchTransaction() {
   const transaction = domPatch.applyThreadDetailPatchTransaction({
     applyPatch: () => domPatch.applyThreadTurnRefreshDomPatch({
       patchPlan: turnPatchPlan,
+      conversation,
       findTurnByKey: () => ({ id: "turn-a" }),
+      findTurnElementByKey: () => article,
+      firstTurnElement: () => article,
       applyItemPatch: () => domPatch.applyVisibleItemRefreshDomPatch({
         article,
         patchPlan: itemPatchPlan,
@@ -229,7 +242,7 @@ function runSingleThreadLocalPatchTransaction() {
       }),
       renderTurnElement: () => createElement("article", { "data-render-key": "turn-a" }),
       insertTurnElement: () => ({ ok: true }),
-      replaceTurnElement: () => ({ ok: true }),
+      replaceTurnElement: () => ({ ok: true, target: article }),
     }),
     commitEffects: [
       {

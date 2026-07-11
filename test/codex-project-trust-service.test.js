@@ -37,16 +37,16 @@ test("trusted project service appends missing project entries idempotently", () 
 
 test("trusted project parser recognizes basic and literal project headers", () => {
   const text = [
-    '[projects."/Users/xuxin/Documents/Music"]',
+    '[projects."/Users/example/Documents/Music"]',
     'trust_level = "trusted"',
     "",
-    "[projects.'/Users/xuxin/Documents/Home AI']",
+    "[projects.'/Users/example/Documents/Home AI']",
     'trust_level = "trusted"',
     "",
   ].join("\n");
 
   assert.deepEqual(projectPathsFromConfig(text), [
-    "/Users/xuxin/Documents/Music",
-    "/Users/xuxin/Documents/Home AI",
+    "/Users/example/Documents/Music",
+    "/Users/example/Documents/Home AI",
   ]);
 });

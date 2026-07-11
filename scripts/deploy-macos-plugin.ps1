@@ -7,7 +7,7 @@ param(
   [string]$ServiceLabel = "com.hermesmobile.plugin.codex-mobile",
   [string]$NodePath = "/Users/hermes-host/HermesMobile/runtime/node-current/bin/node",
   [string]$NpmPath = "/Users/hermes-host/HermesMobile/runtime/node-current/bin/npm",
-  [string]$AccessKeyFile = "/Users/xuxin/.codex-mobile-web/access_key",
+  [string]$AccessKeyFile = "",
   [int]$Port = 8787,
   [switch]$AllowNonMain,
   [switch]$DryRun,
@@ -125,13 +125,16 @@ SERVICE_LABEL=__SERVICE_LABEL__
 NODE_PATH=__NODE_PATH__
 NPM_PATH=__NPM_PATH__
 ACCESS_KEY_FILE=__ACCESS_KEY_FILE__
+if [ -z "$ACCESS_KEY_FILE" ]; then
+  ACCESS_KEY_FILE="${HOME}/.codex-mobile-web/access_key"
+fi
 PORT=__PORT__
 SKIP_RESTART=__SKIP_RESTART__
 SKIP_TARGET_TESTS=__SKIP_TARGET_TESTS__
 STAGE="/tmp/${DEPLOY_ID}.stage"
 BACKUP="/tmp/${DEPLOY_ID}.backup.tar.gz"
 SMOKE_SCRIPT="/tmp/${DEPLOY_ID}.smoke.js"
-PATH_PREFIX="$(dirname "$NODE_PATH"):/Users/xuxin/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+PATH_PREFIX="$(dirname "$NODE_PATH"):${HOME}/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 log() {
   printf '[macos-plugin-deploy] %s\n' "$*"

@@ -8,6 +8,7 @@ const { test } = require("node:test");
 
 const {
   compactThread,
+  dedupeSyntheticActiveAssistantMessagesInThread,
   enrichThreadItemTimestampsFromRollout,
 } = require("../server");
 
@@ -55,6 +56,111 @@ test("thread detail items receive per-item timestamps from rollout events", () =
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("compact thread infers display timestamp for unmatched visible user messages", () => {
+  const thread = compactThread({
+    id: "thread-display-timestamp",
+    updatedAt: "2026-06-29T11:30:00.000Z",
+    turns: [{
+      id: "turn-display-timestamp",
+      status: "completed",
+      startedAt: "2026-06-29T10:26:59.000Z",
+      completedAt: "2026-06-29T11:28:55.000Z",
+      items: [
+        {
+          id: "context-known",
+          type: "contextCompaction",
+          startedAtMs: Date.parse("2026-06-29T10:49:44.058Z"),
+        },
+        {
+          id: "user-unmatched",
+          type: "userMessage",
+          content: [{ type: "text", text: "unmatched projected user message" }],
+        },
+        {
+          id: "user-known",
+          type: "userMessage",
+          startedAtMs: Date.parse("2026-06-29T11:01:31.746Z"),
+          content: [{ type: "text", text: "later user message" }],
+        },
+        {
+          id: "assistant-final",
+          type: "agentMessage",
+          startedAtMs: Date.parse("2026-06-29T11:28:55.447Z"),
+          text: "done",
+        },
+        {
+          id: "usage",
+          type: "turnUsageSummary",
+          startedAtMs: Date.parse("2026-06-29T11:28:55.482Z"),
+        },
+      ],
+    }],
+  });
+
+  const items = thread.turns[0].items;
+  const unmatched = items.find((item) => item.id === "user-unmatched");
+  assert.ok(unmatched);
+  assert.equal(unmatched.mobileDisplayTimestampInferred, true);
+  assert.equal(unmatched.mobileDisplayTimestampMs, Date.parse("2026-06-29T10:49:44.058Z") + 1);
+  assert.deepEqual(items.map((item) => item.id), [
+    "context-known",
+    "user-unmatched",
+    "user-known",
+    "assistant-final",
+  ]);
+});
+
+test("active synthetic assistant progress duplicates native assistant text are removed", () => {
+  const thread = {
+    id: "thread-active-dedupe",
+    turns: [{
+      id: "turn-active",
+      status: { type: "running" },
+      items: [
+        { id: "native-1", type: "agentMessage", text: "Same visible reply" },
+        { id: "mobile-progress-message-1", type: "agentMessage", text: "Same visible reply", mobileSyntheticProgressMessage: true },
+        { id: "mobile-progress-message-2", type: "agentMessage", text: "Only rollout reply", mobileSyntheticProgressMessage: true },
+        { id: "mobile-progress-message-3", type: "agentMessage", text: "Only rollout reply", mobileSyntheticProgressMessage: true },
+      ],
+    }],
+  };
+
+  const result = dedupeSyntheticActiveAssistantMessagesInThread(thread);
+
+  assert.equal(result.removed, 2);
+  assert.deepEqual(
+    thread.turns[0].items.map((item) => item.id),
+    ["native-1", "mobile-progress-message-2"],
+  );
+  assert.equal(thread.turns[0].mobileSyntheticActiveAssistantDeduped, 2);
+  assert.equal(thread.mobileSyntheticActiveAssistantDeduped, 2);
+});
+
+test("active legacy item assistant progress duplicate is removed when native message exists", () => {
+  const thread = {
+    id: "thread-active-legacy-dedupe",
+    turns: [{
+      id: "turn-active",
+      status: { type: "running" },
+      items: [
+        { id: "item-313", type: "agentMessage", text: "Same overlay reply" },
+        { id: "msg_native", type: "agentMessage", text: "Same overlay reply" },
+        { id: "item-314", type: "agentMessage", text: "Distinct overlay reply" },
+      ],
+    }],
+  };
+
+  const result = dedupeSyntheticActiveAssistantMessagesInThread(thread);
+
+  assert.equal(result.removed, 1);
+  assert.deepEqual(
+    thread.turns[0].items.map((item) => item.id),
+    ["msg_native", "item-314"],
+  );
+  assert.equal(thread.turns[0].mobileSyntheticActiveAssistantDeduped, 1);
+  assert.equal(thread.mobileSyntheticActiveAssistantDeduped, 1);
 });
 
 test("compacted live operation items keep rollout-derived timestamps", () => {

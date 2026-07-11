@@ -6,7 +6,27 @@ const { test } = require("node:test");
 const {
   createThreadDetailActiveWindowPrewarmService,
   overlayActiveTurnId,
-} = require("../adapters/thread-detail-active-window-prewarm-service");
+  threadDetailActiveWindowPrewarmJobPolicy,
+} = require("../services/thread-detail/thread-detail-active-window-prewarm-service");
+
+const EXPECTED_PREWARM_JOB = {
+  name: "thread-detail-active-window-prewarm",
+  periodicAllowed: false,
+  maxConcurrency: 1,
+  timeoutMs: 30000,
+  timeBudgetMs: 30000,
+  cpuBudgetClass: "medium",
+  realBrowserAllowed: false,
+  usesBrowser: false,
+  userRequestPreemptible: true,
+  preemptibleByForeground: true,
+};
+
+function withExpectedJob(value) {
+  return Object.assign({}, value, {
+    job: EXPECTED_PREWARM_JOB,
+  });
+}
 
 function createHarness(overrides = {}) {
   const calls = [];
@@ -79,6 +99,10 @@ test("overlayActiveTurnId prefers explicit overlay id then turn id then summary"
   assert.equal(overlayActiveTurnId({}, { activeTurnId: "c" }), "c");
 });
 
+test("active window prewarm declares scheduler budget policy", () => {
+  assert.deepEqual(threadDetailActiveWindowPrewarmJobPolicy(), EXPECTED_PREWARM_JOB);
+});
+
 test("prewarmNow seeds a missing active overlay window", async () => {
   const { calls, service } = createHarness();
 
@@ -103,6 +127,43 @@ test("prewarmNow skips app-server read when active overlay window is already cac
   assert.equal(result.reason, "active-window-already-cached");
   assert.equal(calls.some((call) => /^turns-list:/.test(call)), false);
   assert.equal(calls.some((call) => /^seed:/.test(call)), false);
+});
+
+test("prewarmNow refreshes an incomplete active summary before projection lookup fails", async () => {
+  const { calls, service } = createHarness({
+    summary: {
+      id: "thread-1",
+      path: "/tmp/rollout.jsonl",
+      status: { type: "active" },
+      activeTurnId: "turn-active",
+    },
+    service: {
+      projectionInput: (threadId, currentSummary) => {
+        calls.push(`projection-input:${currentSummary && currentSummary.path ? "ready" : "missing-path"}`);
+        if (!currentSummary || !currentSummary.path) return null;
+        return { threadId, rolloutPath: currentSummary.path };
+      },
+    },
+  });
+
+  const result = await service.prewarmNow({
+    threadId: "thread-1",
+    summary: {
+      id: "thread-1",
+      status: { type: "active" },
+      activeTurnId: "turn-active",
+    },
+  });
+
+  assert.equal(result.status, "seeded");
+  assert.deepEqual(calls.filter((call) => /^projection-input:/.test(call)), [
+    "projection-input:missing-path",
+    "projection-input:ready",
+  ]);
+  assert.equal(calls.includes("summary"), true);
+  assert.deepEqual(calls.filter((call) => /^turns-list:/.test(call)), [
+    "turns-list:turns-list-active-overlay-window",
+  ]);
 });
 
 test("prewarmNow can seed the projection window before overlay turn evidence exists", async () => {
@@ -154,13 +215,179 @@ test("schedule deduplicates pending work", () => {
     },
   });
 
-  assert.deepEqual(service.schedule({ threadId: "thread-1", reason: "turn-started" }), {
+  assert.deepEqual(service.schedule({ threadId: "thread-1", reason: "turn-started" }), withExpectedJob({
     scheduled: true,
     reason: "scheduled",
-  });
-  assert.deepEqual(service.schedule({ threadId: "thread-1", reason: "thread-list-active" }), {
+  }));
+  assert.deepEqual(service.schedule({ threadId: "thread-1", reason: "thread-list-active" }), withExpectedJob({
     scheduled: false,
     reason: "already-pending",
-  });
+  }));
   assert.equal(calls.length, 1);
+});
+
+test("schedule lets notification prewarm preempt older pending work", () => {
+  const timers = [];
+  const service = createThreadDetailActiveWindowPrewarmService({
+    now: () => 1000,
+    delayMs: 5000,
+    minIntervalMs: 0,
+    setTimeout: (fn, delayMs) => {
+      timers.push({ fn, delayMs });
+      return { unref() {} };
+    },
+  });
+
+  assert.deepEqual(service.schedule({ threadId: "thread-1", reason: "thread-list-active" }), withExpectedJob({
+    scheduled: true,
+    reason: "scheduled",
+  }));
+  assert.deepEqual(service.schedule({
+    threadId: "thread-1",
+    reason: "turn/completed",
+    delayMs: 0,
+    bypassMinInterval: true,
+    preemptPending: true,
+  }), withExpectedJob({
+    scheduled: true,
+    reason: "scheduled",
+  }));
+  assert.deepEqual(timers.map((timer) => timer.delayMs), [5000, 0]);
+});
+
+test("older preempted prewarm completion does not clear newer pending state", async () => {
+  const timers = [];
+  const service = createThreadDetailActiveWindowPrewarmService({
+    now: () => 1000,
+    delayMs: 5000,
+    minIntervalMs: 0,
+    setTimeout: (fn, delayMs) => {
+      timers.push({ fn, delayMs });
+      return { unref() {} };
+    },
+    resolveSummary: async () => ({ summary: { id: "thread-1", status: { type: "idle" } } }),
+  });
+
+  service.schedule({ threadId: "thread-1", reason: "thread-list-active" });
+  service.schedule({
+    threadId: "thread-1",
+    reason: "turn/completed",
+    delayMs: 0,
+    bypassMinInterval: true,
+    preemptPending: true,
+  });
+
+  timers[0].fn();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(service.status("thread-1").job, EXPECTED_PREWARM_JOB);
+  assert.equal(service.status("thread-1").pending, true);
+
+  timers[1].fn();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(service.status("thread-1").pending, false);
+});
+
+test("schedule keeps default delay and recently-attempted throttle for ordinary work", async () => {
+  const timers = [];
+  let nowMs = 1_000;
+  const service = createThreadDetailActiveWindowPrewarmService({
+    now: () => nowMs,
+    delayMs: 25,
+    minIntervalMs: 1_000,
+    setTimeout: (fn, delayMs) => {
+      timers.push(delayMs);
+      fn();
+      return { unref() {} };
+    },
+    resolveSummary: async () => ({ summary: { id: "thread-1", status: { type: "idle" } } }),
+  });
+
+  assert.deepEqual(service.schedule({ threadId: "thread-1", reason: "thread-list-active" }), withExpectedJob({
+    scheduled: true,
+    reason: "scheduled",
+  }));
+  assert.deepEqual(timers, [25]);
+  await Promise.resolve();
+  await Promise.resolve();
+  nowMs += 50;
+  assert.deepEqual(service.schedule({ threadId: "thread-1", reason: "thread-list-active" }), withExpectedJob({
+    scheduled: false,
+    reason: "recently-attempted",
+  }));
+});
+
+test("schedule reuses fresh ready results for ordinary thread-list prewarm", async () => {
+  const timers = [];
+  let nowMs = 1_000;
+  const service = createThreadDetailActiveWindowPrewarmService({
+    now: () => nowMs,
+    delayMs: 25,
+    minIntervalMs: 0,
+    readyResultTtlMs: 10_000,
+    setTimeout: (fn, delayMs) => {
+      timers.push(delayMs);
+      fn();
+      return { unref() {} };
+    },
+    resolveSummary: async () => ({
+      summary: { id: "thread-1", status: { type: "active" }, activeTurnId: "turn-active" },
+    }),
+    threadRuntimeSettings: () => ({}),
+    projectionInput: () => ({ threadId: "thread-1", rolloutPath: "/tmp/rollout.jsonl" }),
+    activeOverlayProjectionWindowLookup: () => ({ result: { thread: { id: "thread-1", turns: [{ id: "turn-window" }] } } }),
+    turnsListThreadReadResult: async () => {
+      throw new Error("cached active window should skip app-server read");
+    },
+  });
+
+  assert.deepEqual(service.schedule({ threadId: "thread-1", reason: "thread-list-active" }), withExpectedJob({
+    scheduled: true,
+    reason: "scheduled",
+  }));
+  await Promise.resolve();
+  await Promise.resolve();
+  nowMs += 1_000;
+  assert.deepEqual(service.schedule({ threadId: "thread-1", reason: "thread-list-active" }), withExpectedJob({
+    scheduled: false,
+    reason: "recently-ready",
+  }));
+  assert.deepEqual(timers, [25]);
+});
+
+test("schedule can fast-start notification prewarm despite recent ordinary attempt", async () => {
+  const timers = [];
+  let nowMs = 1_000;
+  const service = createThreadDetailActiveWindowPrewarmService({
+    now: () => nowMs,
+    delayMs: 25,
+    minIntervalMs: 1_000,
+    setTimeout: (fn, delayMs) => {
+      timers.push(delayMs);
+      fn();
+      return { unref() {} };
+    },
+    resolveSummary: async () => ({ summary: { id: "thread-1", status: { type: "idle" } } }),
+  });
+
+  assert.deepEqual(service.schedule({ threadId: "thread-1", reason: "thread-list-active" }), withExpectedJob({
+    scheduled: true,
+    reason: "scheduled",
+  }));
+  await Promise.resolve();
+  await Promise.resolve();
+  nowMs += 50;
+  assert.deepEqual(service.schedule({
+    threadId: "thread-1",
+    reason: "turn/started",
+    delayMs: 0,
+    bypassMinInterval: true,
+  }), withExpectedJob({
+    scheduled: true,
+    reason: "scheduled",
+  }));
+  assert.deepEqual(timers, [25, 0]);
 });

@@ -4,38 +4,129 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
+const { readFrontendSources } = require("./frontend-source-helper");
 
 const indexHtml = fs.readFileSync(path.resolve(__dirname, "..", "public", "index.html"), "utf8");
-const appJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "app.js"), "utf8");
+const appJs = readFrontendSources(path.resolve(__dirname, ".."));
+const mediaPreviewRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "media-preview-runtime.js"), "utf8");
+const appUpdateRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "app-update-runtime.js"), "utf8");
+const composerRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "composer-runtime.js"), "utf8");
 const stylesCss = fs.readFileSync(path.resolve(__dirname, "..", "public", "styles.css"), "utf8");
 const swJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "sw.js"), "utf8");
+const shellManifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, "..", "public", "shell-asset-manifest.json"), "utf8"));
+const threadListRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "thread-list-runtime.js"), "utf8");
+const threadTileRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "thread-tile-runtime.js"), "utf8");
 const threadDetailMergeStateJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "thread-detail-merge-state.js"), "utf8");
+const threadDetailRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "thread-detail-runtime.js"), "utf8");
+const sideChatRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "side-chat-runtime.js"), "utf8");
+const paneLayoutRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "pane-layout-runtime.js"), "utf8");
+const appShellRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "app-shell-runtime.js"), "utf8");
+const apiClientRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "api-client-runtime.js"), "utf8");
 const viewportMetricsJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "viewport-metrics.js"), "utf8");
 const platformPointer = fs.readFileSync(path.resolve(__dirname, "..", "docs", "HOME_AI_PLATFORM_CONTRACT.md"), "utf8");
 
-function functionBody(name) {
-  const start = appJs.indexOf(`function ${name}(`);
+function sourceFunctionBody(source, name) {
+  return sourceFunction(source, name).body;
+}
+
+function sourceFunction(source, name) {
+  if (source === appJs) {
+    if (paneLayoutRuntimeJs.includes(`function ${name}(`)) source = paneLayoutRuntimeJs;
+    else if (appShellRuntimeJs.includes(`function ${name}(`)) source = appShellRuntimeJs;
+    else if (apiClientRuntimeJs.includes(`function ${name}(`)) source = apiClientRuntimeJs;
+  }
+  const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing function ${name}`);
-  const bodyStart = appJs.indexOf(") {", start) + 2;
+  const bodyStart = source.indexOf(") {", start) + 2;
   assert.notEqual(bodyStart, 1, `missing function body ${name}`);
   let depth = 0;
-  for (let index = bodyStart; index < appJs.length; index += 1) {
-    const char = appJs[index];
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index];
     if (char === "{") depth += 1;
     if (char === "}") depth -= 1;
-    if (depth === 0) return appJs.slice(bodyStart + 1, index);
+    if (depth === 0) {
+      return {
+        source: source.slice(start, index + 1),
+        body: source.slice(bodyStart + 1, index),
+      };
+    }
   }
   throw new Error(`could not parse function ${name}`);
 }
 
-test("client turn ordering follows server started-at-first semantics", () => {
-  const body = functionBody("turnOrderMs");
-  const startedAtIndex = body.indexOf("numericTimestampMs(turn.startedAtMs)");
-  const completedAtIndex = body.indexOf("numericTimestampMs(turn.completedAtMs)");
+function functionBody(name) {
+  return sourceFunctionBody(appJs, name);
+}
+
+function composerRuntimeFunctionBody(name) {
+  return sourceFunctionBody(composerRuntimeJs, name);
+}
+
+function threadListRuntimeFunctionBody(name) {
+  return sourceFunctionBody(threadListRuntimeJs, name);
+}
+
+function threadTileRuntimeFunctionBody(name) {
+  return sourceFunctionBody(threadTileRuntimeJs, name);
+}
+
+function evaluatedSortTurnsForDisplay() {
+  const sources = [
+    "turnDisplaySortTimestampMs",
+    "turnDisplayItemTimestampMs",
+    "turnDisplayItemTimestampRange",
+    "turnDisplayStartMs",
+    "turnDisplayActivityMs",
+    "turnDisplaySortPhase",
+    "sortTurnsForDisplay",
+  ].map((name) => sourceFunction(appJs, name).source).join("\n");
+  return Function("turnOrderMs", "isRunningStatus", "isTurnComplete", `
+${sources}
+return sortTurnsForDisplay;
+  `)(
+    (turn) => {
+      const completed = /completed|failed|cancel/i.test(String(turn && (turn.status && turn.status.type || turn.status) || ""));
+      const fields = completed
+        ? ["completedAtMs", "updatedAtMs", "startedAtMs", "createdAtMs"]
+        : ["startedAtMs", "createdAtMs", "updatedAtMs", "completedAtMs"];
+      for (const field of fields) {
+        const value = Number(turn && turn[field]);
+        if (Number.isFinite(value) && value > 0) return value;
+      }
+      return 0;
+    },
+    (status) => /active|running|queued|processing/i.test(String(status && status.type || status || "")),
+    (turn) => /completed|failed|cancel/i.test(String(turn && (turn.status && turn.status.type || turn.status) || "")),
+  );
+}
+
+test("client turn ordering keeps active turns stable and completed turns completion-ordered", () => {
+  const body = sourceFunctionBody(threadDetailRuntimeJs, "turnOrderMs");
+  const completedBranchStart = body.indexOf("if (isTurnComplete(turn))");
+  const completedAtIndex = body.indexOf('"completedAtMs"', completedBranchStart);
+  const startedAtIndex = body.indexOf('"startedAtMs"', completedBranchStart);
   assert.notEqual(startedAtIndex, -1);
   assert.notEqual(completedAtIndex, -1);
-  assert.ok(startedAtIndex < completedAtIndex, "startedAt must sort before completedAt");
-  assert.match(body, /numericTimestampMs\(turn\.startedAt\)[\s\S]*numericTimestampMs\(turn\.createdAtMs\)[\s\S]*numericTimestampMs\(turn\.completedAtMs\)/);
+  assert.ok(completedAtIndex < startedAtIndex, "completed turns must sort by completedAt before startedAt");
+  assert.match(body, /if \(isTurnComplete\(turn\)\) \{[\s\S]*"completedAtMs"[\s\S]*"updatedAtMs"[\s\S]*"startedAtMs"[\s\S]*"createdAtMs"/);
+  assert.match(body, /return firstTurnTimestampMs\(turn, \[[\s\S]*"startedAtMs"[\s\S]*"createdAtMs"[\s\S]*"updatedAtMs"[\s\S]*"completedAtMs"/);
+  assert.match(sourceFunctionBody(threadDetailRuntimeJs, "firstTurnTimestampMs"), /numericTimestampMs\(turn && turn\[field\]\)/);
+  assert.match(functionBody("turnDisplaySortPhase"), /isRunningStatus\(turn && turn\.status\) && !isTurnComplete\(turn\)[\s\S]*return 2/);
+  assert.match(functionBody("turnDisplaySortPhase"), /if \(isTurnComplete\(turn\)\) return 1/);
+  assert.match(functionBody("turnDisplayStartMs"), /"startedAtMs"[\s\S]*"createdAtMs"[\s\S]*"completedAtMs"/);
+  assert.match(functionBody("turnDisplayActivityMs"), /if \(isTurnComplete\(turn\)\) return orderMs \|\| range\.first \|\| range\.last;/);
+  assert.match(functionBody("turnDisplayActivityMs"), /return Math\.max\(orderMs, range\.last, range\.first\);/);
+  const sortBody = functionBody("sortTurnsForDisplay");
+  assert.match(sortBody, /const leftActivity = turnDisplayActivityMs\(leftTurn\);/);
+  assert.match(sortBody, /if \(leftActivity !== rightActivity\) return leftActivity - rightActivity;/);
+  assert.match(sortBody, /const leftPhase = turnDisplaySortPhase\(leftTurn\);/);
+  assert.match(sortBody, /if \(leftPhase !== rightPhase\) return leftPhase - rightPhase;/);
+  assert.ok(sortBody.indexOf("leftActivity") < sortBody.indexOf("leftPhase"), "turn activity timestamp must sort before state phase tie-breaker");
+  assert.match(functionBody("turnDisplayItemTimestampRange"), /Array\.isArray\(turn && turn\.items\) \? turn\.items : \[\]/);
+  assert.match(functionBody("turnDisplayItemTimestampMs"), /"mobileDisplayTimestampMs"[\s\S]*"completedAtMs"/);
+  assert.match(sortBody, /const leftRange = turnDisplayItemTimestampRange\(leftTurn\);/);
+  assert.match(sortBody, /if \(leftRange\.first !== rightRange\.first\) return leftRange\.first - rightRange\.first;/);
+  assert.match(sortBody, /if \(leftRange\.last !== rightRange\.last\) return leftRange\.last - rightRange\.last;/);
 
   const consistencyBody = functionBody("checkConversationProjectionConsistency");
   assert.match(consistencyBody, /const orderSnapshot = conversationTurnOrderDiagnosticSnapshot\(source, extra\);/);
@@ -44,6 +135,68 @@ test("client turn ordering follows server started-at-first semantics", () => {
   assert.doesNotMatch(consistencyBody, /hasTurnOrderMismatch\(orderSnapshot\)/);
   assert.doesNotMatch(consistencyBody, /turnOrderMismatchDiagnosticEvent\(orderSnapshot\)/);
   assert.doesNotMatch(consistencyBody, /turnOrderMismatchDiagnosticSuccess\(orderSnapshot\)/);
+});
+
+test("client turn display sorting does not pin older active turns below newer completed receipts", () => {
+  const sortTurnsForDisplay = evaluatedSortTurnsForDisplay();
+  const base = 1_780_000_000_000;
+  const olderActive = {
+    id: "older-active",
+    status: { type: "running" },
+    startedAtMs: base + 1000,
+    items: [{ id: "old-progress", type: "agentMessage", createdAtMs: base + 1500 }],
+  };
+  const newerCompleted = {
+    id: "newer-completed",
+    status: "completed",
+    startedAtMs: base + 2000,
+    completedAtMs: base + 5000,
+    items: [{ id: "new-receipt", type: "agentMessage", completedAtMs: base + 5000 }],
+  };
+  const latestActive = {
+    id: "latest-active",
+    status: { type: "running" },
+    startedAtMs: base + 1000,
+    items: [{ id: "latest-progress", type: "agentMessage", createdAtMs: base + 6000 }],
+  };
+  const sameTimeActive = {
+    id: "same-time-active",
+    status: { type: "running" },
+    startedAtMs: base + 5000,
+    items: [],
+  };
+
+  assert.deepEqual(sortTurnsForDisplay([newerCompleted, olderActive]).map((turn) => turn.id), [
+    "older-active",
+    "newer-completed",
+  ]);
+  assert.deepEqual(sortTurnsForDisplay([latestActive, newerCompleted]).map((turn) => turn.id), [
+    "newer-completed",
+    "latest-active",
+  ]);
+  assert.deepEqual(sortTurnsForDisplay([sameTimeActive, newerCompleted]).map((turn) => turn.id), [
+    "newer-completed",
+    "same-time-active",
+  ]);
+
+  const overlappingCompletedEarly = {
+    id: "overlapping-completed-early",
+    status: "completed",
+    startedAtMs: base + 2500,
+    completedAtMs: base + 9000,
+    items: [{ id: "slow-receipt", type: "agentMessage", completedAtMs: base + 9000 }],
+  };
+  const overlappingCompletedLater = {
+    id: "overlapping-completed-later",
+    status: "completed",
+    startedAtMs: base + 3000,
+    completedAtMs: base + 5000,
+    items: [{ id: "fast-receipt", type: "agentMessage", completedAtMs: base + 5000 }],
+  };
+  assert.deepEqual(sortTurnsForDisplay([overlappingCompletedLater, overlappingCompletedEarly]).map((turn) => turn.id), [
+    "overlapping-completed-early",
+    "overlapping-completed-later",
+  ]);
 });
 
 test("thread detail response diagnostics are planned before Home AI reporting", () => {
@@ -74,7 +227,7 @@ test("mobile viewport and early guards disable page zoom", () => {
   assert.match(indexHtml, /<script src="\/conversation-scroll\.js"><\/script>/);
   assert.match(indexHtml, /<script src="\/image-compressor\.js"><\/script>/);
   assert.match(indexHtml, /<script src="\/plugin-embed\.js"><\/script>/);
-  assert.match(appJs, /const viewportMetrics = window\.CodexViewportMetrics/);
+  assert.match(appJs, /(?:const|var) viewportMetrics = window\.CodexViewportMetrics/);
   assert.match(appJs, /viewportMetrics\.measureViewport\(\{/);
   assert.match(viewportMetricsJs, /const keyboardShrunk = Boolean\(keyboardInputActive && \(keyboardCandidate \|\| offsetKeyboardShifted \|\| scrollKeyboardShifted \|\| hostKeyboardVisible\)\)/);
   assert.match(viewportMetricsJs, /hostKeyboardBottomInset/);
@@ -139,33 +292,34 @@ test("mobile viewport and early guards disable page zoom", () => {
   assert.match(platformPointer, /development visual check passes/);
 });
 
-test("Android composer stale focus is released before the native tap", () => {
-  const prepareBody = functionBody("prepareMessageInputForNativeGesture");
-  const recoverBody = functionBody("recoverMessageInputKeyboardFromGesture");
-  const shouldRecoverBody = functionBody("shouldRecoverMessageInputKeyboard");
-  const releaseBody = functionBody("releaseStaleAndroidMessageInputFocusBeforeNativeTap");
+test("Android composer focused native tap preserves IME focus", () => {
+  const prepareBody = composerRuntimeFunctionBody("prepareMessageInputForNativeGesture");
+  const recoverBody = composerRuntimeFunctionBody("recoverMessageInputKeyboardFromGesture");
+  const shouldRecoverBody = composerRuntimeFunctionBody("shouldRecoverMessageInputKeyboard");
+  const releaseBody = composerRuntimeFunctionBody("releaseStaleAndroidMessageInputFocusBeforeNativeTap");
   assert.match(prepareBody, /if \(!input \|\| !isAndroidBrowser\(\)\) return;/);
   assert.match(prepareBody, /setMessageInputDisabled\(false\)/);
   assert.match(prepareBody, /releaseStaleAndroidMessageInputFocusBeforeNativeTap\(input\)/);
   assert.doesNotMatch(prepareBody, /focusMessageInput|preventDefault/);
   assert.match(releaseBody, /messageInputKeyboardVisible\(\)/);
+  assert.match(releaseBody, /document\.activeElement === input[\s\S]*return false/);
   assert.match(releaseBody, /input\.blur\(\)/);
   assert.match(shouldRecoverBody, /if \(!isAndroidBrowser\(\) && !isHermesEmbedMode\(\)\) return false;/);
   assert.doesNotMatch(shouldRecoverBody, /if \(isAndroidBrowser\(\)\) return false;/);
-  assert.match(recoverBody, /if \(isAndroidBrowser\(\)\) return false;/);
+  assert.doesNotMatch(recoverBody, /if \(isAndroidBrowser\(\)\) return false;/);
   assert.match(recoverBody, /resetActiveFocus: true/);
   assert.match(recoverBody, /allowAndroidActiveFocusReset: true/);
 });
 
 test("composer sizing avoids one-pixel layout churn while typing and streaming", () => {
   assert.match(appJs, /composerHeightPx:\s*0/);
-  assert.match(appJs, /function updateComposerHeightVar\(options = \{\}\)/);
-  assert.match(appJs, /stablePixelChanged\(previousPx, nextPx\)/);
-  assert.match(appJs, /document\.documentElement\.style\.setProperty\("--composer-height", `\$\{nextPx\}px`\)/);
-  assert.match(appJs, /function autoSizeMessageInput\(el, options = \{\}\)/);
-  assert.match(appJs, /nextTextLength < previousTextLength/);
+  assert.match(composerRuntimeJs, /function updateComposerHeightVar\(options = \{\}\)/);
+  assert.match(composerRuntimeJs, /stablePixelChanged\(previousPx, nextPx\)/);
+  assert.match(composerRuntimeJs, /document\.documentElement\.style\.setProperty\("--composer-height", `\$\{nextPx\}px`\)/);
+  assert.match(composerRuntimeJs, /function autoSizeMessageInput\(el, options = \{\}\)/);
+  assert.match(composerRuntimeJs, /nextTextLength < previousTextLength/);
   assert.match(appJs, /autoSizeMessageInput\(event\.target\);/);
-  assert.match(appJs, /updateMessageInputOverflow\(el, nextHeight\)/);
+  assert.match(composerRuntimeJs, /updateMessageInputOverflow\(el, nextHeight\)/);
   assert.match(stylesCss, /\.message-input\s*{[\s\S]*height:\s*44px;[\s\S]*overflow-y:\s*hidden;/);
 });
 
@@ -182,10 +336,10 @@ test("turn timer preserves elapsed digits on narrow embedded viewports", () => {
 });
 
 test("visual harness can replay empty cached detail openings without exposing thread content", () => {
-  const installBody = functionBody("installCodexMobileVisualHarnessFacade");
-  const harnessBody = functionBody("simulateEmptyCachedDetailOpenForHarness");
-  const stableDomHarnessBody = functionBody("simulateStableSignatureEmptyDomForHarness");
-  const shapeBody = functionBody("visualHarnessThreadShape");
+  const installBody = sourceFunctionBody(sideChatRuntimeJs, "installCodexMobileVisualHarnessFacade");
+  const harnessBody = sourceFunctionBody(sideChatRuntimeJs, "simulateEmptyCachedDetailOpenForHarness");
+  const stableDomHarnessBody = sourceFunctionBody(sideChatRuntimeJs, "simulateStableSignatureEmptyDomForHarness");
+  const shapeBody = sourceFunctionBody(sideChatRuntimeJs, "visualHarnessThreadShape");
   const smokeScript = fs.readFileSync(path.resolve(__dirname, "..", "scripts", "codex-mobile-empty-detail-cache-smoke.js"), "utf8");
   const smokeHarness = require(path.resolve(__dirname, "..", "scripts", "codex-mobile-empty-detail-cache-smoke.js"));
 
@@ -231,28 +385,42 @@ test("visual harness can replay empty cached detail openings without exposing th
 });
 
 test("public app shell cache advances with static frontend changes", () => {
-  const appBuild = appJs.match(/CLIENT_BUILD_ID = "0\.1\.11\|(codex-mobile-shell-v\d+)"/);
-  assert.ok(appBuild, "missing app client shell build id");
-  assert.match(swJs, new RegExp(`const CACHE_NAME = "${appBuild[1]}"`));
-  assert.match(swJs, /"\/home-ai-diagnostic-reporting\.js"/);
+  assert.match(shellManifest.clientBuildId, /^0\.1\.12\|codex-mobile-shell-v628-[a-f0-9]{12}$/);
+  assert.match(shellManifest.shellCacheName, /^codex-mobile-shell-v628-[a-f0-9]{12}$/);
+  assert.match(swJs, /shell-asset-manifest\.js/);
+  assert.ok(shellManifest.precacheAssets.includes("/home-ai-diagnostic-reporting.js"));
   assert.match(appJs, /"\/home-ai-diagnostic-reporting\.js"/);
-  assert.match(swJs, /"\/thread-diagnostic-events\.js"/);
+  assert.ok(shellManifest.precacheAssets.includes("/thread-diagnostic-events.js"));
   assert.match(appJs, /"\/thread-diagnostic-events\.js"/);
-  assert.match(swJs, /"\/thread-status-hints\.js"/);
-  assert.match(swJs, /"\/thread-performance-metrics\.js"/);
-  assert.match(swJs, /"\/thread-list-load-policy\.js"/);
-  assert.match(swJs, /"\/thread-list-stable-order\.js"/);
-  assert.match(swJs, /"\/live-operation-dock-state\.js"/);
-  assert.match(swJs, /"\/thread-detail-state\.js"/);
-  assert.match(swJs, /"\/thread-detail-render-plan\.js"/);
-  assert.match(swJs, /"\/thread-detail-merge-state\.js"/);
-  assert.match(swJs, /"\/thread-detail-v4-merge-state\.js"/);
-  assert.match(swJs, /"\/thread-detail-patch-plan\.js"/);
-  assert.match(swJs, /"\/thread-detail-dom-patch\.js"/);
-  assert.match(swJs, /"\/thread-detail-actions\.js"/);
-  assert.match(swJs, /"\/thread-tile-actions\.js"/);
-  assert.match(swJs, /"\/thread-tile-state\.js"/);
-  assert.match(swJs, /"\/thread-tile-layout\.js"/);
+  for (const asset of [
+    "/thread-status-hints.js",
+    "/thread-performance-metrics.js",
+    "/thread-list-load-policy.js",
+    "/thread-list-stable-order.js",
+    "/thread-list-runtime.js",
+    "/live-operation-dock-state.js",
+    "/thread-detail-state.js",
+    "/thread-detail-render-plan.js",
+    "/thread-detail-merge-state.js",
+    "/thread-detail-v4-merge-state.js",
+    "/thread-detail-runtime.js",
+    "/thread-detail-patch-plan.js",
+    "/thread-detail-dom-patch.js",
+    "/thread-detail-actions.js",
+    "/thread-tile-actions.js",
+    "/thread-tile-state.js",
+    "/thread-tile-layout.js",
+    "/thread-tile-runtime.js",
+    "/composer-runtime.js",
+    "/app-update-runtime.js",
+    "/side-chat-runtime.js",
+  ]) {
+    assert.ok(shellManifest.precacheAssets.includes(asset), `manifest missing ${asset}`);
+  }
+  assert.match(appJs, /"\/side-chat-runtime\.js"/);
+  assert.match(indexHtml, /<script src="\/side-chat-runtime\.js"><\/script>[\s\S]*<script src="\/media-preview-runtime\.js"><\/script>[\s\S]*<script src="\/app\.js"><\/script>/);
+  assert.match(appJs, /(?:const|var) sideChatRuntimeApi = window\.CodexSideChatRuntime/);
+  assert.match(appJs, /function requireSideChatRuntime\(\)/);
   assert.match(stylesCss, /\.subagent-panel\s*{[\s\S]*position:\s*fixed;[\s\S]*height:\s*var\(--app-height, 100dvh\);/);
   assert.match(stylesCss, /\.thread-side-panel\s*{[\s\S]*grid-template-rows:\s*minmax\(92px, 0\.42fr\) minmax\(224px, 1fr\);/);
   assert.match(stylesCss, /\.thread-side-panel\.no-subagents\s*{[\s\S]*grid-template-rows:\s*minmax\(0, 1fr\);/);
@@ -271,15 +439,15 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(stylesCss, /html\.keyboard-open \.side-chat-form textarea\s*{[\s\S]*min-height:\s*44px;[\s\S]*max-height:\s*min\(14vh, 84px\);/);
   assert.match(appJs, /function ensureSideChatDraftVisible\(/);
   assert.match(appJs, /function autoSizeSideChatDraftTextarea\(/);
-  assert.match(appJs, /autoSizeSideChatDraftTextarea\(textarea\)/);
-  assert.match(appJs, /requestAnimationFrame\(ensureSideChatDraftVisible\)/);
+  assert.match(sideChatRuntimeJs, /autoSizeSideChatDraftTextarea\(textarea\)/);
+  assert.match(sideChatRuntimeJs, /requestAnimationFrame\(ensureSideChatDraftVisible\)/);
   assert.match(appJs, /function scheduleSideChatPoll\(/);
-  assert.match(appJs, /侧聊正在回复/);
+  assert.match(sideChatRuntimeJs, /侧聊正在回复/);
   assert.match(appJs, /function flushSideChatDraftNow\(/);
   assert.match(appJs, /threadDetailRenderPlanApi\.planThreadDetailLoadingShellPostStateEffects/);
   assert.match(functionBody("applyThreadDetailPostRenderEffect"), /loadSideChat\(sideChatThreadId, \{ silent: item\.silent !== false \}\)\.catch\(showError\);/);
-  assert.match(appJs, /function serverBuildIdFromConfig\(config\) \{\s*return String\(config && \(config\.clientBuildId \|\| config\.shellCacheName \|\| config\.buildId\) \|\| ""\)\.trim\(\);/);
-  assert.doesNotMatch(appJs, /function serverBuildIdFromConfig\(config\) \{\s*return String\(config && \(config\.clientBuildId \|\| config\.shellCacheName \|\| config\.buildId \|\| config\.version\)/);
+  assert.match(appUpdateRuntimeJs, /function serverBuildIdFromConfig\(config\) \{\s*return String\(config && \(config\.clientBuildId \|\| config\.shellCacheName \|\| config\.buildId\) \|\| ""\)\.trim\(\);/);
+  assert.doesNotMatch(appUpdateRuntimeJs, /function serverBuildIdFromConfig\(config\) \{\s*return String\(config && \(config\.clientBuildId \|\| config\.shellCacheName \|\| config\.buildId \|\| config\.version\)/);
   assert.match(appJs, /startupThreadOpenPending: false/);
   assert.match(indexHtml, /id="pluginStartupLoading"/);
   assert.match(indexHtml, /data-plugin-startup-title>正在加载 Codex\.\.\.</);
@@ -292,25 +460,26 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(stylesCss, /\.plugin-startup-loading\s*{[\s\S]*position:\s*fixed;[\s\S]*place-items:\s*center;/);
   assert.doesNotMatch(appJs, /thread-card-token-badge/);
   assert.doesNotMatch(stylesCss, /thread-card-token-badge/);
-  assert.match(appJs, /const savedThreadId = isHermesEmbedMode\(\) \? "" : \(localStorage\.getItem\(STORAGE_THREAD_ID\) \|\| ""\);/);
+  assert.match(appJs, /(?:const|var) savedThreadId = isHermesEmbedMode\(\) \? "" : \(localStorage\.getItem\(STORAGE_THREAD_ID\) \|\| ""\);/);
   assert.match(appJs, /function hasStartupThreadOpenIntent\(\)/);
   assert.match(appJs, /postClientEvent\("startup_stage"/);
-  assert.match(appJs, /postPerformanceEvent\("shell_loaded"/);
-  assert.match(appJs, /postPerformanceEvent\("thread_list_rendered"/);
-  assert.match(appJs, /const listPerformance = threadPerformanceMetrics\.threadListEventFields\(result\);/);
+  assert.match(appUpdateRuntimeJs, /postPerformanceEvent\("shell_loaded"/);
+  assert.match(threadListRuntimeJs, /postPerformanceEvent\("thread_list_rendered"/);
+  assert.match(threadListRuntimeJs, /const listPerformance = threadPerformanceMetrics\.threadListEventFields\(result\);/);
   assert.match(appJs, /THREAD_LIST_SLOW_PATH_MS = 1500/);
-  assert.match(appJs, /const listSlowPlan = threadPerformanceMetrics\.planThreadListSlowPathDiagnostic\(listPerformanceEvent, \{/);
-  assert.match(appJs, /threadDiagnosticEventsApi\.threadListSlowPathDiagnosticEvent\(listSlowPlan\)/);
-  assert.match(appJs, /threadDiagnosticEventsApi\.threadListSlowPathDiagnosticSuccess\(\{/);
-  assert.match(appJs, /serverTimings: listPerformance\.serverTimings/);
-  assert.match(appJs, /performancePhase: listPerformance\.performancePhase/);
+  assert.match(threadListRuntimeJs, /const listSlowPlan = threadPerformanceMetrics\.planThreadListSlowPathDiagnostic\(listPerformanceEvent, \{/);
+  assert.match(threadListRuntimeJs, /threadDiagnosticEventsApi\.threadListSlowPathDiagnosticEvent\(listSlowPlan\)/);
+  assert.match(threadListRuntimeJs, /threadDiagnosticEventsApi\.threadListSlowPathDiagnosticSuccess\(\{/);
+  assert.match(threadListRuntimeJs, /serverTimings: listPerformance\.serverTimings/);
+  assert.match(threadListRuntimeJs, /performancePhase: listPerformance\.performancePhase/);
   assert.match(functionBody("loadThread"), /const cachedFirstPaintReportingStage = threadDetailRenderPlanApi\.planThreadDetailFirstPaintReportingStage\(\{[\s\S]*detailRenderMode: "cached-current",[\s\S]*cached: true,[\s\S]*threadHash: diagnosticThreadHash\(threadId\),[\s\S]*\}\);[\s\S]*threadPerformanceMetrics\.threadDetailFirstPaintEventFields\(\s*state\.currentThread,\s*cachedFirstPaintReportingStage\.performanceInput,\s*\);/);
   assert.match(functionBody("loadThread"), /const firstPaintReportingStage = threadDetailRenderPlanApi\.planThreadDetailFirstPaintReportingStage\(\{[\s\S]*detailRenderMode: "first-paint",[\s\S]*cached: false,[\s\S]*threadHash: diagnosticThreadHash\(threadId\),[\s\S]*\}\);[\s\S]*threadPerformanceMetrics\.threadDetailFirstPaintEventFields\(\s*result\.thread,\s*firstPaintReportingStage\.performanceInput,\s*\);/);
   assert.match(functionBody("loadThread"), /const cachedTelemetryPlan = threadDetailRenderPlanApi\.planThreadDetailCachedCurrentTelemetryEffects\(Object\.assign\(\{[\s\S]*performanceEvent: firstPaintPerformance,[\s\S]*\}, cachedFirstPaintReportingStage\.telemetryInput\)\);/);
   assert.match(functionBody("loadThread"), /applyThreadDetailFirstPaintTelemetryEffectsPlan\(cachedTelemetryPlan, \{ thread: state\.currentThread \}\);/);
   assert.match(functionBody("loadThread"), /const firstPaintTelemetryPlan = threadDetailRenderPlanApi\.planThreadDetailFirstPaintTelemetryEffects\(Object\.assign\(\{[\s\S]*performanceEvent: firstPaintPerformance,[\s\S]*\}, firstPaintReportingStage\.telemetryInput\)\);/);
   assert.match(functionBody("loadThread"), /applyThreadDetailFirstPaintTelemetryEffectsPlan\(firstPaintTelemetryPlan, \{ thread: result\.thread \}\);/);
-  assert.match(functionBody("loadThread"), /threadDiagnosticEventsApi\.threadDetailLoadFailedDiagnosticEvent\(\{[\s\S]*errorCode: diagnosticErrorCode\(err, "thread_detail_load_failed"\),[\s\S]*durationBucket: diagnosticDurationBucket\(roundedDurationMs\(switchStartedAt\)\),[\s\S]*statusCode: diagnosticErrorStatus\(err\),[\s\S]*threadHash: diagnosticThreadHash\(threadId\),[\s\S]*\}\)/);
+  assert.match(functionBody("loadThread"), /const suppressLoadFailureDiagnostic = options\.suppressLoadFailureDiagnostic === true;/);
+  assert.match(functionBody("loadThread"), /if \(suppressLoadFailureDiagnostic\) \{[\s\S]*postClientEvent\("thread_detail_load_failure_diagnostic_suppressed"[\s\S]*\} else \{[\s\S]*threadDiagnosticEventsApi\.threadDetailLoadFailedDiagnosticEvent\(\{[\s\S]*errorCode: diagnosticErrorCode\(err, "thread_detail_load_failed"\),[\s\S]*durationBucket: diagnosticDurationBucket\(roundedDurationMs\(switchStartedAt\)\),[\s\S]*statusCode: diagnosticErrorStatus\(err\),[\s\S]*threadHash: diagnosticThreadHash\(threadId\),[\s\S]*\}\)/);
   assert.doesNotMatch(functionBody("loadThread"), /recordHomeAiDiagnosticFailure\(\{[\s\S]*diagnostic_type: "thread_detail_load_failed"/);
   assert.match(functionBody("loadThread"), /threadDetailRenderPlanApi\.planThreadDetailSwitchStartClientEvent\(\{/);
   assert.match(functionBody("loadThread"), /threadDetailRenderPlanApi\.planThreadDetailSwitchCancelledClientEvent\(\{/);
@@ -326,8 +495,8 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(functionBody("applyThreadDetailFirstPaintTelemetryEffect"), /postClientEvent\(String\(item\.eventName \|\| ""\), item\.payload \|\| \{\}\);/);
   assert.match(appJs, /threadDetailDomPatchApi\.planConversationHtmlPerformanceEvent\(\{/);
   assert.match(appJs, /postPerformanceEvent\(performancePlan\.eventName, performancePlan\.payload, performancePlan\.options\)/);
-  assert.match(appJs, /postPerformanceEvent\("github_cards_hydrate_ms"/);
-  assert.match(appJs, /postPerformanceEvent\("mermaid_hydrate_ms"/);
+  assert.match(mediaPreviewRuntimeJs, /postPerformanceEvent\("github_cards_hydrate_ms"/);
+  assert.match(mediaPreviewRuntimeJs, /postPerformanceEvent\("mermaid_hydrate_ms"/);
   assert.match(appJs, /eventName: "thread_refresh_ms"/);
   assert.match(appJs, /state\.startupThreadOpenPending = hasStartupThreadOpenIntent\(\);[\s\S]*early_opening_rendered/);
   assert.match(appJs, /async function fetchPublicConfigWithRetry\(startedAt\)/);
@@ -336,11 +505,14 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(appJs, /postStartupStage\("public_config_done"/);
   assert.match(appJs, /postStartupStage\("public_config_failed"/);
   assert.match(appJs, /requestHermesPluginRefresh\("public_config_failed", \{ force: true \}\)/);
-  assert.match(appJs, /state\.startupThreadOpenPending = Boolean\(startupThreadId \|\| savedThreadId \|\| \(startupPluginRouteHint && startupPluginRouteHint\.threadId\)\);/);
-  assert.match(appJs, /const earlyRestorePromise = savedThreadId && !startupThreadId[\s\S]*loadThread\(savedThreadId, \{ source: "restore-startup" \}\)/);
-  assert.match(appJs, /const status = await api\("\/api\/status"\)\.catch/);
-  assert.match(appJs, /const workspacesStartedAt = nowPerfMs\(\);\s*\n\s*await loadWorkspaces\(\);/);
-  assert.match(appJs, /await loadWorkspaces\(\);[\s\S]*await loadThreads\(\{ silent: startupThreadOpenPending, deferFallback: true \}\);/);
+  assert.match(appJs, /function shouldAutoRestoreSavedThreadAtStartup\(savedThreadId, startupThreadId, startupPluginRouteHint\)/);
+  assert.match(appJs, /!isHermesEmbedMode\(\) && typeof isMobileViewport === "function" && isMobileViewport\(\)/);
+  assert.match(appJs, /state\.startupThreadOpenPending = Boolean\(startupThreadId \|\| \(shouldAutoRestoreSavedThread && savedThreadId\) \|\| \(startupPluginRouteHint && startupPluginRouteHint\.threadId\)\);/);
+  assert.match(appJs, /(?:const|var) earlyRestorePromise = shouldAutoRestoreSavedThread[\s\S]*loadThread\(savedThreadId, \{ source: "restore-startup", suppressLoadFailureDiagnostic: true \}\)/);
+  assert.match(appJs, /(?:const|var) statusPromise = api\("\/api\/status"\)\.catch/);
+  assert.match(appJs, /(?:const|var) workspacesPromise = loadWorkspaces\(\)\.then/);
+  assert.match(appJs, /(?:const|var) threadDisplayPromise = loadThreadDisplaySettings\(\{ render: false \}\)/);
+  assert.match(appJs, /await Promise\.all\(\[statusPromise, workspacesPromise, threadDisplayPromise\]\);[\s\S]*await loadThreads\(\{ silent: startupThreadOpenPending, deferFallback: true \}\);/);
   assert.match(appJs, /postStartupStage\("status_done"/);
   assert.match(appJs, /postStartupStage\("threads_done"/);
   assert.match(appJs, /startupInProgress: false/);
@@ -377,20 +549,20 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(appJs, /STORAGE_RESTART_AUTO_RECOVER_THREADS/);
   assert.match(appJs, /async function maybeAutoRecoverTurnAfterReconnect\(status, reason = "reconnect"\)/);
   assert.match(appJs, /\/auto-recover/);
-  assert.match(appJs, /const recovered = wasUnavailable && status && status\.ready;/);
+  assert.match(appJs, /(?:const|var) recovered = wasUnavailable && status && status\.ready;/);
   assert.match(appJs, /maybeAutoRecoverTurnAfterReconnect\(payload\.status, "app-server-reconnect"\)/);
   assert.match(appJs, /if \(state\.currentThreadId && state\.currentThread && !state\.currentThread\.mobileLoading && !state\.currentThread\.mobileLoadError\) \{/);
   assert.match(appJs, /return shouldPollCurrentThread\(\) \|\| currentThreadListRowChanged\(\);/);
-  assert.match(appJs, /const foregroundRefresh = currentThreadNeedsForegroundRefresh\(\);[\s\S]*mobile_resume_thread_refresh_scheduled[\s\S]*if \(foregroundRefresh\) scheduleCurrentThreadRefresh\(250, "resume"\);[\s\S]*else await refreshCurrentThread\(\{ source: "resume" \}\);[\s\S]*else if \(state\.currentThreadId\) \{[\s\S]*await refreshCurrentThread\(\{ source: "resume" \}\);[\s\S]*else \{[\s\S]*await restoreThreadSelection\(\);/);
-  assert.match(appJs, /function hasThreadDetailSelectionIntent\(\) \{[\s\S]*state\.currentThreadId[\s\S]*state\.threadLoadController[\s\S]*state\.startupThreadOpenPending/);
-  assert.match(appJs, /function shouldRenderPrimaryConversationShell\(\) \{[\s\S]*return !hasThreadDetailSelectionIntent\(\) && !state\.newThreadDraft;/);
-  assert.match(functionBody("loadWorkspaces"), /if \(shouldRenderPrimaryConversationShell\(\)\) renderCurrentThread\(\);/);
-  assert.match(functionBody("loadThreads"), /if \(shouldRenderPrimaryConversationShell\(\)\) renderCurrentThread\(\);/);
-  assert.doesNotMatch(functionBody("loadWorkspaces"), /if \(!state\.currentThread\) renderCurrentThread\(\);/);
-  assert.doesNotMatch(functionBody("loadThreads"), /if \(!state\.currentThread\) renderCurrentThread\(\);/);
+  assert.match(appJs, /(?:const|var) foregroundRefresh = currentThreadNeedsForegroundRefresh\(\);[\s\S]*mobile_resume_thread_refresh_scheduled[\s\S]*if \(foregroundRefresh\) scheduleCurrentThreadRefresh\(250, "resume"\);[\s\S]*else await refreshCurrentThread\(\{ source: "resume" \}\);[\s\S]*else if \(state\.currentThreadId\) \{[\s\S]*await refreshCurrentThread\(\{ source: "resume" \}\);[\s\S]*else \{[\s\S]*await restoreThreadSelection\(\);/);
+  assert.match(threadListRuntimeJs, /function hasThreadDetailSelectionIntent\(\) \{[\s\S]*state\.currentThreadId[\s\S]*state\.threadLoadController[\s\S]*state\.startupThreadOpenPending/);
+  assert.match(threadListRuntimeJs, /function shouldRenderPrimaryConversationShell\(\) \{[\s\S]*return !hasThreadDetailSelectionIntent\(\) && !state\.newThreadDraft;/);
+  assert.match(threadListRuntimeFunctionBody("loadWorkspaces"), /if \(shouldRenderPrimaryConversationShell\(\)\) renderCurrentThread\(\);/);
+  assert.match(threadListRuntimeFunctionBody("loadThreads"), /if \(shouldRenderPrimaryConversationShell\(\)\) renderCurrentThread\(\);/);
+  assert.doesNotMatch(threadListRuntimeFunctionBody("loadWorkspaces"), /if \(!state\.currentThread\) renderCurrentThread\(\);/);
+  assert.doesNotMatch(threadListRuntimeFunctionBody("loadThreads"), /if \(!state\.currentThread\) renderCurrentThread\(\);/);
   assert.match(appJs, /function showHermesPluginPrimaryPage\(options = \{\}\) \{[\s\S]*const force = options\.force === true;[\s\S]*plugin_primary_suppressed_thread_open/);
   assert.match(functionBody("showHermesPluginPrimaryPage"), /state\.threadLoadController[\s\S]*state\.startupThreadOpenPending[\s\S]*state\.currentThread && state\.currentThread\.mobileLoading/);
-  assert.match(appJs, /async function restoreThreadSelection\(\) \{[\s\S]*if \(hasThreadDetailSelectionIntent\(\)\) return;[\s\S]*showHermesPluginPrimaryPage\(\{ source: "restore-empty" \}\);[\s\S]*return;/);
+  assert.match(threadListRuntimeJs, /async function restoreThreadSelection\(\) \{[\s\S]*if \(hasThreadDetailSelectionIntent\(\)\) return;[\s\S]*showHermesPluginPrimaryPage\(\{ source: "restore-empty" \}\);[\s\S]*return;/);
   assert.match(functionBody("loadThread"), /const loadingShellPostStatePlan = threadDetailRenderPlanApi\.planThreadDetailLoadingShellPostStateEffects\(\{[\s\S]*threadId,[\s\S]*source,[\s\S]*\}\);/);
   assert.match(functionBody("loadThread"), /applyThreadDetailPostRenderEffectsPlan\(loadingShellPostStatePlan, \{ thread: state\.currentThread \}\);/);
   assert.doesNotMatch(functionBody("loadThread"), /renderCurrentThread\(\{ stickToBottom: true \}\);\s*\n\s*publishPluginNavigationState\(\{ force: true \}\);\s*\n\s*updateComposerControls\(\);/);
@@ -398,7 +570,7 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.doesNotMatch(appJs, /function threadOpenRenderOptions/);
   assert.doesNotMatch(appJs, /scrollConversationToTop/);
   assert.doesNotMatch(appJs, /scrollToTop/);
-  assert.match(appJs, /const explicitNoStickToBottom = options\.stickToBottom === false \|\| Boolean\(options\.scrollToTurnReceiptStart\);/);
+  assert.match(appJs, /(?:const|var) explicitNoStickToBottom = options\.stickToBottom === false \|\| Boolean\(options\.scrollToTurnReceiptStart\);/);
   assert.match(functionBody("updateScrollToBottomButton"), /conversationScroll\.planConversationJumpButtons\(\{/);
   assert.match(functionBody("updateScrollToBottomButton"), /hasThread: Boolean\(state\.currentThread\),/);
   assert.match(functionBody("updateScrollToBottomButton"), /nearBottom: isConversationNearBottom\(\),/);
@@ -431,12 +603,12 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(functionBody("loadThread"), /const draftRestoreStartedAt = nowPerfMs\(\);\s*\n\s*const firstPaintDraftRestorePlan = threadDetailRenderPlanApi\.planThreadDetailFirstPaintDraftRestoreEffects\(\);\s*\n\s*applyThreadDetailPostRenderEffectsPlan\(firstPaintDraftRestorePlan, \{ thread: state\.currentThread \}\);\s*\n\s*const draftRestoreMs = roundedDurationMs\(draftRestoreStartedAt\);/);
   assert.doesNotMatch(functionBody("loadThread"), /localStorage\.setItem\(STORAGE_THREAD_ID, threadId\);\s*\n\s*draftStore\.setTargetKey\(""\);\s*\n\s*followThreadOpenToBottom\(threadId\);\s*\n\s*if \(state\.events\) connectEvents\(\);/);
   assert.match(appJs, /renderCurrentThread\(\{ stickToBottom: true \}\);\s*\n\s*const conversationRenderMs = roundedDurationMs\(conversationRenderStartedAt\);\s*\n\s*const firstPaintAfterRenderPlan = threadDetailRenderPlanApi\.planThreadDetailFirstPaintAfterRenderEffects\(\{[\s\S]*seq,[\s\S]*source: "first-paint",[\s\S]*\}\);\s*\n\s*applyThreadDetailPostRenderEffectsPlan\(firstPaintAfterRenderPlan, \{ thread: state\.currentThread \}\);\s*\n\s*const postRenderStartedAt = nowPerfMs\(\);\s*\n\s*const firstPaintPostRenderPlan = threadDetailRenderPlanApi\.planThreadDetailFirstPaintPostRenderEffects\(\{[\s\S]*threadId,[\s\S]*seq,[\s\S]*source,[\s\S]*\}\);\s*\n\s*applyThreadDetailPostRenderEffectsPlan\(firstPaintPostRenderPlan, \{ thread: result\.thread \}\);/);
-  assert.match(appJs, /const postRenderMs = roundedDurationMs\(postRenderStartedAt\);\s*\n\s*const firstPaintPostTimingPlan = threadDetailRenderPlanApi\.planThreadDetailFirstPaintPostTimingEffects\(\);\s*\n\s*applyThreadDetailPostRenderEffectsPlan\(firstPaintPostTimingPlan, \{ thread: result\.thread \}\);\s*\n\s*const renderElapsedMs = roundedDurationMs\(renderStartedAt\);/);
+  assert.match(appJs, /(?:const|var) postRenderMs = roundedDurationMs\(postRenderStartedAt\);\s*\n\s*const firstPaintPostTimingPlan = threadDetailRenderPlanApi\.planThreadDetailFirstPaintPostTimingEffects\(\);\s*\n\s*applyThreadDetailPostRenderEffectsPlan\(firstPaintPostTimingPlan, \{ thread: result\.thread \}\);\s*\n\s*const renderElapsedMs = roundedDurationMs\(renderStartedAt\);/);
   assert.doesNotMatch(functionBody("loadThread"), /maybeAutoBackfillThreadHistory\(state\.currentThread, \{ seq, source: "first-paint" \}\);/);
   assert.doesNotMatch(functionBody("loadThread"), /checkConversationProjectionConsistency\("first-paint", \{ renderMode: "first-paint" \}\);/);
-  assert.match(appJs, /const PLUGIN_EMBED_BACK_EDGE_SWIPE_PX = 44/);
-  assert.match(appJs, /const PLUGIN_EMBED_BACK_SWIPE_HORIZONTAL_RATIO = 2\.2/);
-  assert.match(appJs, /const PLUGIN_EMBED_BACK_RECENT_SCROLL_SUPPRESS_MS = 1200/);
+  assert.match(appJs, /(?:const|var) PLUGIN_EMBED_BACK_EDGE_SWIPE_PX = 44/);
+  assert.match(appJs, /(?:const|var) PLUGIN_EMBED_BACK_SWIPE_HORIZONTAL_RATIO = 2\.2/);
+  assert.match(appJs, /(?:const|var) PLUGIN_EMBED_BACK_RECENT_SCROLL_SUPPRESS_MS = 1200/);
   assert.match(appJs, /function installHermesPluginBackSwipeGuard\(\)/);
   assert.match(appJs, /pluginEmbedApi\.navigationMessage\(state, pluginNavigationUiState\(\)\)/);
   assert.doesNotMatch(appJs, /function pluginEmbedBackSwipeShouldExitHost\(\)/);
@@ -454,16 +626,16 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(appJs, /handlePluginBack\(\{\s*\n\s*preventDefault\(\) \{\},\s*\n\s*stopPropagation\(\) \{\},\s*\n\s*\}, \{ source: "plugin-back-swipe" \}\);/);
   assert.match(appJs, /source: "plugin-back-swipe"/);
   assert.match(appJs, /installPluginWindowingGuards\(\);\s*\n\s*installHermesPluginBackSwipeGuard\(\);/);
-  assert.match(appJs, /const MAX_VISIBLE_TURNS = 10/);
-  assert.match(appJs, /const MAX_EXPANDED_VISIBLE_TURNS = 200/);
-  assert.match(appJs, /const THREAD_HISTORY_TOP_LOAD_PX = 64/);
-  assert.match(appJs, /threadDetailMergePolicy\.mergeThreadPreservingVisibleItems\(existingThread, incomingThread/);
+  assert.match(appJs, /(?:const|var) MAX_VISIBLE_TURNS = 10/);
+  assert.match(appJs, /(?:const|var) MAX_EXPANDED_VISIBLE_TURNS = 200/);
+  assert.match(appJs, /(?:const|var) THREAD_HISTORY_TOP_LOAD_PX = 64/);
+  assert.match(threadDetailRuntimeJs, /threadDetailMergePolicy\.mergeThreadPreservingVisibleItems\(existingThread, incomingThread/);
   assert.match(threadDetailMergeStateJs, /Boolean\(incomingThread\.mobileOlderTurnsCursor\)/);
   assert.match(threadDetailMergeStateJs, /Number\(incomingThread\.mobileOmittedTurnCount \|\| 0\) > 0/);
   assert.match(threadDetailMergeStateJs, /preservedExpandedTurnCount \+= 1/);
   assert.match(threadDetailMergeStateJs, /merged\.mobileOmittedTurnCount = Math\.max\(0, Number\(merged\.mobileOmittedTurnCount \|\| 0\) - preservedExpandedTurnCount\)/);
   assert.match(appJs, /function loadOlderThreadTurns\(options = \{\}\)/);
-  assert.match(appJs, /const preserveScroll = Boolean\(options\.preserveScroll\)/);
+  assert.match(appJs, /(?:const|var) preserveScroll = Boolean\(options\.preserveScroll\)/);
   assert.match(appJs, /let newlyLoadedTurnCount = 0/);
   assert.match(appJs, /if \(!existingTurn\) newlyLoadedTurnCount \+= 1/);
   assert.match(appJs, /targetThread\.mobileOmittedTurnCount = Math\.max\(0, Number\(targetThread\.mobileOmittedTurnCount \|\| 0\) - newlyLoadedTurnCount\)/);
@@ -506,11 +678,11 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(functionBody("applyThreadDetailRefreshFailureDiagnosticEffect"), /threadDiagnosticEventsApi\.threadDetailRefreshFailedDiagnosticEvent\(item\.diagnosticInput \|\| \{\}\)/);
   assert.doesNotMatch(functionBody("refreshCurrentThread"), /recordHomeAiDiagnosticFailure\(\{[\s\S]*diagnostic_type: "thread_detail_refresh_failed"/);
   assert.doesNotMatch(functionBody("refreshCurrentThread"), /recordHomeAiDiagnosticFailure\(threadDiagnosticEventsApi\.threadDetailRefreshFailedDiagnosticEvent\(\{/);
-  assert.match(appJs, /const previousConversationSignature = conversationRenderSignature\(state\.currentThread\);/);
-  assert.match(appJs, /const threadDetailRenderPlanApi = window\.CodexThreadDetailRenderPlan;/);
-  assert.match(appJs, /const previousPatchShellSignature = conversationPatchShellSignature\(previousThread\);/);
-  assert.match(appJs, /const refreshRenderStage = threadDetailRenderPlanApi\.planThreadDetailRefreshRenderStage\(\{[\s\S]*previousConversationSignature,[\s\S]*nextConversationSignature,[\s\S]*renderedConversationSignature: state\.renderedConversationSignature,[\s\S]*previousPatchShellSignature,[\s\S]*renderedPatchShellSignature: state\.renderedConversationPatchShellSignature,[\s\S]*nextVisibleShape,[\s\S]*\}\);/);
-  assert.match(appJs, /const renderPlan = refreshRenderStage\.renderPlan;/);
+  assert.match(appJs, /(?:const|var) previousConversationSignature = conversationRenderSignature\(state\.currentThread\);/);
+  assert.match(appJs, /(?:const|var) threadDetailRenderPlanApi = window\.CodexThreadDetailRenderPlan;/);
+  assert.match(appJs, /(?:const|var) previousPatchShellSignature = conversationPatchShellSignature\(previousThread\);/);
+  assert.match(appJs, /(?:const|var) refreshRenderStage = threadDetailRenderPlanApi\.planThreadDetailRefreshRenderStage\(\{[\s\S]*previousConversationSignature,[\s\S]*nextConversationSignature,[\s\S]*renderedConversationSignature: state\.renderedConversationSignature,[\s\S]*previousPatchShellSignature,[\s\S]*renderedPatchShellSignature: state\.renderedConversationPatchShellSignature,[\s\S]*nextVisibleShape,[\s\S]*\}\);/);
+  assert.match(appJs, /(?:const|var) renderPlan = refreshRenderStage\.renderPlan;/);
   assert.match(functionBody("refreshCurrentThread"), /const shouldRenderDetail = renderPlan\.shouldRenderDetail;/);
   assert.match(functionBody("refreshCurrentThread"), /const postMergePlan = threadDetailRenderPlanApi\.planThreadDetailRefreshPostMergeEffects\(\);/);
   assert.match(appJs, /function applyThreadDetailRefreshTimedPostMergeEffectsGroup\(plan, timing, options = \{\}\)/);
@@ -731,7 +903,7 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(functionBody("hydrateThreadDetailSurface"), /threadDetailDomPatchApi\.hydrateRenderedSurface/);
   assert.match(functionBody("updateConversationHtml"), /applyConversationHtmlUpdateEffectsPlan\(effectsPlan, \{ root: conversation \}\)/);
   assert.match(functionBody("applyThreadDetailDomUpdateEffect"), /hydrateThreadDetailSurface\(context\.root, item\.hydrateOptions \|\| \{\}\)/);
-  assert.match(functionBody("patchThreadTilePane"), /hydrateThreadDetailSurface\(patchedPane, \{ imageScanDelays: \[0, 180\] \}\)/);
+  assert.match(threadTileRuntimeFunctionBody("patchThreadTilePane"), /hydrateThreadDetailSurface\(patchedPane, \{ imageScanDelays: \[0, 180\] \}\)/);
   assert.match(appJs, /function completeLocalConversationDomUpdate\(root, wasNearBottom, userReadingCurrentTurn, options = \{\}\)/);
   assert.match(functionBody("completeLocalConversationDomUpdate"), /threadDetailDomPatchApi\.planLocalConversationDomUpdateCompletionSnapshot\(\{/);
   assert.match(functionBody("completeLocalConversationDomUpdate"), /threadDetailDomPatchApi\.planLocalConversationDomUpdateCompletion\(completionSnapshot\)/);
@@ -762,29 +934,37 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.doesNotMatch(functionBody("backfillFullThreadDetail"), /recordThreadDetailResponseDiagnostics\(fullReadyPerformance, \{/);
   assert.match(stylesCss, /\.history-loader\s*{[\s\S]*justify-content:\s*space-between;/);
   assert.match(stylesCss, /\.history-load-button/);
-  assert.match(swJs, /"\/api-client\.js"/);
-  assert.match(swJs, /"\/runtime-settings\.js"/);
-  assert.match(swJs, /"\/draft-store\.js"/);
-  assert.match(swJs, /"\/markdown-renderer\.js"/);
-  assert.match(swJs, /"\/viewport-metrics\.js"/);
-  assert.match(swJs, /"\/conversation-scroll\.js"/);
-  assert.match(swJs, /"\/image-compressor\.js"/);
-  assert.match(swJs, /"\/plugin-embed\.js"/);
-  assert.match(swJs, /"\/home-ai-diagnostic-reporting\.js"/);
-  assert.match(swJs, /"\/thread-diagnostic-events\.js"/);
-  assert.match(swJs, /"\/thread-performance-metrics\.js"/);
-  assert.match(swJs, /"\/thread-list-load-policy\.js"/);
-  assert.match(swJs, /"\/live-operation-dock-state\.js"/);
-  assert.match(swJs, /"\/thread-detail-state\.js"/);
-  assert.match(swJs, /"\/thread-detail-render-plan\.js"/);
-  assert.match(swJs, /"\/thread-detail-merge-state\.js"/);
-  assert.match(swJs, /"\/thread-detail-patch-plan\.js"/);
-  assert.match(swJs, /"\/thread-detail-dom-patch\.js"/);
-  assert.match(swJs, /"\/thread-detail-actions\.js"/);
-  assert.match(swJs, /"\/thread-tile-actions\.js"/);
-  assert.match(swJs, /"\/thread-tile-state\.js"/);
-  assert.match(swJs, /"\/thread-tile-layout\.js"/);
-  assert.match(swJs, /"\/build-refresh-policy\.js"/);
+  assert.match(swJs, /shell-asset-manifest\.js/);
+  for (const asset of [
+    "/api-client.js",
+    "/runtime-settings.js",
+    "/draft-store.js",
+    "/markdown-renderer.js",
+    "/viewport-metrics.js",
+    "/conversation-scroll.js",
+    "/image-compressor.js",
+    "/plugin-embed.js",
+    "/home-ai-diagnostic-reporting.js",
+    "/thread-diagnostic-events.js",
+    "/thread-performance-metrics.js",
+    "/thread-list-load-policy.js",
+    "/thread-list-stable-order.js",
+    "/client-render-stability-guard.js",
+    "/live-operation-dock-state.js",
+    "/thread-detail-state.js",
+    "/thread-detail-render-plan.js",
+    "/thread-detail-merge-state.js",
+    "/thread-detail-patch-plan.js",
+    "/thread-detail-dom-patch.js",
+    "/thread-detail-actions.js",
+    "/thread-tile-actions.js",
+    "/thread-tile-state.js",
+    "/thread-tile-layout.js",
+    "/build-refresh-policy.js",
+    "/app-update-runtime.js",
+  ]) {
+    assert.ok(shellManifest.precacheAssets.includes(asset), `manifest missing ${asset}`);
+  }
   assert.match(appJs, /"\/viewport-metrics\.js"/);
   assert.match(appJs, /"\/conversation-scroll\.js"/);
   assert.match(appJs, /"\/image-compressor\.js"/);
@@ -794,6 +974,7 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(appJs, /"\/thread-performance-metrics\.js"/);
   assert.match(appJs, /"\/thread-list-load-policy\.js"/);
   assert.match(appJs, /"\/thread-list-stable-order\.js"/);
+  assert.match(appJs, /"\/client-render-stability-guard\.js"/);
   assert.match(appJs, /"\/live-operation-dock-state\.js"/);
   assert.match(appJs, /"\/thread-detail-state\.js"/);
   assert.match(appJs, /"\/thread-detail-render-plan\.js"/);
@@ -804,8 +985,10 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(appJs, /"\/thread-tile-actions\.js"/);
   assert.match(appJs, /"\/thread-tile-state\.js"/);
   assert.match(appJs, /"\/thread-tile-layout\.js"/);
+  assert.match(appJs, /"\/app-update-runtime\.js"/);
   assert.match(indexHtml, /src="\/thread-list-load-policy\.js"/);
   assert.match(indexHtml, /src="\/thread-list-stable-order\.js"/);
+  assert.match(indexHtml, /src="\/client-render-stability-guard\.js"/);
   assert.match(appJs, /"\/build-refresh-policy\.js"/);
   assert.match(appJs, /navigator\.serviceWorker\.register\("\/sw\.js"\)/);
   assert.match(appJs, /state\.serviceWorkerRegistration\.update\(\)\.catch/);
@@ -815,34 +998,36 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(swJs, /self\.clients\.openWindow\(target\.url\)/);
   assert.match(indexHtml, /id="workspaceTokenUsage"/);
   assert.match(indexHtml, /id="workspaceStatsDialog"/);
-  assert.match(appJs, /const threadListLoadPolicy = window\.CodexThreadListLoadPolicy;/);
+  assert.match(appJs, /(?:const|var) threadListLoadPolicy = window\.CodexThreadListLoadPolicy;/);
   assert.match(appJs, /workspaceTokenUsage: null/);
-  assert.match(appJs, /function renderWorkspaceTokenUsage\(\)/);
-  assert.match(appJs, /function renderWorkspaceStatsDialog\(\)/);
-  assert.match(appJs, /data-workspace-token-usage-toggle>统计<\/button>/);
+  assert.match(threadListRuntimeJs, /function renderWorkspaceTokenUsage\(\)/);
+  assert.match(threadListRuntimeJs, /function renderWorkspaceStatsDialog\(\)/);
+  assert.match(threadListRuntimeJs, /data-workspace-token-usage-toggle>统计<\/button>/);
   assert.match(appJs, /function formatTokenMillion\(value\)/);
-  assert.match(appJs, /const THREAD_LIST_PAGE_LIMIT = 200;/);
-  assert.match(appJs, /new URLSearchParams\(\{ limit: String\(THREAD_LIST_PAGE_LIMIT\), archived: "false" \}\)/);
-  assert.match(appJs, /function hasThreadDetailRequestInFlight\(\)/);
-  assert.match(appJs, /state\.threadLoadController[\s\S]*state\.refreshThreadController[\s\S]*state\.currentThread && state\.currentThread\.mobileLoading/);
-  assert.match(appJs, /const threadDetailOpening = hasThreadDetailRequestInFlight\(\);/);
-  assert.match(appJs, /const loadPlan = threadListLoadPolicy\.planThreadListLoadRequest\(\{/);
-  assert.match(appJs, /threadListLoadedAtMs: state\.threadListLoadedAtMs/);
-  assert.match(appJs, /if \(loadPlan\.params && loadPlan\.params\.fallback\) \{[\s\S]*params\.set\("fallback", "defer"\);[\s\S]*\}/);
-  assert.match(appJs, /if \(loadPlan\.params && loadPlan\.params\.initial\) \{[\s\S]*params\.set\("initial", "warm-fallback"\);[\s\S]*\}/);
-  assert.match(appJs, /params\.set\("initial", "warm-fallback"\)/);
-  assert.match(appJs, /const THREAD_LIST_DEFERRED_FALLBACK_DELAY_MS = 8000;/);
-  assert.match(appJs, /const THREAD_LIST_DEFERRED_FALLBACK_RETRY_MS = 2500;/);
+  assert.match(appJs, /(?:const|var) THREAD_LIST_PAGE_LIMIT = 200;/);
+  assert.match(appJs, /(?:const|var) THREAD_LIST_MOBILE_PAGE_LIMIT = 40;/);
+  assert.match(threadListRuntimeJs, /const pageLimit = shouldSkipStandaloneMobileThreadRestore\(\) \? THREAD_LIST_MOBILE_PAGE_LIMIT : THREAD_LIST_PAGE_LIMIT;/);
+  assert.match(threadListRuntimeJs, /new URLSearchParams\(\{ limit: String\(pageLimit\), archived: "false" \}\)/);
+  assert.match(threadListRuntimeJs, /function hasThreadDetailRequestInFlight\(\)/);
+  assert.match(threadListRuntimeJs, /state\.threadLoadController[\s\S]*state\.refreshThreadController[\s\S]*state\.currentThread && state\.currentThread\.mobileLoading/);
+  assert.match(threadListRuntimeJs, /const threadDetailOpening = hasThreadDetailRequestInFlight\(\);/);
+  assert.match(threadListRuntimeJs, /const loadPlan = threadListLoadPolicy\.planThreadListLoadRequest\(\{/);
+  assert.match(threadListRuntimeJs, /threadListLoadedAtMs: state\.threadListLoadedAtMs/);
+  assert.match(threadListRuntimeJs, /if \(loadPlan\.params && loadPlan\.params\.fallback\) \{[\s\S]*params\.set\("fallback", "defer"\);[\s\S]*\}/);
+  assert.match(threadListRuntimeJs, /if \(loadPlan\.params && loadPlan\.params\.initial\) \{[\s\S]*params\.set\("initial", "warm-fallback"\);[\s\S]*\}/);
+  assert.match(threadListRuntimeJs, /params\.set\("initial", "warm-fallback"\)/);
+  assert.match(appJs, /(?:const|var) THREAD_LIST_DEFERRED_FALLBACK_DELAY_MS = 8000;/);
+  assert.match(appJs, /(?:const|var) THREAD_LIST_DEFERRED_FALLBACK_RETRY_MS = 2500;/);
   assert.match(appJs, /threadListDeferredFallbackTimer: null/);
-  assert.match(appJs, /function scheduleThreadListDeferredFallback\(delayMs = THREAD_LIST_DEFERRED_FALLBACK_DELAY_MS\)/);
-  assert.match(appJs, /if \(state\.threadListLoadController \|\| hasThreadDetailRequestInFlight\(\)\) \{[\s\S]*scheduleThreadListDeferredFallback\(THREAD_LIST_DEFERRED_FALLBACK_RETRY_MS\);[\s\S]*return;/);
-  assert.match(appJs, /if \(options\.deferFallback !== true\) clearThreadListDeferredFallbackTimer\(\);/);
-  assert.match(appJs, /result\.mobileDeferredFallback \|\| result\.mobileDeferredAppServer/);
-  assert.match(appJs, /if \(result && \(result\.mobileDeferredFallback \|\| result\.mobileDeferredAppServer\) && !state\.selectedCwd && !search\) \{[\s\S]*scheduleThreadListDeferredFallback\(\);[\s\S]*\}/);
-  assert.match(appJs, /Uncached \$\{escapeHtml\(formatTokenMillion\(displayInputTokensExcludingCached\(entry\)\)\)\}/);
-  assert.match(appJs, /Cached \$\{escapeHtml\(formatTokenMillion\(entry && entry\.cachedInputTokens\)\)\}/);
-  assert.match(appJs, /Out \$\{escapeHtml\(formatTokenMillion\(entry && entry\.outputTokens\)\)\}/);
-  assert.match(appJs, /Reason \$\{escapeHtml\(formatTokenMillion\(entry && entry\.reasoningOutputTokens\)\)\}/);
+  assert.match(threadListRuntimeJs, /function scheduleThreadListDeferredFallback\(delayMs = THREAD_LIST_DEFERRED_FALLBACK_DELAY_MS\)/);
+  assert.match(threadListRuntimeJs, /if \(state\.threadListLoadController \|\| hasThreadDetailRequestInFlight\(\) \|\| hasThreadDetailSelectionIntent\(\)\) \{[\s\S]*scheduleThreadListDeferredFallback\(THREAD_LIST_DEFERRED_FALLBACK_RETRY_MS\);[\s\S]*return;/);
+  assert.match(threadListRuntimeJs, /if \(options\.deferFallback !== true\) clearThreadListDeferredFallbackTimer\(\);/);
+  assert.match(threadListRuntimeJs, /result\.mobileDeferredFallback \|\| result\.mobileDeferredAppServer/);
+  assert.match(threadListRuntimeJs, /if \(result && \(result\.mobileDeferredFallback \|\| result\.mobileDeferredAppServer\) && !state\.selectedCwd && !search\) \{[\s\S]*scheduleThreadListDeferredFallback\(\);[\s\S]*\}/);
+  assert.match(threadListRuntimeJs, /Uncached \$\{escapeHtml\(formatTokenMillion\(displayInputTokensExcludingCached\(entry\)\)\)\}/);
+  assert.match(threadListRuntimeJs, /Cached \$\{escapeHtml\(formatTokenMillion\(entry && entry\.cachedInputTokens\)\)\}/);
+  assert.match(threadListRuntimeJs, /Out \$\{escapeHtml\(formatTokenMillion\(entry && entry\.outputTokens\)\)\}/);
+  assert.match(threadListRuntimeJs, /Reason \$\{escapeHtml\(formatTokenMillion\(entry && entry\.reasoningOutputTokens\)\)\}/);
   assert.match(stylesCss, /\.workspace-token-usage/);
   assert.match(stylesCss, /\.workspace-token-usage-summary span[\s\S]*color:\s*var\(--danger-text\)/);
   assert.match(stylesCss, /\.workspace-stats-dialog/);
@@ -850,9 +1035,9 @@ test("public app shell cache advances with static frontend changes", () => {
 });
 
 test("Android back and edge swipe open the mobile navigation menu", () => {
-  assert.match(appJs, /const ANDROID_SIDEBAR_EDGE_SWIPE_PX = 44/);
-  assert.match(appJs, /const ANDROID_BACK_SIDEBAR_BASE = "base"/);
-  assert.match(appJs, /const ANDROID_BACK_SIDEBAR_TOP = "top"/);
+  assert.match(appJs, /(?:const|var) ANDROID_SIDEBAR_EDGE_SWIPE_PX = 44/);
+  assert.match(appJs, /(?:const|var) ANDROID_BACK_SIDEBAR_BASE = "base"/);
+  assert.match(appJs, /(?:const|var) ANDROID_BACK_SIDEBAR_TOP = "top"/);
   assert.match(appJs, /function sidebarTransformIsNone\(transform\)/);
   assert.match(appJs, /matrix\(1,0,0,1,0,0\)/);
   assert.match(appJs, /matrix3d\(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1\)/);
@@ -860,8 +1045,8 @@ test("Android back and edge swipe open the mobile navigation menu", () => {
   assert.match(appJs, /Number\(rect\.width \|\| 0\) < 80 \|\| Number\(rect\.height \|\| 0\) < 80/);
   assert.match(appJs, /style\.position === "fixed"/);
   assert.match(appJs, /return sidebarTransformIsNone\(style\.transform\)/);
-  assert.match(appJs, /const HOST_EMBED_SPLIT_LEFT_MIN_PX = 160/);
-  assert.match(appJs, /const HOST_EMBED_SPLIT_VIEWPORT_MIN_PX = 900/);
+  assert.match(appJs, /(?:const|var) HOST_EMBED_SPLIT_LEFT_MIN_PX = 160/);
+  assert.match(appJs, /(?:const|var) HOST_EMBED_SPLIT_VIEWPORT_MIN_PX = 900/);
   assert.match(appJs, /function hostEmbeddedSplitPaneVisible\(\)/);
   assert.match(appJs, /frameLeft >= HOST_EMBED_SPLIT_LEFT_MIN_PX/);
   assert.match(appJs, /frameWidth < hostWidth - 24/);
@@ -869,7 +1054,7 @@ test("Android back and edge swipe open the mobile navigation menu", () => {
   assert.match(appJs, /if \(isHermesEmbedMode\(\)\) return hostEmbeddedSplitPaneVisible\(\)/);
   assert.match(appJs, /function syncThreadDetailLayoutState\(\)/);
   assert.match(appJs, /document\.documentElement\.classList\.toggle\("thread-detail-active", detailActive\)/);
-  assert.match(appJs, /const splitReturn = threadDetailReturnButtonVisible\(\)/);
+  assert.match(appJs, /(?:const|var) splitReturn = threadDetailReturnButtonVisible\(\)/);
   assert.match(appJs, /openMenuButton\.classList\.toggle\("split-return-visible", splitReturn\)/);
   assert.match(appJs, /openMenuButton\.textContent = splitReturn \? "←" : "☰"/);
   assert.match(appJs, /function returnToThreadListFromDetail\(\)/);
@@ -912,9 +1097,9 @@ test("workspace creation lives at the bottom of the Workspace menu", () => {
   assert.match(indexHtml, /id="createWorkspaceDialog"/);
   assert.match(indexHtml, /id="createWorkspaceForm"/);
   assert.match(indexHtml, /id="createWorkspaceRootSelect"/);
-  assert.match(appJs, /function workspaceSidebarOptionsHtml\(\)/);
-  assert.match(appJs, /data-create-workspace/);
-  assert.match(appJs, /return allOption \+ workspaceOptions \+ createOption;/);
+  assert.match(threadListRuntimeJs, /function workspaceSidebarOptionsHtml\(\)/);
+  assert.match(threadListRuntimeJs, /data-create-workspace/);
+  assert.match(threadListRuntimeJs, /return allOption \+ workspaceOptions \+ createOption;/);
   assert.match(appJs, /openCreateWorkspaceDialog\(\)/);
   assert.match(appJs, /function populateCreateWorkspaceRootSelect\(\)/);
   assert.match(appJs, /body:\s*JSON\.stringify\(\{\s*name,\s*parent:\s*workspaceCreateSelectedRoot\(\)\s*\}\)/);
@@ -928,6 +1113,6 @@ test("push notification control stays hidden when the browser cannot enable it",
   assert.doesNotMatch(appJs, /HTTPS required/);
   assert.doesNotMatch(appJs, /Notifications unavailable/);
   assert.doesNotMatch(appJs, /Notifications unsupported/);
-  assert.match(appJs, /const hideButton = \(\) => \{/);
+  assert.match(appJs, /(?:const|var) hideButton = \(\) => \{/);
   assert.match(appJs, /if \(!window\.isSecureContext\) \{[\s\S]*hideButton\(\);[\s\S]*return;[\s\S]*\}/);
 });

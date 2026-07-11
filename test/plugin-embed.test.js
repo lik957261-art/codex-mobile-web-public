@@ -204,7 +204,7 @@ test("builds bounded external-link messages only for browser-safe links", () => 
   assert.equal(message.source, "receipt-link");
   assert.equal(pluginEmbed.externalBrowserUrl("mailto:owner@example.test"), "mailto:owner@example.test");
   assert.equal(pluginEmbed.externalBrowserUrl("/api/files/preview/content?path=/tmp/a.zip", "https://codex.example.test"), "");
-  assert.equal(pluginEmbed.externalBrowserUrl("file:///Users/xuxin/private.txt"), "");
+  assert.equal(pluginEmbed.externalBrowserUrl("file:///Users/example/private.txt"), "");
   assert.equal(pluginEmbed.externalBrowserUrl("javascript:alert(1)"), "");
   assert.equal(pluginEmbed.externalLinkMessage({ href: "javascript:alert(1)" }), null);
 });
@@ -219,7 +219,7 @@ test("builds bounded Hermes refresh-required messages without sensitive payloads
       pluginRoute: "thread",
       pluginTaskId: "task-789",
       pluginItemId: "item-456",
-      ignored: "C:\\Users\\xuxin\\.codex-mobile-web\\secret",
+      ignored: "C:\\Users\\Public\\.codex-mobile-web\\secret",
     },
     appearance: {
       theme: "dark",

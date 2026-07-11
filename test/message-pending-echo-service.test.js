@@ -108,6 +108,39 @@ test("pending steer echo is removed when durable history has the message in anot
   assert.equal(store.size(), 0);
 });
 
+test("pending steer echo is discarded when the target turn has completed", () => {
+  const store = createPendingSteerEchoStore({ now: () => 1000 });
+  store.remember({
+    threadId: "thread-1",
+    turnId: "turn-1",
+    clientSubmissionId: "submission-1",
+    input: [{ type: "text", text: "late steer" }],
+  });
+  const thread = {
+    id: "thread-1",
+    turns: [{
+      id: "turn-1",
+      status: "completed",
+      completedAt: 2000,
+      items: [
+        { id: "assistant-final", type: "agentMessage", text: "done" },
+        {
+          id: "mux-user-thread-1-turn-1-submission-1",
+          type: "userMessage",
+          mobilePendingSubmission: true,
+          content: [{ type: "text", text: "late steer" }],
+        },
+        { id: "usage", type: "turnUsageSummary" },
+      ],
+    }],
+  };
+
+  store.injectIntoThread(thread);
+
+  assert.deepEqual(thread.turns[0].items.map((item) => item.id), ["assistant-final", "usage"]);
+  assert.equal(store.size(), 0);
+});
+
 test("pending steer echo is removed when upload summary gains a durable path", () => {
   const store = createPendingSteerEchoStore({ now: () => 1000 });
   store.remember({
@@ -150,7 +183,7 @@ test("pending steer echo is removed when upload summary gains a durable path", (
           type: "userMessage",
           content: [{
             type: "input_text",
-            text: "Uploaded attachments:\n- homeai-upload-2B62320E.jpg (image, image/jpeg, 116.9 KB): /Users/xuxin/.codex-mobile-web/uploads/thread/1781947353793-72664e260222-homeai-upload-2B62320E.jpg",
+            text: "Uploaded attachments:\n- homeai-upload-2B62320E.jpg (image, image/jpeg, 116.9 KB): /Users/example/.codex-mobile-web/uploads/thread/1781947353793-72664e260222-homeai-upload-2B62320E.jpg",
           }],
         }],
       },
@@ -249,7 +282,7 @@ test("input normalization preserves text and local images for pending echoes", (
       type: "userMessage",
       content: [{
         type: "input_text",
-        text: "Uploaded attachments:\n- homeai-upload-2B62320E.jpg (image, image/jpeg, 116.9 KB): /Users/xuxin/.codex-mobile-web/uploads/thread/1781947353793-72664e260222-homeai-upload-2B62320E.jpg",
+        text: "Uploaded attachments:\n- homeai-upload-2B62320E.jpg (image, image/jpeg, 116.9 KB): /Users/example/.codex-mobile-web/uploads/thread/1781947353793-72664e260222-homeai-upload-2B62320E.jpg",
       }],
     },
   ), true);

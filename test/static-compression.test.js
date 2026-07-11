@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const zlib = require("node:zlib");
 const { test } = require("node:test");
@@ -14,12 +15,18 @@ const {
   staticCompressionCacheStats,
   staticCompressionEncoding,
 } = require("../server");
+const {
+  DEFAULT_SHELL_MODE_CLASSIC,
+  DEFAULT_SHELL_MODE_VITE_APP_PREVIEW,
+  createStaticFileService,
+  normalizeDefaultShellMode,
+} = require("../adapters/static-file-service");
 
 const brotliDecompress = promisify(zlib.brotliDecompress);
 const gunzip = promisify(zlib.gunzip);
 const root = path.resolve(__dirname, "..");
 
-function requestStatic(pathname, acceptEncoding = "") {
+function requestStaticFrom(serve, pathname, acceptEncoding = "") {
   return new Promise((resolve) => {
     const chunks = [];
     const req = {
@@ -45,23 +52,27 @@ function requestStatic(pathname, acceptEncoding = "") {
         });
       },
     };
-    serveStatic(req, res);
+    serve(req, res);
   });
+}
+
+function requestStatic(pathname, acceptEncoding = "") {
+  return requestStaticFrom(serveStatic, pathname, acceptEncoding);
 }
 
 test("static assets prefer brotli compression for large text resources", async () => {
   clearStaticCompressionCache();
-  const raw = fs.readFileSync(path.join(root, "public", "app.js"));
-  const response = await requestStatic("/app.js", "br, gzip");
+  const raw = fs.readFileSync(path.join(root, "public", "pane-layout-runtime.js"));
+  const response = await requestStatic("/pane-layout-runtime.js", "br, gzip");
   const statsAfterFirst = staticCompressionCacheStats();
-  const secondResponse = await requestStatic("/app.js", "br, gzip");
+  const secondResponse = await requestStatic("/pane-layout-runtime.js", "br, gzip");
   const statsAfterSecond = staticCompressionCacheStats();
 
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers["Content-Encoding"], "br");
   assert.equal(response.headers.Vary, "Accept-Encoding");
   assert.equal(response.headers["Content-Type"], "text/javascript; charset=utf-8");
-  assert.ok(response.body.length < raw.length, "compressed body should be smaller than raw app.js");
+  assert.ok(response.body.length < raw.length, "compressed body should be smaller than raw runtime asset");
   assert.deepEqual(await brotliDecompress(response.body), raw);
   assert.deepEqual(secondResponse.body, response.body);
   assert.equal(statsAfterFirst.entries, 1);
@@ -90,6 +101,114 @@ test("static compression leaves already-compressed images unencoded", async () =
   assert.equal(response.headers.Vary, undefined);
   assert.equal(response.headers["Content-Type"], "image/png");
   assert.ok(response.body.length > 0);
+});
+
+test("static root keeps classic shell unless Vite app-preview is explicitly requested", async () => {
+  const classicStatic = createStaticFileService({
+    publicRoot: path.join(root, "public"),
+    mimeFor,
+    defaultShellMode: "classic",
+  });
+  const classic = await requestStaticFrom(classicStatic.serveStatic, "/");
+  const appPreview = await requestStatic("/?codexViteShell=app-preview");
+  const classicText = classic.body.toString("utf8");
+  const appPreviewText = appPreview.body.toString("utf8");
+
+  assert.equal(classic.statusCode, 200);
+  assert.match(classicText, /CODEX_MOBILE_SHELL_SCRIPTS:BEGIN/);
+  assert.doesNotMatch(classicText, /data-codex-vite-app-preview="true"/);
+
+  assert.equal(appPreview.statusCode, 200);
+  assert.match(appPreviewText, /data-codex-vite-app-preview="true"/);
+  assert.match(appPreviewText, /id="codex-vite-app-preview-loader-plan"/);
+  assert.doesNotMatch(appPreviewText, /CODEX_MOBILE_SHELL_SCRIPTS:BEGIN/);
+});
+
+test("default shell mode is fail-closed unless app-preview is explicit", () => {
+  assert.equal(normalizeDefaultShellMode(""), DEFAULT_SHELL_MODE_CLASSIC);
+  assert.equal(normalizeDefaultShellMode("classic-script-fallback"), DEFAULT_SHELL_MODE_CLASSIC);
+  assert.equal(normalizeDefaultShellMode("unexpected"), DEFAULT_SHELL_MODE_CLASSIC);
+  assert.equal(normalizeDefaultShellMode("app-preview"), DEFAULT_SHELL_MODE_VITE_APP_PREVIEW);
+  assert.equal(normalizeDefaultShellMode("vite-app-preview"), DEFAULT_SHELL_MODE_VITE_APP_PREVIEW);
+});
+
+test("static root can be switched to Vite app-preview with explicit default shell mode", async () => {
+  const appPreviewStatic = createStaticFileService({
+    publicRoot: path.join(root, "public"),
+    mimeFor,
+    defaultShellMode: "vite-app-preview",
+  });
+  const invalidStatic = createStaticFileService({
+    publicRoot: path.join(root, "public"),
+    mimeFor,
+    defaultShellMode: "rollout-next",
+  });
+  const appPreview = await requestStaticFrom(appPreviewStatic.serveStatic, "/");
+  const invalidFallback = await requestStaticFrom(invalidStatic.serveStatic, "/");
+  const appPreviewText = appPreview.body.toString("utf8");
+  const invalidFallbackText = invalidFallback.body.toString("utf8");
+
+  assert.equal(appPreview.statusCode, 200);
+  assert.match(appPreviewText, /data-codex-vite-app-preview="true"/);
+  assert.match(appPreviewText, /id="codex-vite-app-preview-loader-plan"/);
+  assert.doesNotMatch(appPreviewText, /CODEX_MOBILE_SHELL_SCRIPTS:BEGIN/);
+
+  assert.equal(invalidFallback.statusCode, 200);
+  assert.match(invalidFallbackText, /CODEX_MOBILE_SHELL_SCRIPTS:BEGIN/);
+  assert.doesNotMatch(invalidFallbackText, /data-codex-vite-app-preview="true"/);
+});
+
+test("stale Vite hashed shell entry falls back to the stable app-preview entry", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-static-vite-entry-"));
+  try {
+    const stableEntry = "import \"/vite-shell/assets/vite-shell-entry-current.js\";\n";
+    fs.mkdirSync(path.join(tempRoot, "vite-shell"), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, "vite-shell", "app-preview-entry.js"), stableEntry);
+    const staticService = createStaticFileService({
+      publicRoot: tempRoot,
+      mimeFor,
+      defaultShellMode: "vite-app-preview",
+    });
+    const staleEntry = await requestStaticFrom(
+      staticService.serveStatic,
+      "/vite-shell/assets/vite-shell-entry-old.js"
+    );
+    const unrelatedMissing = await requestStaticFrom(
+      staticService.serveStatic,
+      "/vite-shell/assets/vite-entry-group-old.js"
+    );
+
+    assert.equal(staleEntry.statusCode, 200);
+    assert.equal(staleEntry.headers["Content-Type"], "text/javascript; charset=utf-8");
+    assert.equal(staleEntry.body.toString("utf8"), stableEntry);
+    assert.equal(unrelatedMissing.statusCode, 404);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("hashed Vite assets use immutable browser caching", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-static-vite-cache-"));
+  try {
+    const assetsDir = path.join(tempRoot, "vite-shell", "assets");
+    fs.mkdirSync(assetsDir, { recursive: true });
+    fs.writeFileSync(path.join(assetsDir, "shard-01-AbCdEf12.js"), "export const ready = true;\n");
+    fs.writeFileSync(path.join(tempRoot, "vite-shell", "app-preview-entry.js"), "import \"/vite-shell/assets/shard-01-AbCdEf12.js\";\n");
+    const staticService = createStaticFileService({
+      publicRoot: tempRoot,
+      mimeFor,
+      defaultShellMode: "vite-app-preview",
+    });
+
+    const hashed = await requestStaticFrom(staticService.serveStatic, "/vite-shell/assets/shard-01-AbCdEf12.js");
+    const stable = await requestStaticFrom(staticService.serveStatic, "/vite-shell/app-preview-entry.js");
+
+    assert.equal(hashed.statusCode, 200);
+    assert.equal(hashed.headers["Cache-Control"], "public, max-age=31536000, immutable");
+    assert.equal(stable.headers["Cache-Control"], "no-cache");
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("static compression ignores q=0 encodings and serves svg as text", () => {

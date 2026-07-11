@@ -57,10 +57,10 @@ Mobile docs should link to that registry instead of copying entries.
 | Field | Value |
 | --- | --- |
 | `plugin_id` | `codex-mobile` |
-| `workspace_path_windows` | `C:\Users\xuxin\Documents\codex-mobile-web` |
+| `workspace_path_windows` | `C:\Users\Public\Documents\codex-mobile-web` |
 | `current_branch_snapshot` | `main` with local commits through `f92987e` before this production-evidence update |
 | `production_source_path_macos` | `/Users/hermes-host/HermesMobile/plugins/codex-mobile-web` |
-| `production_data_root_macos` | `/Users/xuxin/.codex-mobile-web` |
+| `production_data_root_macos` | `$HOME/.codex-mobile-web` |
 | `windows_dev_base_url` | `http://127.0.0.1:8787` |
 | `macos_production_base_url` | `http://127.0.0.1:8787` |
 | `launchd_label` | `system/com.hermesmobile.plugin.codex-mobile` |
@@ -68,7 +68,7 @@ Mobile docs should link to that registry instead of copying entries.
 | `public_config_endpoint` | `GET /api/public-config` |
 | `mcp_command` | `none`; Codex Mobile Web is an embedded app bridge, not a Gateway MCP plugin |
 | `mcp_schema_endpoint` | `none`; use the plugin manifest and bounded HTTP health/version endpoints |
-| `dev_runtime_prerequisites` | Mac DEV must expose Node, npm, and Codex CLI through `/Users/xuxin/Developer/HomeAIDev/bin`; verify `node --version`, `npm --version`, and `codex --version` before classifying bridge/test failures. |
+| `dev_runtime_prerequisites` | Mac DEV must expose Node, npm, and Codex CLI through `<home-ai-dev-bin>`; verify `node --version`, `npm --version`, and `codex --version` before classifying bridge/test failures. |
 | `deploy_command` | Use the central Home AI Mac deploy script: `npm run --silent deploy:macos -- --plugin codex-mobile-web --source /Users/hermes-dev/HermesMobileDev/plugins/codex-mobile-web --restart-label com.hermesmobile.plugin.codex-mobile --health-url http://127.0.0.1:8787/api/public-config --execute --json` |
 | `credential_locations` | Codex Mobile access key file and Codex home/runtime paths by reference only. Do not record raw keys, tokens, cookies, launch tokens, account auth files, uploaded content, or rollout logs here. |
 | `reference_contract_status` | `none`; Codex Mobile is not currently a cross-plugin business object source through the Home AI Reference Graph |

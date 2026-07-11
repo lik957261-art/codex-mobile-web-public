@@ -4,9 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_LABEL="${CODEX_MOBILE_LAUNCHD_LABEL:-com.hermesmobile.plugin.codex-mobile}"
 PLIST_PATH="${CODEX_MOBILE_LAUNCHD_PLIST:-/Library/LaunchDaemons/${SERVICE_LABEL}.plist}"
-SUDO_PASSWORD_FILE="${HOMEAI_MAC_SUDO_PASSWORD_FILE:-/Users/xuxin/.homeai-qa/sudo-password}"
+SUDO_PASSWORD_FILE="${HOMEAI_MAC_SUDO_PASSWORD_FILE:-${HOME}/.homeai-qa/sudo-password}"
 PROFILE_ID=""
 CODEX_HOME_VALUE=""
+DEFAULT_SHELL_MODE=""
 PROMPT=0
 LIST_HOMES=0
 JSON_OUTPUT=0
@@ -14,6 +15,7 @@ MAX_WAIT_SECONDS=45
 DRY_RUN=0
 POSTFLIGHT_JSON="{}"
 STALE_MUX_JSON="[]"
+SELECTED_MUX_STOP_JSON="{}"
 
 usage() {
   cat <<'EOF'
@@ -27,6 +29,7 @@ Options:
   --list-homes              Print configured Codex Home profiles and exit.
   --profile-id <id>         Start with a configured profile id, e.g. default/current/previous.
   --codex-home <path>       Start with an explicit Codex Home path.
+  --default-shell-mode <m>   Set CODEX_MOBILE_DEFAULT_SHELL to classic or vite-app-preview.
   --prompt                  Prompt on stdin/stdout to select a configured profile.
   --label <launchd-label>   LaunchDaemon label, default com.hermesmobile.plugin.codex-mobile.
   --plist <path>            LaunchDaemon plist path.
@@ -70,9 +73,10 @@ const payload = {
   plistPath: process.argv[5],
   profileId: process.argv[6] || undefined,
   codexHome: process.argv[7] || undefined,
+  defaultShellMode: process.argv[8] || undefined,
 };
 console.log(JSON.stringify(payload, null, 2));
-' "$stage" "$(bounded_text "$message")" "$(bounded_text "$detail")" "$SERVICE_LABEL" "$PLIST_PATH" "${SELECTED_PROFILE_ID:-}" "${SELECTED_CODEX_HOME:-}"
+' "$stage" "$(bounded_text "$message")" "$(bounded_text "$detail")" "$SERVICE_LABEL" "$PLIST_PATH" "${SELECTED_PROFILE_ID:-}" "${SELECTED_CODEX_HOME:-}" "$DEFAULT_SHELL_MODE"
   else
     echo "[$stage] $message" >&2
     if [[ -n "$detail" ]]; then
@@ -109,11 +113,16 @@ plist_set_env() {
 }
 
 json_success() {
+  POSTFLIGHT_JSON="$POSTFLIGHT_JSON" \
+  STALE_MUX_JSON="$STALE_MUX_JSON" \
+  SELECTED_MUX_STOP_JSON="$SELECTED_MUX_STOP_JSON" \
   "$NODE_EXE" -e '
 let postflight = {};
 let staleMuxes = [];
+let selectedMuxStop = {};
 try { postflight = JSON.parse(process.env.POSTFLIGHT_JSON || "{}"); } catch (_) {}
 try { staleMuxes = JSON.parse(process.env.STALE_MUX_JSON || "[]"); } catch (_) {}
+try { selectedMuxStop = JSON.parse(process.env.SELECTED_MUX_STOP_JSON || "{}"); } catch (_) {}
 const payload = {
   ok: true,
   serviceLabel: process.argv[1],
@@ -124,11 +133,13 @@ const payload = {
   url: process.argv[6],
   dryRun: process.argv[7] === "1",
   muxEndpointFile: process.argv[8],
+  defaultShellMode: process.argv[9] || undefined,
   postflight,
+  selectedMuxStop,
   staleMuxes
 };
 console.log(JSON.stringify(payload, null, 2));
-' "$SERVICE_LABEL" "$PLIST_PATH" "$SELECTED_PROFILE_ID" "$SELECTED_CODEX_HOME" "$PORT" "$READINESS_URL" "$DRY_RUN" "$SELECTED_MUX_ENDPOINT_FILE"
+' "$SERVICE_LABEL" "$PLIST_PATH" "$SELECTED_PROFILE_ID" "$SELECTED_CODEX_HOME" "$PORT" "$READINESS_URL" "$DRY_RUN" "$SELECTED_MUX_ENDPOINT_FILE" "$DEFAULT_SHELL_MODE"
 }
 
 profile_store_active_id() {
@@ -157,6 +168,20 @@ process.stdin.on("end", () => {
   try {
     const config = JSON.parse(input);
     process.stdout.write(String(config.codexProfiles && config.codexProfiles.activeProfileId || ""));
+  } catch (_) {}
+});
+'
+}
+
+public_config_default_shell_mode() {
+  /usr/bin/curl -fsS "$READINESS_URL" \
+    | "$NODE_EXE" -e '
+let input = "";
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const config = JSON.parse(input);
+    process.stdout.write(String(config.defaultShellMode || ""));
   } catch (_) {}
 });
 '
@@ -219,12 +244,107 @@ process.stdout.write(JSON.stringify(out));
 NODE
 }
 
+stop_selected_mux_endpoint() {
+  "$NODE_EXE" - "$SELECTED_MUX_ENDPOINT_FILE" <<'NODE'
+const fs = require("node:fs");
+
+const endpointFile = process.argv[2];
+const out = {
+  ok: true,
+  endpointFile,
+  pid: undefined,
+  childPid: undefined,
+  stoppedPids: [],
+  stubbornPids: [],
+  removedEndpoint: false,
+};
+
+function isAlive(pid) {
+  const value = Number(pid || 0);
+  if (!Number.isInteger(value) || value <= 0) return false;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function stopPid(pid) {
+  if (!isAlive(pid)) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (_) {}
+}
+
+try {
+  if (!endpointFile || !fs.existsSync(endpointFile)) {
+    out.reason = "endpoint_missing";
+    process.stdout.write(JSON.stringify(out));
+    process.exit(0);
+  }
+
+  let endpoint = {};
+  try {
+    endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8"));
+  } catch (error) {
+    out.ok = false;
+    out.reason = "endpoint_parse_failed";
+    out.error = String(error && error.message || error).slice(0, 180);
+    process.stdout.write(JSON.stringify(out));
+    process.exit(0);
+  }
+
+  out.pid = Number(endpoint.pid || 0) || undefined;
+  out.childPid = Number(endpoint.childPid || 0) || undefined;
+  const pids = [out.childPid, out.pid].filter((pid, index, all) => pid && all.indexOf(pid) === index);
+  for (const pid of pids) {
+    stopPid(pid);
+  }
+
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const alive = pids.filter(isAlive);
+    if (!alive.length) break;
+    sleep(100);
+  }
+
+  for (const pid of pids) {
+    if (isAlive(pid)) {
+      out.stubbornPids.push(pid);
+    } else {
+      out.stoppedPids.push(pid);
+    }
+  }
+
+  try {
+    fs.rmSync(endpointFile, { force: true });
+    out.removedEndpoint = true;
+  } catch (error) {
+    out.ok = false;
+    out.removeError = String(error && error.message || error).slice(0, 180);
+  }
+} catch (error) {
+  out.ok = false;
+  out.error = String(error && error.message || error).slice(0, 180);
+}
+
+process.stdout.write(JSON.stringify(out));
+NODE
+}
+
 validate_preflight_selection() {
   local plist_codex_home
   local plist_mux_endpoint
+  local plist_default_shell
   local store_active_id
   plist_codex_home="$(plist_get_env CODEX_HOME)"
   plist_mux_endpoint="$(plist_get_env CODEX_MOBILE_MUX_ENDPOINT_FILE)"
+  plist_default_shell="$(plist_get_env CODEX_MOBILE_DEFAULT_SHELL)"
   store_active_id="$(profile_store_active_id)"
   if [[ "$plist_codex_home" != "$SELECTED_CODEX_HOME" ]]; then
     json_error "preflight" "LaunchDaemon plist CODEX_HOME does not match selected profile." "plist=${plist_codex_home}; selected=${SELECTED_CODEX_HOME}" 1
@@ -235,15 +355,22 @@ validate_preflight_selection() {
   if [[ "$store_active_id" != "$SELECTED_PROFILE_ID" ]]; then
     json_error "preflight" "Profile store active id does not match selected profile." "store=${store_active_id}; selected=${SELECTED_PROFILE_ID}" 1
   fi
+  if [[ -n "$DEFAULT_SHELL_MODE" && "$plist_default_shell" != "$DEFAULT_SHELL_MODE" ]]; then
+    json_error "preflight" "LaunchDaemon plist default shell does not match selected mode." "plist=${plist_default_shell}; selected=${DEFAULT_SHELL_MODE}" 1
+  fi
 }
 
 validate_postflight_selection() {
   local public_active
+  local public_default_shell
   local launchd_codex_home
   local launchd_mux_endpoint
+  local launchd_default_shell
   public_active="$(public_config_active_profile || true)"
+  public_default_shell="$(public_config_default_shell_mode || true)"
   launchd_codex_home="$(launchd_env_value CODEX_HOME)"
   launchd_mux_endpoint="$(launchd_env_value CODEX_MOBILE_MUX_ENDPOINT_FILE)"
+  launchd_default_shell="$(launchd_env_value CODEX_MOBILE_DEFAULT_SHELL)"
   if [[ "$public_active" != "$SELECTED_PROFILE_ID" ]]; then
     json_error "postflight" "Public config active profile does not match selected profile." "public=${public_active}; selected=${SELECTED_PROFILE_ID}" 1
   fi
@@ -253,15 +380,22 @@ validate_postflight_selection() {
   if [[ "$launchd_mux_endpoint" != "$SELECTED_MUX_ENDPOINT_FILE" ]]; then
     json_error "postflight" "Running LaunchDaemon mux endpoint does not match selected profile." "launchd=${launchd_mux_endpoint}; selected=${SELECTED_MUX_ENDPOINT_FILE}" 1
   fi
+  if [[ -n "$DEFAULT_SHELL_MODE" && "$public_default_shell" != "$DEFAULT_SHELL_MODE" ]]; then
+    json_error "postflight" "Public config default shell does not match selected mode." "public=${public_default_shell}; selected=${DEFAULT_SHELL_MODE}" 1
+  fi
+  if [[ -n "$DEFAULT_SHELL_MODE" && "$launchd_default_shell" != "$DEFAULT_SHELL_MODE" ]]; then
+    json_error "postflight" "Running LaunchDaemon default shell does not match selected mode." "launchd=${launchd_default_shell}; selected=${DEFAULT_SHELL_MODE}" 1
+  fi
   POSTFLIGHT_JSON="$("$NODE_EXE" -e '
 const payload = {
   activeProfileId: process.argv[1],
   codexHome: process.argv[2],
   muxEndpointFile: process.argv[3],
+  defaultShellMode: process.argv[4] || undefined,
   matched: true,
 };
 process.stdout.write(JSON.stringify(payload));
-' "$public_active" "$launchd_codex_home" "$launchd_mux_endpoint")"
+' "$public_active" "$launchd_codex_home" "$launchd_mux_endpoint" "$public_default_shell")"
 }
 
 bootstrap_service_with_retry() {
@@ -297,6 +431,21 @@ while [[ $# -gt 0 ]]; do
       ;;
     --codex-home)
       CODEX_HOME_VALUE="${2:?--codex-home requires a value}"
+      shift 2
+      ;;
+    --default-shell-mode)
+      case "${2:?--default-shell-mode requires a value}" in
+        classic|classic-script|classic-script-fallback)
+          DEFAULT_SHELL_MODE="classic"
+          ;;
+        vite-app-preview|app-preview)
+          DEFAULT_SHELL_MODE="vite-app-preview"
+          ;;
+        *)
+          echo "Unsupported default shell mode: $2" >&2
+          exit 2
+          ;;
+      esac
       shift 2
       ;;
     --prompt)
@@ -426,6 +575,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     json_success
   else
     echo "Would restart $SERVICE_LABEL with CODEX_HOME=$SELECTED_CODEX_HOME"
+    if [[ -n "$DEFAULT_SHELL_MODE" ]]; then
+      echo "Would set CODEX_MOBILE_DEFAULT_SHELL=$DEFAULT_SHELL_MODE"
+    fi
   fi
   exit 0
 fi
@@ -436,12 +588,16 @@ plist_set_env CODEX_MOBILE_PROFILE_FILE "$PROFILE_FILE"
 plist_set_env CODEX_MOBILE_RUNTIME_DIR "$RUNTIME_DIR"
 plist_set_env CODEX_MOBILE_PORT "$PORT"
 plist_set_env CODEX_MOBILE_HOST "$HOST"
+if [[ -n "$DEFAULT_SHELL_MODE" ]]; then
+  plist_set_env CODEX_MOBILE_DEFAULT_SHELL "$DEFAULT_SHELL_MODE"
+fi
 
 run_sudo /bin/chmod 644 "$PLIST_PATH"
 run_sudo /usr/sbin/chown root:wheel "$PLIST_PATH"
 
 validate_preflight_selection
 
+SELECTED_MUX_STOP_JSON="$(stop_selected_mux_endpoint || printf '{"ok":false,"reason":"selected_mux_stop_failed"}')"
 run_sudo /bin/launchctl bootout "system/${SERVICE_LABEL}" >/dev/null 2>&1 || true
 bootstrap_service_with_retry
 run_sudo /bin/launchctl kickstart -k "system/${SERVICE_LABEL}" >/dev/null 2>&1 || true
