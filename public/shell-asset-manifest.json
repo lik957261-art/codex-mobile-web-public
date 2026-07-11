@@ -1,8 +1,119 @@
 {
   "schemaVersion": 4,
   "generatedBy": "generate-frontend-shell-manifest",
-  "shellCacheName": "codex-mobile-shell-v628-ababf095eb24",
-  "clientBuildId": "0.1.12|codex-mobile-shell-v628-ababf095eb24",
+  "shellCacheName": "codex-mobile-shell-v629-090ec7bbdb88",
+  "clientBuildId": "0.1.13|codex-mobile-shell-v629-090ec7bbdb88",
+  "classicShellCacheName": "codex-mobile-shell-v629-1bf3308ac7ee",
+  "viteArtifactCache": {
+    "schemaVersion": 1,
+    "source": "vite-shell-public-artifact",
+    "baseShellCacheName": "codex-mobile-shell-v629-1bf3308ac7ee",
+    "fingerprint": "3015dcc0b50483c2f771dc760fba534f47e31534f7b317a036138d696282b000",
+    "fileCount": 20,
+    "byteCount": 2897704,
+    "files": [
+      {
+        "fileName": "assets/_virtual_codex-mobile-esm-compatibility-FyGo2fKg.js",
+        "bytes": 6491,
+        "sha256": "437c6f804c625149165800ed2c606437c4a65b516e413f1b67bc6e730ec08804"
+      },
+      {
+        "fileName": "assets/app-bootstrap-FJ8Vd9Q8.js",
+        "bytes": 50980,
+        "sha256": "314bd18a2582cf136239e34c13ed51c343358bb67cf9682eefb8ceb0a91740bf"
+      },
+      {
+        "fileName": "assets/shard-01-6SLPqW2e.js",
+        "bytes": 291680,
+        "sha256": "435d3305154a08768f53032fab19d1d91509d8c1944d13f6f1de0ec8f7b9195b"
+      },
+      {
+        "fileName": "assets/shard-02-2-31Za9L.js",
+        "bytes": 235301,
+        "sha256": "e96fd046846f0e053d4aa0279a78c4d0594b0d19826a567fd620a7346acc8f6a"
+      },
+      {
+        "fileName": "assets/shard-03-NYVe5Gvt.js",
+        "bytes": 293135,
+        "sha256": "9c4553be501428be1791cc8cf1c2c356699223b0634a4a9fcfacee46b1554782"
+      },
+      {
+        "fileName": "assets/shard-04-CFnLs2fj.js",
+        "bytes": 295199,
+        "sha256": "08ea048b707734c5d06ee9c05c65e02be70be3573807590647d2180bb4a334bc"
+      },
+      {
+        "fileName": "assets/shard-05-2b6XxDrR.js",
+        "bytes": 148722,
+        "sha256": "58b7e8ac3a2594f6913a27a8f905fe88c3d861107bfa591dc4b378f6c9660578"
+      },
+      {
+        "fileName": "assets/shard-06-DrgZylQ2.js",
+        "bytes": 298429,
+        "sha256": "cab8e9228fab1791ac8976a4815310d9bf4aa878a40c4651fd5170f9d6d22f12"
+      },
+      {
+        "fileName": "assets/shard-07-D8M3s1r_.js",
+        "bytes": 278120,
+        "sha256": "632a14bec2669af01c9e7c0fd947d44b826e4f9ea059be3fcd21884d8ad129fe"
+      },
+      {
+        "fileName": "assets/shard-08-9Ldhny2Y.js",
+        "bytes": 305083,
+        "sha256": "f363554dc4aeb379cd6aa642cdf4ab0e92dc77bf6b26ce20ae3e8c3c2c47792d"
+      },
+      {
+        "fileName": "assets/shard-09-DwCOyIGC.js",
+        "bytes": 252405,
+        "sha256": "75ba54cfbdf39979cc506b06fbe77ba3ec6d00debe05d21863c2ba32d4bea933"
+      },
+      {
+        "fileName": "assets/shard-10-DAMOoqvT.js",
+        "bytes": 283147,
+        "sha256": "11b80132b22adbf39d7d312c45a0e686dc3d0b3fd8c25bae279d2ad8d160da69"
+      },
+      {
+        "fileName": "assets/vite-deferred-entry-topology-Dt258TuK.js",
+        "bytes": 814,
+        "sha256": "796faafded7e107918beb9d054afcaeee085b0c836cca3c144049b58b697d658"
+      },
+      {
+        "fileName": "assets/vite-entry-group-app-entry-D_b2OFFK.js",
+        "bytes": 2207,
+        "sha256": "7d6e246627e21ab17760187a227d3ba4a320581a863f0bbb8e718e9aafb70d19"
+      },
+      {
+        "fileName": "assets/vite-entry-group-bootstrap-state-Jl9x_fZ6.js",
+        "bytes": 44441,
+        "sha256": "de9fbd0cd9acb737bde367989ac9518beac142dc31899505747ae788d09ec750"
+      },
+      {
+        "fileName": "assets/vite-entry-group-feature-runtimes-Cp728ASa.js",
+        "bytes": 10924,
+        "sha256": "b4c7efa1bded337b0fd4a3c8a1fee2c8d521e07f43b1b02c18a69d664cea5d83"
+      },
+      {
+        "fileName": "assets/vite-entry-group-foundation-D1Utqj_I.js",
+        "bytes": 8277,
+        "sha256": "66d070f65e1ad602a317205d87a8686b863de79bf3ff85092a2df8eca5046993"
+      },
+      {
+        "fileName": "assets/vite-entry-group-manifest-B233KDK4.js",
+        "bytes": 1156,
+        "sha256": "292cffdaa46065f822cf95164c7e373beab7393d1d00fe7d3040243f7e0a96d7"
+      },
+      {
+        "fileName": "assets/vite-entry-group-shell-services-DFfAZTog.js",
+        "bytes": 4161,
+        "sha256": "94315dd0200b6d24c4fa30f6425fbcb4a59dacfabbd333995ecd5df9e613e198"
+      },
+      {
+        "fileName": "assets/vite-shell-entry-D2sE0z4e.js",
+        "bytes": 87032,
+        "sha256": "20e3cfd4991612a36c030fe20fb94159fef2945d5971712fd1d71ca2deba711e"
+      }
+    ]
+  },
   "scriptAssets": [
     "/shell-asset-manifest.js",
     "/api-client.js",
@@ -441,6 +552,8 @@
         "SIDEBAR_EDGE_OPEN_MIN_PX",
         "SIDEBAR_EDGE_OPEN_RATIO",
         "SIDEBAR_EDGE_SWIPE_PX",
+        "SIDEBAR_LAYOUT_TOGGLE_MIN_HEIGHT",
+        "SIDEBAR_LAYOUT_TOGGLE_MIN_WIDTH",
         "SIDE_CHAT_DRAFT_MAX_CHARS",
         "SIDE_CHAT_DRAFT_SAVE_DEBOUNCE_MS",
         "STATUS_EVENT_FRESHNESS_TOLERANCE_MS",
@@ -580,7 +693,8 @@
     {
       "asset": "/api-client-runtime.js",
       "globals": [
-        "CodexApiClientRuntime"
+        "CodexApiClientRuntime",
+        "CodexFrontendLog"
       ]
     },
     {
@@ -1688,6 +1802,22 @@
       "present": true
     },
     {
+      "name": "SIDEBAR_LAYOUT_TOGGLE_MIN_HEIGHT",
+      "asset": "/app-bootstrap.js",
+      "groupId": "bootstrap-state",
+      "startupCritical": true,
+      "source": "app-bootstrap-script-global",
+      "present": true
+    },
+    {
+      "name": "SIDEBAR_LAYOUT_TOGGLE_MIN_WIDTH",
+      "asset": "/app-bootstrap.js",
+      "groupId": "bootstrap-state",
+      "startupCritical": true,
+      "source": "app-bootstrap-script-global",
+      "present": true
+    },
+    {
       "name": "sideChatRuntimeApi",
       "asset": "/app-bootstrap.js",
       "groupId": "bootstrap-state",
@@ -2515,8 +2645,8 @@
     "scriptAssets": 51,
     "entryGroups": 6,
     "classicGlobalExportAssets": 50,
-    "classicGlobalExports": 229,
-    "startupGlobalContracts": 209,
+    "classicGlobalExports": 232,
+    "startupGlobalContracts": 211,
     "linkAssets": 4,
     "iconAssets": 4,
     "precacheAssets": 60,

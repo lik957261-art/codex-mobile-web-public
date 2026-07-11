@@ -13,9 +13,16 @@ LIST_HOMES=0
 JSON_OUTPUT=0
 MAX_WAIT_SECONDS=45
 DRY_RUN=0
+RESTART_SELECTED_MUX=0
 POSTFLIGHT_JSON="{}"
 STALE_MUX_JSON="[]"
 SELECTED_MUX_STOP_JSON="{}"
+BOOTOUT_PERFORMED=0
+BOOTSTRAP_COMPLETED=0
+RECOVERY_TRAP_RUNNING=0
+TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS="1800000"
+TASK_CARD_EXECUTION_WATCHDOG_STALE_MS="1800000"
+TASK_CARD_EXECUTION_WATCHDOG_LIMIT="8"
 
 usage() {
   cat <<'EOF'
@@ -30,6 +37,7 @@ Options:
   --profile-id <id>         Start with a configured profile id, e.g. default/current/previous.
   --codex-home <path>       Start with an explicit Codex Home path.
   --default-shell-mode <m>   Set CODEX_MOBILE_DEFAULT_SHELL to classic or vite-app-preview.
+  --restart-mux             Also stop the selected app-server mux endpoint. Default preserves it.
   --prompt                  Prompt on stdin/stdout to select a configured profile.
   --label <launchd-label>   LaunchDaemon label, default com.hermesmobile.plugin.codex-mobile.
   --plist <path>            LaunchDaemon plist path.
@@ -85,6 +93,27 @@ console.log(JSON.stringify(payload, null, 2));
   fi
   exit "$status"
 }
+
+service_loaded() {
+  run_sudo /bin/launchctl print "system/${SERVICE_LABEL}" >/dev/null 2>&1
+}
+
+ensure_service_loaded_on_exit() {
+  local exit_status=$?
+  if [[ "$RECOVERY_TRAP_RUNNING" -eq 1 ]]; then
+    exit "$exit_status"
+  fi
+  RECOVERY_TRAP_RUNNING=1
+  if [[ "$BOOTOUT_PERFORMED" -eq 1 && "$BOOTSTRAP_COMPLETED" -ne 1 ]]; then
+    if ! service_loaded; then
+      echo "[recovery] LaunchDaemon was booted out before completion; attempting bootstrap restore for ${SERVICE_LABEL}." >&2
+      run_sudo /bin/launchctl bootstrap system "$PLIST_PATH" >/dev/null 2>&1 || true
+    fi
+  fi
+  exit "$exit_status"
+}
+
+trap ensure_service_loaded_on_exit EXIT HUP INT TERM
 
 plist_get_env() {
   local key="$1"
@@ -341,10 +370,16 @@ validate_preflight_selection() {
   local plist_codex_home
   local plist_mux_endpoint
   local plist_default_shell
+  local plist_watchdog_interval
+  local plist_watchdog_stale
+  local plist_watchdog_limit
   local store_active_id
   plist_codex_home="$(plist_get_env CODEX_HOME)"
   plist_mux_endpoint="$(plist_get_env CODEX_MOBILE_MUX_ENDPOINT_FILE)"
   plist_default_shell="$(plist_get_env CODEX_MOBILE_DEFAULT_SHELL)"
+  plist_watchdog_interval="$(plist_get_env CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS)"
+  plist_watchdog_stale="$(plist_get_env CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_STALE_MS)"
+  plist_watchdog_limit="$(plist_get_env CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_LIMIT)"
   store_active_id="$(profile_store_active_id)"
   if [[ "$plist_codex_home" != "$SELECTED_CODEX_HOME" ]]; then
     json_error "preflight" "LaunchDaemon plist CODEX_HOME does not match selected profile." "plist=${plist_codex_home}; selected=${SELECTED_CODEX_HOME}" 1
@@ -358,6 +393,15 @@ validate_preflight_selection() {
   if [[ -n "$DEFAULT_SHELL_MODE" && "$plist_default_shell" != "$DEFAULT_SHELL_MODE" ]]; then
     json_error "preflight" "LaunchDaemon plist default shell does not match selected mode." "plist=${plist_default_shell}; selected=${DEFAULT_SHELL_MODE}" 1
   fi
+  if [[ "$plist_watchdog_interval" != "$TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS" ]]; then
+    json_error "preflight" "LaunchDaemon plist task-card watchdog interval does not match platform default." "plist=${plist_watchdog_interval}; selected=${TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS}" 1
+  fi
+  if [[ "$plist_watchdog_stale" != "$TASK_CARD_EXECUTION_WATCHDOG_STALE_MS" ]]; then
+    json_error "preflight" "LaunchDaemon plist task-card watchdog stale window does not match platform default." "plist=${plist_watchdog_stale}; selected=${TASK_CARD_EXECUTION_WATCHDOG_STALE_MS}" 1
+  fi
+  if [[ "$plist_watchdog_limit" != "$TASK_CARD_EXECUTION_WATCHDOG_LIMIT" ]]; then
+    json_error "preflight" "LaunchDaemon plist task-card watchdog batch limit does not match platform default." "plist=${plist_watchdog_limit}; selected=${TASK_CARD_EXECUTION_WATCHDOG_LIMIT}" 1
+  fi
 }
 
 validate_postflight_selection() {
@@ -366,11 +410,17 @@ validate_postflight_selection() {
   local launchd_codex_home
   local launchd_mux_endpoint
   local launchd_default_shell
+  local launchd_watchdog_interval
+  local launchd_watchdog_stale
+  local launchd_watchdog_limit
   public_active="$(public_config_active_profile || true)"
   public_default_shell="$(public_config_default_shell_mode || true)"
   launchd_codex_home="$(launchd_env_value CODEX_HOME)"
   launchd_mux_endpoint="$(launchd_env_value CODEX_MOBILE_MUX_ENDPOINT_FILE)"
   launchd_default_shell="$(launchd_env_value CODEX_MOBILE_DEFAULT_SHELL)"
+  launchd_watchdog_interval="$(launchd_env_value CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS)"
+  launchd_watchdog_stale="$(launchd_env_value CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_STALE_MS)"
+  launchd_watchdog_limit="$(launchd_env_value CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_LIMIT)"
   if [[ "$public_active" != "$SELECTED_PROFILE_ID" ]]; then
     json_error "postflight" "Public config active profile does not match selected profile." "public=${public_active}; selected=${SELECTED_PROFILE_ID}" 1
   fi
@@ -386,30 +436,49 @@ validate_postflight_selection() {
   if [[ -n "$DEFAULT_SHELL_MODE" && "$launchd_default_shell" != "$DEFAULT_SHELL_MODE" ]]; then
     json_error "postflight" "Running LaunchDaemon default shell does not match selected mode." "launchd=${launchd_default_shell}; selected=${DEFAULT_SHELL_MODE}" 1
   fi
+  if [[ "$launchd_watchdog_interval" != "$TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS" ]]; then
+    json_error "postflight" "Running LaunchDaemon task-card watchdog interval does not match platform default." "launchd=${launchd_watchdog_interval}; selected=${TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS}" 1
+  fi
+  if [[ "$launchd_watchdog_stale" != "$TASK_CARD_EXECUTION_WATCHDOG_STALE_MS" ]]; then
+    json_error "postflight" "Running LaunchDaemon task-card watchdog stale window does not match platform default." "launchd=${launchd_watchdog_stale}; selected=${TASK_CARD_EXECUTION_WATCHDOG_STALE_MS}" 1
+  fi
+  if [[ "$launchd_watchdog_limit" != "$TASK_CARD_EXECUTION_WATCHDOG_LIMIT" ]]; then
+    json_error "postflight" "Running LaunchDaemon task-card watchdog batch limit does not match platform default." "launchd=${launchd_watchdog_limit}; selected=${TASK_CARD_EXECUTION_WATCHDOG_LIMIT}" 1
+  fi
   POSTFLIGHT_JSON="$("$NODE_EXE" -e '
 const payload = {
   activeProfileId: process.argv[1],
   codexHome: process.argv[2],
   muxEndpointFile: process.argv[3],
   defaultShellMode: process.argv[4] || undefined,
+  taskCardExecutionWatchdog: {
+    intervalMs: Number(process.argv[5]),
+    staleMs: Number(process.argv[6]),
+    limit: Number(process.argv[7]),
+  },
   matched: true,
 };
 process.stdout.write(JSON.stringify(payload));
-' "$public_active" "$launchd_codex_home" "$launchd_mux_endpoint" "$public_default_shell")"
+' "$public_active" "$launchd_codex_home" "$launchd_mux_endpoint" "$public_default_shell" "$launchd_watchdog_interval" "$launchd_watchdog_stale" "$launchd_watchdog_limit")"
 }
 
 bootstrap_service_with_retry() {
   local output
   local status
   if output="$(run_sudo /bin/launchctl bootstrap system "$PLIST_PATH" 2>&1)"; then
+    BOOTSTRAP_COMPLETED=1
     return 0
   fi
   status=$?
   if [[ "$status" -eq 5 ]]; then
     sleep 1
-    if ! run_sudo /bin/launchctl print "system/${SERVICE_LABEL}" >/dev/null 2>&1; then
+    if service_loaded; then
+      BOOTSTRAP_COMPLETED=1
+      return 0
+    else
       local retry_output
       if retry_output="$(run_sudo /bin/launchctl bootstrap system "$PLIST_PATH" 2>&1)"; then
+        BOOTSTRAP_COMPLETED=1
         return 0
       fi
       status=$?
@@ -447,6 +516,10 @@ while [[ $# -gt 0 ]]; do
           ;;
       esac
       shift 2
+      ;;
+    --restart-mux)
+      RESTART_SELECTED_MUX=1
+      shift
       ;;
     --prompt)
       PROMPT=1
@@ -588,6 +661,9 @@ plist_set_env CODEX_MOBILE_PROFILE_FILE "$PROFILE_FILE"
 plist_set_env CODEX_MOBILE_RUNTIME_DIR "$RUNTIME_DIR"
 plist_set_env CODEX_MOBILE_PORT "$PORT"
 plist_set_env CODEX_MOBILE_HOST "$HOST"
+plist_set_env CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS "$TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS"
+plist_set_env CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_STALE_MS "$TASK_CARD_EXECUTION_WATCHDOG_STALE_MS"
+plist_set_env CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_LIMIT "$TASK_CARD_EXECUTION_WATCHDOG_LIMIT"
 if [[ -n "$DEFAULT_SHELL_MODE" ]]; then
   plist_set_env CODEX_MOBILE_DEFAULT_SHELL "$DEFAULT_SHELL_MODE"
 fi
@@ -597,7 +673,20 @@ run_sudo /usr/sbin/chown root:wheel "$PLIST_PATH"
 
 validate_preflight_selection
 
-SELECTED_MUX_STOP_JSON="$(stop_selected_mux_endpoint || printf '{"ok":false,"reason":"selected_mux_stop_failed"}')"
+if [[ "$RESTART_SELECTED_MUX" -eq 1 ]]; then
+  SELECTED_MUX_STOP_JSON="$(stop_selected_mux_endpoint || printf '{"ok":false,"reason":"selected_mux_stop_failed"}')"
+else
+  SELECTED_MUX_STOP_JSON="$("$NODE_EXE" -e '
+const payload = {
+  ok: true,
+  endpointFile: process.argv[1],
+  action: "preserved",
+  reason: "listener_restart_preserves_independent_app_server",
+};
+console.log(JSON.stringify(payload));
+' "$SELECTED_MUX_ENDPOINT_FILE")"
+fi
+BOOTOUT_PERFORMED=1
 run_sudo /bin/launchctl bootout "system/${SERVICE_LABEL}" >/dev/null 2>&1 || true
 bootstrap_service_with_retry
 run_sudo /bin/launchctl kickstart -k "system/${SERVICE_LABEL}" >/dev/null 2>&1 || true

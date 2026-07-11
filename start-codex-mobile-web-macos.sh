@@ -75,6 +75,16 @@ default_node_executable() {
   printf '%s\n' node
 }
 
+resolve_codex_command() {
+  local value="$1"
+  if [[ -n "$value" ]]; then
+    resolve_command "$value" codex
+    return 0
+  fi
+  value="$(default_codex_executable)"
+  resolve_command "$value" codex
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host)
@@ -117,10 +127,7 @@ if [[ -z "$NODE_EXE_VALUE" ]]; then
   NODE_EXE_VALUE="$(default_node_executable)"
 fi
 NODE_EXE_VALUE="$(resolve_command "$NODE_EXE_VALUE" node)"
-if [[ -z "$CODEX_EXE_VALUE" ]]; then
-  CODEX_EXE_VALUE="$(default_codex_executable)"
-fi
-CODEX_EXE_VALUE="$(resolve_command "$CODEX_EXE_VALUE" codex)"
+CODEX_EXE_VALUE="$(resolve_codex_command "$CODEX_EXE_VALUE")"
 
 if [[ "$NODE_EXE_VALUE" == */* && ! -x "$NODE_EXE_VALUE" ]]; then
   echo "Node executable not found or not executable: $NODE_EXE_VALUE" >&2

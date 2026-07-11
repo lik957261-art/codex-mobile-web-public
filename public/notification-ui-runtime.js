@@ -103,10 +103,7 @@ function pluginVoiceInputCapabilityPayload(extra = {}) {
 }
 
 function pluginVoiceInputGestureAvailable() {
-  if (!isHermesEmbedMode()) return false;
-  if (pluginVoiceInputActiveTurnHoldAvailable()) return true;
-  if (state.activeTurnId && !composerHasContent()) return false;
-  return pluginVoiceInputComposerWritable();
+  return false;
 }
 
 function postPluginVoiceInputMessage(message) {
@@ -554,11 +551,13 @@ function requestHermesPluginRefresh(reason, options = {}) {
   });
   if (!options.force && signature === state.pluginRefreshRequestSignature) return false;
   state.pluginRefreshRequestSignature = signature;
+  state.pluginRefreshRequestReason = normalizedReason;
   if (targetOrigin) state.pluginParentOrigin = targetOrigin;
   if (state.pluginRefreshPendingTimer) {
     clearTimeout(state.pluginRefreshPendingTimer);
     state.pluginRefreshPendingTimer = null;
   }
+  state.pluginRefreshPendingReason = normalizedReason;
   state.pluginRefreshPendingNotice = pluginRefreshPendingMessage(normalizedReason);
   state.pluginRefreshPendingTimer = window.setTimeout(() => {
     state.pluginRefreshPendingTimer = null;
@@ -592,15 +591,29 @@ function pluginRefreshPendingMessage(reason) {
   return "Refreshing plugin page from Hermes Mobile...";
 }
 
-function clearPluginRefreshPendingNotice() {
+function clearPluginRefreshPendingNotice(reason = "") {
+  const normalizedReason = boundedPluginRefreshValue(reason || "", 80);
+  const pendingReason = boundedPluginRefreshValue(state.pluginRefreshPendingReason || "", 80);
+  if (normalizedReason && pendingReason && normalizedReason !== pendingReason) return false;
   if (state.pluginRefreshPendingTimer) {
     clearTimeout(state.pluginRefreshPendingTimer);
     state.pluginRefreshPendingTimer = null;
   }
-  if (!state.pluginRefreshPendingNotice) return;
+  if (!state.pluginRefreshPendingNotice && !pendingReason) return false;
+  const previousNotice = state.pluginRefreshPendingNotice;
   state.pluginRefreshPendingNotice = "";
+  state.pluginRefreshPendingReason = "";
+  if (normalizedReason && state.pluginRefreshRequestReason === normalizedReason) {
+    state.pluginRefreshRequestSignature = "";
+    state.pluginRefreshRequestReason = "";
+  }
+  const connection = $("connectionState");
+  if (connection && previousNotice && connection.textContent === previousNotice) {
+    connection.textContent = "";
+  }
   if (state.currentThreadId || state.currentThread) renderCurrentThread();
   else if (state.newThreadDraft) renderNewThreadDraft();
+  return true;
 }
 
 function boundedViewportNumber(value, max = 4096) {
@@ -937,23 +950,45 @@ async function login(key) {
 
 async function exchangePluginLaunchSession() {
   if (!isHermesEmbedMode() || !state.pluginLaunchSession || !state.key) return;
-  const result = await api("/api/v1/hermes/plugin/session", {
-    method: "POST",
-    body: JSON.stringify({ codexPluginLaunch: state.key }),
-    timeoutMs: 12000,
-  });
-  if (!result || !result.session_key) throw new Error("Plugin session exchange failed");
-  setAuthKey(result.session_key);
-  const hermesOrigin = normalizePluginParentOrigin(result && result.hermes_origin);
-  if (hermesOrigin) state.pluginParentOrigin = hermesOrigin;
-  state.pluginLaunchTarget = result && result.target && typeof result.target === "object" ? result.target : null;
-  applyPluginAppearancePreference(result && result.appearance);
-  if (state.pluginLaunchTarget && state.pluginLaunchTarget.cwd && !state.currentThreadId) {
-    state.selectedCwd = String(state.pluginLaunchTarget.cwd || "").trim();
+  const launchKey = String(state.key || "").trim();
+  if (!launchKey) return;
+  if (state.pluginLaunchExchangeCompletedKey === launchKey && state.pluginSessionActive) {
+    state.pluginLaunchSession = false;
+    scrubPluginLaunchUrl();
+    return;
   }
-  state.pluginLaunchSession = false;
-  state.pluginSessionActive = true;
-  scrubPluginLaunchUrl();
+  if (state.pluginLaunchExchangeKey === launchKey && state.pluginLaunchExchangePromise) {
+    return state.pluginLaunchExchangePromise;
+  }
+  const exchangePromise = (async () => {
+    const result = await api("/api/v1/hermes/plugin/session", {
+      method: "POST",
+      body: JSON.stringify({ codexPluginLaunch: launchKey }),
+      timeoutMs: 12000,
+    });
+    if (!result || !result.session_key) throw new Error("Plugin session exchange failed");
+    setAuthKey(result.session_key);
+    const hermesOrigin = normalizePluginParentOrigin(result && result.hermes_origin);
+    if (hermesOrigin) state.pluginParentOrigin = hermesOrigin;
+    state.pluginLaunchTarget = result && result.target && typeof result.target === "object" ? result.target : null;
+    applyPluginAppearancePreference(result && result.appearance);
+    if (state.pluginLaunchTarget && state.pluginLaunchTarget.cwd && !state.currentThreadId) {
+      state.selectedCwd = String(state.pluginLaunchTarget.cwd || "").trim();
+    }
+    state.pluginLaunchSession = false;
+    state.pluginSessionActive = true;
+    state.pluginLaunchExchangeCompletedKey = launchKey;
+    scrubPluginLaunchUrl();
+  })();
+  state.pluginLaunchExchangeKey = launchKey;
+  state.pluginLaunchExchangePromise = exchangePromise;
+  try {
+    await exchangePromise;
+  } finally {
+    if (state.pluginLaunchExchangePromise === exchangePromise) {
+      state.pluginLaunchExchangePromise = null;
+    }
+  }
 }
 
 async function applyPluginLaunchTarget() {
@@ -984,30 +1019,31 @@ async function applyPluginLaunchTarget() {
   return true;
 }
 
-function shouldAutoRestoreSavedThreadAtStartup(savedThreadId, startupThreadId, startupPluginRouteHint) {
-  if (!savedThreadId || startupThreadId || (startupPluginRouteHint && startupPluginRouteHint.threadId)) return false;
-  try {
-    if (!isHermesEmbedMode() && typeof isMobileViewport === "function" && isMobileViewport()) return false;
-  } catch (_) {}
-  return true;
-}
-
 async function bootstrap() {
   const bootstrapStartedAt = nowPerfMs();
   if (isHermesEmbedMode()) showPluginStartupLoading();
   const startupThreadId = applyUrlThreadSelection();
   const startupPluginRouteHint = applyUrlPluginRouteHint();
   const savedThreadId = isHermesEmbedMode() ? "" : (localStorage.getItem(STORAGE_THREAD_ID) || "");
-  const shouldAutoRestoreSavedThread = shouldAutoRestoreSavedThreadAtStartup(savedThreadId, startupThreadId, startupPluginRouteHint);
-  state.startupThreadOpenPending = Boolean(startupThreadId || (shouldAutoRestoreSavedThread && savedThreadId) || (startupPluginRouteHint && startupPluginRouteHint.threadId));
+  const deferStartupRestoreForTileMode = Boolean(
+    savedThreadId
+    && !startupThreadId
+    && typeof localThreadDisplayMode === "function"
+    && localThreadDisplayMode() === "tile"
+  );
+  state.startupThreadOpenPending = Boolean(
+    startupThreadId
+    || (savedThreadId && !deferStartupRestoreForTileMode)
+    || (startupPluginRouteHint && startupPluginRouteHint.threadId)
+  );
   const startupThreadOpenPending = state.startupThreadOpenPending;
   postStartupStage("bootstrap_start", bootstrapStartedAt, {
     hasStartupThreadId: Boolean(startupThreadId),
     hasSavedThreadId: Boolean(savedThreadId),
-    autoRestoreSavedThread: Boolean(shouldAutoRestoreSavedThread),
     hasPluginRouteThreadId: Boolean(startupPluginRouteHint && startupPluginRouteHint.threadId),
+    deferStartupRestoreForTileMode,
   });
-  const earlyRestorePromise = shouldAutoRestoreSavedThread
+  const earlyRestorePromise = savedThreadId && !startupThreadId && !deferStartupRestoreForTileMode
     ? loadThread(savedThreadId, { source: "restore-startup", suppressLoadFailureDiagnostic: true }).catch((err) => {
       localStorage.removeItem(STORAGE_THREAD_ID);
       showError(err);
@@ -1016,38 +1052,39 @@ async function bootstrap() {
     })
     : null;
   if (earlyRestorePromise) postStartupStage("restore_start", bootstrapStartedAt, { threadId: savedThreadId });
+  else if (deferStartupRestoreForTileMode) {
+    postStartupStage("restore_deferred", bootstrapStartedAt, {
+      threadId: savedThreadId,
+      reason: "tile-startup",
+    });
+  }
   const statusStartedAt = nowPerfMs();
-  const workspacesStartedAt = nowPerfMs();
-  const threadDisplayStartedAt = nowPerfMs();
-  const statusPromise = api("/api/status").catch((err) => {
+  const status = await api("/api/status").catch((err) => {
     $("connectionState").textContent = err.message;
     $("connectionState").classList.add("error");
     return null;
-  }).then((status) => {
-    postStartupStage("status_done", bootstrapStartedAt, {
-      durationMs: roundedDurationMs(statusStartedAt),
-      ok: Boolean(status),
-    });
-    if (status) updateConnectionState(status);
-    if (status) rememberRateLimitsFromConfig(status);
-    if (status && status.codexProfiles) rememberCodexProfiles(status.codexProfiles);
-    return status;
   });
-  const workspacesPromise = loadWorkspaces().then(() => {
-    postStartupStage("workspaces_done", bootstrapStartedAt, {
-      durationMs: roundedDurationMs(workspacesStartedAt),
-      workspaceCount: Array.isArray(state.workspaces) ? state.workspaces.length : 0,
-    });
+  postStartupStage("status_done", bootstrapStartedAt, {
+    durationMs: roundedDurationMs(statusStartedAt),
+    ok: Boolean(status),
   });
-  const threadDisplayPromise = loadThreadDisplaySettings({ render: false }).catch(showError).then(() => {
-    postStartupStage("thread_display_done", bootstrapStartedAt, {
-      durationMs: roundedDurationMs(threadDisplayStartedAt),
-      mode: state.threadTileMode ? "tile" : "single",
-      paneCount: normalizeThreadTilePaneCount(state.threadTilePaneCount, 0),
-      paneSlotCount: normalizeThreadTilePinnedIds(state.threadTilePinnedIds).length,
-    });
+  if (status) updateConnectionState(status);
+  if (status) rememberRateLimitsFromConfig(status);
+  if (status && status.codexProfiles) rememberCodexProfiles(status.codexProfiles);
+  const workspacesStartedAt = nowPerfMs();
+  await loadWorkspaces();
+  postStartupStage("workspaces_done", bootstrapStartedAt, {
+    durationMs: roundedDurationMs(workspacesStartedAt),
+    workspaceCount: Array.isArray(state.workspaces) ? state.workspaces.length : 0,
   });
-  await Promise.all([statusPromise, workspacesPromise, threadDisplayPromise]);
+  const threadDisplayStartedAt = nowPerfMs();
+  await loadThreadDisplaySettings({ render: false }).catch(showError);
+  postStartupStage("thread_display_done", bootstrapStartedAt, {
+    durationMs: roundedDurationMs(threadDisplayStartedAt),
+    mode: state.threadTileMode ? "tile" : "single",
+    paneCount: normalizeThreadTilePaneCount(state.threadTilePaneCount, 0),
+    paneSlotCount: normalizeThreadTilePinnedIds(state.threadTilePinnedIds).length,
+  });
   const threadsStartedAt = nowPerfMs();
   await loadThreads({ silent: startupThreadOpenPending, deferFallback: true });
   postStartupStage("threads_done", bootstrapStartedAt, {

@@ -19,7 +19,7 @@ data/
 uploads/
 outputs/
 backups/
-runtime/
+/runtime/
 access_key
 *.sqlite
 *.sqlite-*

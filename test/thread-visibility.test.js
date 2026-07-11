@@ -122,6 +122,7 @@ try {
 const {
   anyThreadMatchesVisibleWorkspace,
   appendRolloutActiveAssistantItemsToDetailResult,
+  appendRolloutLatestCompletedAssistantItemsToDetailResult,
   applyLocalActiveThreadStatusToSummary,
   attachRolloutFallbackStatus,
   clearLocalActiveThreadStatus,
@@ -383,7 +384,7 @@ test("thread detail defaults to ten turns and exposes an older cursor when compa
   assert.match(threadDetailCompactionServiceJs, /return JSON\.stringify\(\{ turnId, includeAnchor: false \}\);/);
   assert.match(threadDetailCompactionServiceJs, /out\.mobileOlderTurnsCursor = olderTurnsCursorBeforeTurn\(out\.turns\[0\]\);/);
   assert.match(apiDispatchRouteServiceJs, /handleThreadDetailReadRoute\(\{/);
-  assert.match(threadDetailRouteServiceJs, /const preferRecentTurns = detailModeFromUrl\(url\) === "recent";/);
+  assert.match(threadDetailRouteServiceJs, /const preferRecentTurns = detailMode === "recent" \|\| \(detailMode !== "full" && explicitCompactBudgetFromUrl\(url\)\);/);
   assert.match(threadDetailReadOrchestrationServiceJs, /planActiveThreadDetailReadPolicy\(\{ summary, preferRecentTurns \}\)/);
   assert.match(threadDetailReadOrchestrationServiceJs, /if \(activeReadPolicy\.shouldUseInitialTurnsList\) \{/);
   assert.match(threadDetailReadOrchestrationServiceJs, /"turns-list-initial"/);
@@ -413,7 +414,7 @@ test("thread detail defaults to ten turns and exposes an older cursor when compa
 
 test("fallback thread list keeps migrated Windows cwd rows when no visible workspace matches", () => {
   const macWorkspace = "/Users/example/HermesMobile";
-  const windowsCwd = "C:\\Users\\Public\\Documents\\Agent";
+  const windowsCwd = "C:\\Users\\example\\Documents\\Agent";
   const visibility = visibilityFor(macWorkspace);
 
   assert.equal(anyThreadMatchesVisibleWorkspace([{ id: "thread-1", cwd: windowsCwd }], visibility), false);
@@ -430,7 +431,7 @@ test("fallback thread list keeps migrated Windows cwd rows when no visible works
 });
 
 test("fallback filtering reuses injected archived ids for a whole pass", () => {
-  const visibleRoot = "C:\\Users\\Public\\Documents\\Agent";
+  const visibleRoot = "C:\\Users\\example\\Documents\\Agent";
   const archivedId = "019e9000-0000-7000-8000-000000000016";
   const liveId = "019e9000-0000-7000-8000-000000000017";
   const filtered = filterFallbackThreads([
@@ -512,6 +513,108 @@ test("deploy lane runtime active summary replaces warm idle cache", () => {
   assert.equal(merged.status.type, "active");
   assert.equal(merged.mobileDeployLane, true);
   assert.equal(merged.activeTurnId, "turn-active");
+});
+
+test("runtime active summary replaces ordinary completed list row", () => {
+  const service = createThreadSummaryStateService({
+    statusText: (status) => String(status && status.type || status || ""),
+    timestampToMs(value) {
+      const number = Number(value || 0);
+      if (!Number.isFinite(number) || number <= 0) return 0;
+      return number < 1_000_000_000_000 ? number * 1000 : number;
+    },
+    threadListSummaryTimestampMs(thread) {
+      const number = Number(thread && (thread.updatedAt || thread.updated_at || thread.updatedAtMs || thread.updated_at_ms) || 0);
+      if (!Number.isFinite(number) || number <= 0) return 0;
+      return number < 1_000_000_000_000 ? number * 1000 : number;
+    },
+  });
+  const appServerCompleted = {
+    id: "home-ai-thread",
+    name: "Home AI 06-22",
+    cwd: "/Users/hermes-dev/HermesMobileDev/app",
+    updatedAt: 1783143704,
+    status: { type: "completed" },
+  };
+  const detailRuntimeActive = {
+    id: "home-ai-thread",
+    name: "Home AI 06-22",
+    cwd: "/Users/hermes-dev/HermesMobileDev/app",
+    updatedAt: 1783143600,
+    status: { type: "active", mobileRuntimeDerived: true },
+    activeTurnId: "turn-active",
+  };
+
+  const merged = service.normalizeThreadSummaryLiveStatus(
+    service.mergeThreadDisplaySummary(appServerCompleted, detailRuntimeActive),
+  );
+
+  assert.equal(merged.status.type, "active");
+  assert.equal(merged.activeTurnId, "turn-active");
+});
+
+test("ordinary completed list row does not overwrite runtime-active display cache", () => {
+  const service = createThreadSummaryStateService({
+    statusText: (status) => String(status && status.type || status || ""),
+    threadListSummaryTimestampMs(thread) {
+      const number = Number(thread && (thread.updatedAt || thread.updated_at || thread.updatedAtMs || thread.updated_at_ms) || 0);
+      if (!Number.isFinite(number) || number <= 0) return 0;
+      return number < 1_000_000_000_000 ? number * 1000 : number;
+    },
+  });
+  const cachedRuntimeActive = {
+    id: "home-ai-thread",
+    name: "Home AI 06-22",
+    updatedAt: 1783143600,
+    status: { type: "active", mobileRuntimeDerived: true },
+    activeTurnId: "turn-active",
+  };
+  const appServerCompleted = {
+    id: "home-ai-thread",
+    name: "Home AI 06-22",
+    updatedAt: 1783144004,
+    status: { type: "completed" },
+    mobileListResultSummary: true,
+  };
+
+  const merged = service.normalizeThreadSummaryLiveStatus(
+    service.mergeThreadDisplaySummary(cachedRuntimeActive, appServerCompleted),
+  );
+
+  assert.equal(merged.status.type, "active");
+  assert.equal(merged.activeTurnId, "turn-active");
+});
+
+test("detail-authoritative completed summary can clear runtime-active display cache", () => {
+  const service = createThreadSummaryStateService({
+    statusText: (status) => String(status && status.type || status || ""),
+    threadListSummaryTimestampMs(thread) {
+      const number = Number(thread && (thread.updatedAt || thread.updated_at || thread.updatedAtMs || thread.updated_at_ms) || 0);
+      if (!Number.isFinite(number) || number <= 0) return 0;
+      return number < 1_000_000_000_000 ? number * 1000 : number;
+    },
+  });
+  const cachedRuntimeActive = {
+    id: "home-ai-thread",
+    name: "Home AI 06-22",
+    updatedAt: 1783143600,
+    status: { type: "active", mobileRuntimeDerived: true },
+    activeTurnId: "turn-active",
+  };
+  const detailCompleted = {
+    id: "home-ai-thread",
+    name: "Home AI 06-22",
+    updatedAt: 1783144004,
+    status: { type: "completed" },
+    mobileDetailStatusAuthority: true,
+  };
+
+  const merged = service.normalizeThreadSummaryLiveStatus(
+    service.mergeThreadDisplaySummary(cachedRuntimeActive, detailCompleted),
+  );
+
+  assert.equal(merged.status.type, "completed");
+  assert.equal(merged.activeTurnId, undefined);
 });
 
 test("deploy lane list normalization clears embedded active markers after rollout terminal event", () => {
@@ -684,6 +787,12 @@ test("thread list hydrates display titles from the Mobile session index", () => 
 
   assert.equal(hydrated[0].name, "记账 06-05");
   assert.equal(hydrated[0].preview, "记账 06-05");
+  assert.equal(hydrated[0].displayTitle, "记账 06-05");
+  assert.equal(hydrated[0].threadTitle, "记账 06-05");
+  assert.equal(hydrated[0].thread_name, "记账 06-05");
+  assert.equal(hydrated[0].title, "记账 06-05");
+  assert.equal(hydrated[0].mobileSessionIndexTitle, "记账 06-05");
+  assert.equal(hydrated[0].mobileSessionIndexTitleUpdatedAtMs, 1780591873524);
   assert.equal(hydrated[0].updatedAt, 1780591873);
   assert.equal(hydrated[1].name, "Session Indexed Title");
   assert.equal(hydrated[2].name, "星盘");
@@ -710,6 +819,60 @@ test("thread list hydrates continuation bootstrap titles from the Mobile session
 
   assert.equal(hydrated[0].name, "Hermes 06-05");
   assert.equal(hydrated[0].preview, "Hermes 06-05");
+});
+
+test("thread display summary preserves Mobile session-index title over stale display summaries", () => {
+  const toMs = (value) => {
+    if (typeof value === "string" && value.trim()) return Date.parse(value);
+    const number = Number(value || 0);
+    if (!Number.isFinite(number) || number <= 0) return 0;
+    return number < 1_000_000_000_000 ? number * 1000 : number;
+  };
+  const service = createThreadSummaryStateService({
+    statusText: (status) => String(status && status.type || status || ""),
+    timestampToMs: toMs,
+    threadListSummaryTimestampMs(thread) {
+      return toMs(thread && (thread.updatedAt || thread.updated_at || thread.updatedAtMs || thread.updated_at_ms));
+    },
+  });
+  const manualTitle = "家庭网络";
+  const staleLongTitle = "Obsidian Vault 家庭网络 Tailscale NAS 转发性能排查和续接讨论";
+  const merged = service.mergeThreadDisplaySummary({
+    id: "019ed4de-dd44-77c3-88d0-e1be26df0bbe",
+    name: manualTitle,
+    preview: manualTitle,
+    displayTitle: manualTitle,
+    threadTitle: manualTitle,
+    thread_name: manualTitle,
+    title: manualTitle,
+    mobileSessionIndexTitle: manualTitle,
+    mobileSessionIndexTitleUpdatedAtMs: Date.parse("2026-07-06T12:24:21.331Z"),
+    updatedAt: 1783339000,
+    cwd: "/old",
+    status: { type: "completed" },
+  }, {
+    id: "019ed4de-dd44-77c3-88d0-e1be26df0bbe",
+    name: staleLongTitle,
+    preview: staleLongTitle,
+    displayTitle: staleLongTitle,
+    threadTitle: staleLongTitle,
+    thread_name: staleLongTitle,
+    title: staleLongTitle,
+    updatedAt: 1783341000,
+    cwd: "/Users/xuefusong/syncthings/Obsidian/Obsidian Vault",
+    status: { type: "completed" },
+  });
+
+  assert.equal(merged.name, manualTitle);
+  assert.equal(merged.preview, manualTitle);
+  assert.equal(merged.displayTitle, manualTitle);
+  assert.equal(merged.threadTitle, manualTitle);
+  assert.equal(merged.thread_name, manualTitle);
+  assert.equal(merged.title, manualTitle);
+  assert.equal(merged.mobileSessionIndexTitle, manualTitle);
+  assert.equal(merged.mobileSessionIndexTitleUpdatedAtMs, Date.parse("2026-07-06T12:24:21.331Z"));
+  assert.equal(merged.cwd, "/Users/xuefusong/syncthings/Obsidian/Obsidian Vault");
+  assert.equal(merged.updatedAt, 1783341000);
 });
 
 test("deferred thread list result hydrates display titles before first paint", () => {
@@ -764,13 +927,13 @@ test("rollout session fallback recovers thread summary without state db text col
       payload: {
         id: threadId,
         timestamp: "2026-06-04T10:00:01.000Z",
-        cwd: "C:\\Users\\Public\\Documents\\Agent",
+        cwd: "C:\\Users\\example\\Documents\\Agent",
         model: "gpt-5.5",
       },
     }),
     JSON.stringify({
       type: "turn_context",
-      cwd: "C:\\Users\\Public\\Documents\\Agent",
+      cwd: "C:\\Users\\example\\Documents\\Agent",
     }),
   ].join("\n"), "utf8");
   fs.utimesSync(
@@ -787,7 +950,7 @@ test("rollout session fallback recovers thread summary without state db text col
 
   assert.equal(summary.id, threadId);
   assert.equal(summary.name, "Recovered Thread");
-  assert.equal(summary.cwd, "C:\\Users\\Public\\Documents\\Agent");
+  assert.equal(summary.cwd, "C:\\Users\\example\\Documents\\Agent");
   assert.equal(summary.path, rolloutPath);
   assert.equal(summary.mobileFallback, true);
   assert.equal(summary.updatedAt, 1780567260);
@@ -803,7 +966,7 @@ test("rollout session fallback uses rollout mtime when it is newer than session 
       payload: {
         id: threadId,
         timestamp: "2026-06-04T10:00:01.000Z",
-        cwd: "C:\\Users\\Public\\Documents\\Agent",
+        cwd: "C:\\Users\\example\\Documents\\Agent",
       },
     }),
   ].join("\n"), "utf8");
@@ -838,7 +1001,7 @@ test("rollout session fallback infers active and completed status from rollout t
       payload: {
         id: activeThreadId,
         timestamp: earlier.toISOString(),
-        cwd: "C:\\Users\\Public\\Documents\\Agent",
+        cwd: "C:\\Users\\example\\Documents\\Agent",
       },
     }),
     JSON.stringify({
@@ -865,7 +1028,7 @@ test("rollout session fallback infers active and completed status from rollout t
       payload: {
         id: completedThreadId,
         timestamp: earlier.toISOString(),
-        cwd: "C:\\Users\\Public\\Documents\\Agent",
+        cwd: "C:\\Users\\example\\Documents\\Agent",
       },
     }),
     JSON.stringify({
@@ -893,7 +1056,7 @@ test("rollout session fallback infers active and completed status from rollout t
       payload: {
         id: touchedThreadId,
         timestamp: earlier.toISOString(),
-        cwd: "C:\\Users\\Public\\Documents\\Agent",
+        cwd: "C:\\Users\\example\\Documents\\Agent",
       },
     }),
   ].join("\n"), "utf8");
@@ -922,7 +1085,7 @@ test("rollout session list fallback can defer status until final candidates", ()
       payload: {
         id: threadId,
         timestamp: earlier.toISOString(),
-        cwd: "C:\\Users\\Public\\Documents\\Agent",
+        cwd: "C:\\Users\\example\\Documents\\Agent",
       },
     }),
     JSON.stringify({
@@ -1235,7 +1398,7 @@ test("rollout session fallback carries agent metadata so subagent rows stay hidd
       payload: {
         id: threadId,
         timestamp: "2026-06-04T10:00:01.000Z",
-        cwd: "C:\\Users\\Public\\Documents\\Agent",
+        cwd: "C:\\Users\\example\\Documents\\Agent",
         agent_nickname: "Agent",
         agent_role: "subagent",
       },
@@ -1254,7 +1417,7 @@ test("rollout session fallback carries agent metadata so subagent rows stay hidd
   assert.equal(summary.agentNickname, "Agent");
   assert.equal(summary.agentRole, "subagent");
   assert.deepEqual(filterFallbackThreads([summary], {
-    globalState: globalStateForRoots(["C:\\Users\\Public\\Documents\\Agent"]),
+    globalState: globalStateForRoots(["C:\\Users\\example\\Documents\\Agent"]),
   }), []);
 });
 
@@ -1582,6 +1745,59 @@ test("local turn-start overlay clears when rollout tail has a later terminal eve
   } finally {
     clearLocalActiveThreadStatus(threadId);
     fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("local turn-start overlay clears when terminal return receipt reaches source detail", () => {
+  const threadId = "019e9000-0000-7000-8000-localreceipt";
+  const localTurnId = "turn-local-active";
+  rememberLocalActiveThreadStatus(threadId, localTurnId, { source: "test" });
+  try {
+    const active = applyLocalActiveThreadStatusToSummary({
+      id: threadId,
+      name: "Home AI",
+      updatedAt: 1780722169,
+      status: { type: "idle" },
+    });
+
+    assert.equal(active.status.type, "active");
+    assert.equal(active.activeTurnId, localTurnId);
+    assert.equal(active.mobileLocalActiveStatus.turnId, localTurnId);
+
+    const receiptAttached = Object.assign({}, active, {
+      returnReceiptTaskCardCount: 1,
+      latestReturnReceiptAt: new Date(Date.now() + 1000).toISOString(),
+    });
+    const settled = applyLocalActiveThreadStatusToSummary(receiptAttached);
+
+    assert.equal(settled.status.type, "completed");
+    assert.equal(settled.status.mobileClearedLocalActiveReturnReceipt, true);
+    assert.equal(settled.activeTurnId, undefined);
+    assert.equal(settled.mobileLocalActiveStatus, undefined);
+  } finally {
+    clearLocalActiveThreadStatus(threadId);
+  }
+});
+
+test("local turn-start overlay ignores older terminal return receipt metadata", () => {
+  const threadId = "019e9000-0000-7000-8000-oldreceipt";
+  const localTurnId = "turn-local-active";
+  rememberLocalActiveThreadStatus(threadId, localTurnId, { source: "test" });
+  try {
+    const summary = applyLocalActiveThreadStatusToSummary({
+      id: threadId,
+      name: "Home AI",
+      updatedAt: 1780722169,
+      status: { type: "idle" },
+      returnReceiptTaskCardCount: 1,
+      latestReturnReceiptAt: "2000-01-01T00:00:00.000Z",
+    });
+
+    assert.equal(summary.status.type, "active");
+    assert.equal(summary.activeTurnId, localTurnId);
+    assert.equal(summary.mobileLocalActiveStatus.turnId, localTurnId);
+  } finally {
+    clearLocalActiveThreadStatus(threadId);
   }
 });
 
@@ -2061,6 +2277,74 @@ test("active detail appends missing rollout assistant items for live turns", () 
   }
 });
 
+test("detail appends missing rollout assistant items for latest completed replay", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mobile-completed-rollout-assistant-"));
+  try {
+    const rolloutPath = path.join(tempDir, "rollout.jsonl");
+    const completedTurnId = "019e9100-0000-7000-8000-complete";
+    fs.writeFileSync(rolloutPath, [
+      JSON.stringify({
+        type: "turn_context",
+        timestamp: "2026-06-28T10:00:00.000Z",
+        payload: { turn_id: completedTurnId },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-06-28T10:00:01.000Z",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "already visible" }],
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-06-28T10:00:02.000Z",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "missing completed receipt" }],
+        },
+      }),
+    ].join("\n") + "\n", "utf8");
+
+    const result = appendRolloutLatestCompletedAssistantItemsToDetailResult({
+      thread: {
+        id: "thread-completed",
+        path: rolloutPath,
+        status: { type: "active" },
+        activeTurnId: "active-turn",
+        turns: [{
+          id: completedTurnId,
+          status: { type: "completed" },
+          items: [
+            { id: "u1", type: "userMessage", text: "question" },
+            { id: "existing-agent", type: "agentMessage", text: "already visible" },
+            { id: "usage", type: "turnUsageSummary" },
+          ],
+        }, {
+          id: "active-turn",
+          status: { type: "inProgress" },
+          items: [{ id: "active-agent", type: "agentMessage", text: "active" }],
+        }],
+      },
+    });
+
+    const completedTurn = result.thread.turns.find((turn) => turn.id === completedTurnId);
+    assert.equal(result.thread.mobileCompletedReplayAssistantBackfilled.count, 1);
+    assert.equal(completedTurn.mobileCompletedReplayAssistantBackfilled, true);
+    assert.deepEqual(completedTurn.items
+      .filter((item) => item.type === "agentMessage")
+      .map((item) => item.text), [
+      "already visible",
+      "missing completed receipt",
+    ]);
+    assert.equal(completedTurn.items.filter((item) => item.mobileSyntheticCompletedReplayAssistant === true).length, 1);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("thread list merge does not let notLoaded rows erase settled status", () => {
   const threadId = "019e9000-0000-7000-8000-000000000011";
   const result = mergeThreadListFallback({
@@ -2091,6 +2375,9 @@ test("thread list summaries strip detail-only fields from app-server and fallbac
     turns: [],
     runtimeSettings: { permissionMode: "custom" },
     threadTaskCards: [{ id: "ttc-private" }],
+    taskCardReturnLedger: [{ taskCardId: "ttc-private" }],
+    taskCardReturnLedgerStatusCounts: { return_visible: 1 },
+    taskCardReturnLedgerIssueCodes: ["private-issue"],
     pendingServerRequests: [{ id: "request-private" }],
     mobileDetailLoaded: true,
     mobileLoading: false,
@@ -2108,6 +2395,9 @@ test("thread list summaries strip detail-only fields from app-server and fallbac
     "turns",
     "runtimeSettings",
     "threadTaskCards",
+    "taskCardReturnLedger",
+    "taskCardReturnLedgerStatusCounts",
+    "taskCardReturnLedgerIssueCodes",
     "pendingServerRequests",
     "mobileDetailLoaded",
     "mobileLoading",
@@ -2144,6 +2434,9 @@ test("thread list merge strips empty detail authority from app-server list rows"
       mobileProjectionVersion: "v4",
       mobileVisibleItemKeys: ["stale-key"],
       threadTaskCards: [{ id: "stale-card" }],
+      taskCardReturnLedger: [{ taskCardId: "stale-card" }],
+      taskCardReturnLedgerStatusCounts: { pending: 1 },
+      taskCardReturnLedgerIssueCodes: ["stale-issue"],
     }],
   }, [{
     id: threadId,
@@ -2157,7 +2450,7 @@ test("thread list merge strips empty detail authority from app-server list rows"
 
   assert.equal(result.data[0].id, threadId);
   assert.equal(result.data[0].mobileFallback, true);
-  for (const field of ["turns", "mobileDetailLoaded", "mobileReadMode", "mobileProjectionVersion", "mobileVisibleItemKeys", "threadTaskCards", "mobileDiagnostics"]) {
+  for (const field of ["turns", "mobileDetailLoaded", "mobileReadMode", "mobileProjectionVersion", "mobileVisibleItemKeys", "threadTaskCards", "taskCardReturnLedger", "taskCardReturnLedgerStatusCounts", "taskCardReturnLedgerIssueCodes", "mobileDiagnostics"]) {
     assert.equal(Object.prototype.hasOwnProperty.call(result.data[0], field), false, `${field} should be stripped from merged list row`);
   }
 });
@@ -2235,7 +2528,7 @@ test("thread list merge removes completed bare-id mobile fallback residues", () 
     id: residualThreadId,
     name: null,
     preview: residualThreadId,
-    cwd: "C:\\Users\\Public\\Documents\\Agent",
+    cwd: "C:\\Users\\example\\Documents\\Agent",
     updatedAt: 1780720100,
     status: { type: "completed" },
     mobileFallback: true,

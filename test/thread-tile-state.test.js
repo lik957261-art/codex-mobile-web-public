@@ -3,9 +3,11 @@
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const { test } = require("node:test");
+const { pathToFileURL } = require("node:url");
 
 const state = require(path.resolve(__dirname, "..", "public", "thread-tile-state.js"));
 const layout = require(path.resolve(__dirname, "..", "public", "thread-tile-layout.js"));
+const nativeStateUrl = pathToFileURL(path.resolve(__dirname, "..", "frontend", "native", "thread-tile-state.mjs")).href;
 
 test("thread tile state normalizes pane counts and pinned ids", () => {
   assert.equal(state.normalizePaneCount("5.9", { maxPanes: 12 }), 5);
@@ -563,6 +565,95 @@ test("thread tile state owns shared composer target planning", () => {
     targetThreadId: "b",
     hasTargetThread: false,
   }).text, "Message Codex");
+
+  const identityPlan = state.threadIdentityColorPlan({ threadId: "b" });
+  assert.equal(identityPlan.action, "thread-identity-color");
+  assert.equal(identityPlan.reason, "thread-id-hash");
+  assert.equal(identityPlan.threadId, "b");
+  assert.equal(identityPlan.index >= 0, true);
+  assert.equal(identityPlan.index < state.THREAD_IDENTITY_COLOR_SCHEMES.length, true);
+  assert.deepEqual(identityPlan, state.threadIdentityColorPlan({ threadId: "b" }));
+  assert.equal(identityPlan.cssVariables["--thread-identity-ring-dark"].startsWith("rgba("), true);
+  assert.equal(identityPlan.cssVariables["--thread-identity-ring-light"].startsWith("rgba("), true);
+  assert.equal(state.threadIdentityColorPlan({ threadId: "" }).reason, "missing-thread");
+  const contrastPlans = ["a", "b", "c"].map((threadId) => state.threadIdentityColorPlan({
+    threadId,
+    visibleIds: ["a", "b", "c"],
+  }));
+  assert.deepEqual(contrastPlans.map((plan) => plan.reason), [
+    "visible-pane-contrast",
+    "visible-pane-contrast",
+    "visible-pane-contrast",
+  ]);
+  assert.deepEqual(contrastPlans.map((plan) => plan.scheme), ["ocean", "ochre", "blue"]);
+  assert.deepEqual(contrastPlans.map((plan) => plan.slotIndex), [0, 1, 2]);
+  assert.deepEqual(contrastPlans.map((plan) => plan.visibleCount), [3, 3, 3]);
+  assert.notEqual(
+    contrastPlans[1].cssVariables["--thread-identity-ring-dark"],
+    contrastPlans[2].cssVariables["--thread-identity-ring-dark"],
+  );
+
+  const indicatorPlan = state.composerTargetIndicatorPlan({
+    tileContext: true,
+    targetThreadId: "b",
+    hasTargetThread: true,
+    targetTitle: "Music",
+  });
+  assert.equal(indicatorPlan.action, "composer-target-indicator");
+  assert.equal(indicatorPlan.reason, "tile-target");
+  assert.equal(indicatorPlan.showTargetIndicator, true);
+  assert.equal(indicatorPlan.label, "发送到");
+  assert.equal(indicatorPlan.text, "Music");
+  assert.equal(indicatorPlan.title, "发送到：Music");
+  assert.equal(indicatorPlan.ariaLabel, "发送到：Music");
+  assert.equal(indicatorPlan.colorScheme, identityPlan.scheme);
+  assert.deepEqual(indicatorPlan.cssVariables, identityPlan.cssVariables);
+  const contextualIndicatorPlan = state.composerTargetIndicatorPlan({
+    tileContext: true,
+    targetThreadId: "b",
+    hasTargetThread: true,
+    targetTitle: "Music",
+    visibleIds: ["a", "b", "c"],
+  });
+  assert.equal(contextualIndicatorPlan.colorScheme, "ochre");
+  assert.deepEqual(contextualIndicatorPlan.cssVariables, contrastPlans[1].cssVariables);
+  assert.equal(state.composerTargetIndicatorPlan({
+    tileContext: true,
+    targetThreadId: "b",
+    hasTargetThread: false,
+  }).showTargetIndicator, false);
+  assert.equal(state.composerTargetIndicatorPlan({
+    newThreadDraft: true,
+    tileContext: true,
+    targetThreadId: "b",
+    hasTargetThread: true,
+  }).reason, "new-thread");
+});
+
+test("native thread tile state exports identity color policy used by Vite tile runtime", async () => {
+  const nativeState = await import(nativeStateUrl);
+  assert.equal(typeof nativeState.threadIdentityColorPlan, "function");
+  assert.equal(typeof nativeState.default.threadIdentityColorPlan, "function");
+  assert.equal(Array.isArray(nativeState.THREAD_IDENTITY_COLOR_SCHEMES), true);
+  assert.equal(Array.isArray(nativeState.THREAD_IDENTITY_CONTRAST_ORDER), true);
+  assert.equal(Array.isArray(nativeState.THREAD_IDENTITY_CSS_VARIABLE_NAMES), true);
+
+  const contrastPlan = nativeState.threadIdentityColorPlan({
+    threadId: "b",
+    visibleIds: ["a", "b", "c"],
+  });
+  assert.deepEqual(contrastPlan, nativeState.default.threadIdentityColorPlan({
+    threadId: "b",
+    visibleIds: ["a", "b", "c"],
+  }));
+  assert.equal(contrastPlan.action, "thread-identity-color");
+  assert.equal(contrastPlan.reason, "visible-pane-contrast");
+  assert.equal(contrastPlan.threadId, "b");
+  assert.equal(contrastPlan.slotIndex, 1);
+  assert.equal(contrastPlan.visibleCount, 3);
+  assert.equal(contrastPlan.scheme, "ochre");
+  assert.equal(contrastPlan.cssVariables["--thread-identity-label-dark"], "#efd3a1");
+  assert.equal(nativeState.threadIdentityColorPlan({ threadId: "" }).reason, "missing-thread");
 });
 
 test("thread tile state owns shared composer action control planning", () => {
@@ -1631,8 +1722,8 @@ test("thread tile state owns detail-load concurrency limits", () => {
     reason: "active-panes",
     activeIds: ["a", "b", "c", "d", "e", "f"],
     activeCount: 6,
-    configuredMaxConcurrentLoads: 4,
-    maxConcurrentLoads: 4,
+    configuredMaxConcurrentLoads: 1,
+    maxConcurrentLoads: 1,
   });
 
   assert.deepEqual(state.detailLoadConcurrencyPlan({
@@ -1643,8 +1734,8 @@ test("thread tile state owns detail-load concurrency limits", () => {
     reason: "active-panes",
     activeIds: ["a", "b"],
     activeCount: 2,
-    configuredMaxConcurrentLoads: 4,
-    maxConcurrentLoads: 2,
+    configuredMaxConcurrentLoads: 1,
+    maxConcurrentLoads: 1,
   });
 
   assert.deepEqual(state.detailLoadConcurrencyPlan({
@@ -1669,8 +1760,8 @@ test("thread tile state owns detail-load concurrency limits", () => {
     reason: "no-active-panes",
     activeIds: [],
     activeCount: 0,
-    configuredMaxConcurrentLoads: 4,
-    maxConcurrentLoads: 4,
+    configuredMaxConcurrentLoads: 1,
+    maxConcurrentLoads: 1,
   });
 });
 
@@ -1739,7 +1830,28 @@ test("thread tile state chooses pane refresh targets without app globals", () =>
     enabled: true,
     ids: ["a", "b"],
     currentThreadId: "",
+  }), ["a"]);
+  assert.deepEqual(state.refreshTargetIds({
+    enabled: true,
+    ids: ["a", "b"],
+    currentThreadId: "",
+    maxRefreshTargets: 2,
   }), ["a", "b"]);
+  assert.deepEqual(state.refreshTargetIds({
+    enabled: true,
+    ids: ["a", "b", "c"],
+    loadedAtById: { a: 9600, b: 2000, c: 0 },
+    nowMs: 10000,
+    minRefreshAgeMs: 5000,
+    maxRefreshTargets: 2,
+  }), ["c", "b"]);
+  assert.deepEqual(state.refreshTargetIds({
+    enabled: true,
+    ids: ["a", "b"],
+    loadedAtById: new Map([["a", 9600], ["b", 9000]]),
+    nowMs: 10000,
+    minRefreshAgeMs: 5000,
+  }), []);
 });
 
 test("thread tile state plans detail-load queue and stale controller aborts", () => {

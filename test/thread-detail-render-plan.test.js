@@ -1616,6 +1616,56 @@ test("thread detail refresh outcome execution maps local patch completion to met
   });
 });
 
+test("thread detail refresh outcome uses shell patch when only outer shell changed", () => {
+  const renderOutcome = renderPlan.finalizeThreadDetailRenderPlan(
+    { shouldRenderDetail: true, detailRenderMode: "patch" },
+    {
+      locallyPatchedDetail: false,
+      tilePanePatchedDetail: false,
+      patchRejectReason: "patch-shell-changed",
+    },
+  );
+
+  assert.deepEqual(renderOutcome, {
+    detailRenderMode: "shell-patch",
+    locallyPatchedDetail: false,
+    tilePanePatchedDetail: false,
+    renderAction: "shell-patch-render",
+    projectionConsistencyPhase: "refresh-local-patch",
+  });
+
+  assert.deepEqual(renderPlan.planThreadDetailRefreshOutcomeExecution(renderOutcome), {
+    renderAction: "shell-patch-render",
+    metadataUpdateMode: "",
+    metadataEffects: [],
+    executionAction: "shell-patch-render",
+    timingTarget: "conversation-render",
+    runFullRender: false,
+    projectionConsistencyPhase: "refresh-local-patch",
+    consistencyCheck: {
+      shouldCheck: true,
+      phase: "refresh-local-patch",
+      renderMode: "shell-patch",
+      reason: "phase-present",
+    },
+    reason: "shell-patch-render",
+  });
+
+  assert.deepEqual(renderPlan.planThreadDetailRefreshExecutionEffects({
+    executionAction: "shell-patch-render",
+  }), {
+    effects: [
+      {
+        type: "shell-patch-render",
+        timingTarget: "conversation-render",
+        metadataEffects: [],
+        requireEffects: false,
+      },
+    ],
+    reason: "shell-patch-render",
+  });
+});
+
 test("thread detail refresh outcome execution maps metadata-only refreshes", () => {
   assert.deepEqual(renderPlan.planThreadDetailRefreshOutcomeExecution({
     renderAction: "metadata-update",
@@ -1996,6 +2046,7 @@ test("thread detail first-paint performance input preserves cached and API timin
     renderElapsedMs: 4.4,
     detailRenderMode: "cached-current",
     cached: true,
+    fullBackfillPlanned: false,
     threadListRenderMs: 1.2,
     conversationRenderMs: 2.3,
   });
@@ -2027,6 +2078,7 @@ test("thread detail first-paint performance input preserves cached and API timin
     renderElapsedMs: 20,
     detailRenderMode: "first-paint",
     cached: false,
+    fullBackfillPlanned: false,
     mergeMs: 1,
     draftRestoreMs: 2,
     composerRenderMs: 3,
@@ -2058,6 +2110,7 @@ test("thread detail first-paint reporting stage owns telemetry input shape", () 
       renderElapsedMs: 4.4,
       detailRenderMode: "cached-current",
       cached: true,
+      fullBackfillPlanned: false,
       threadListRenderMs: 1.2,
       conversationRenderMs: 2.3,
     },
@@ -2073,6 +2126,7 @@ test("thread detail first-paint reporting stage owns telemetry input shape", () 
       omittedTurns: 0,
       rolloutSizeBytes: 0,
       threadHash: "hash-1",
+      fullBackfillPlanned: false,
     },
     reason: "cached-current-reporting",
   });
@@ -2098,6 +2152,7 @@ test("thread detail first-paint reporting stage owns telemetry input shape", () 
     omittedTurns: 2.2,
     rolloutSizeBytes: 12345.9,
     threadHash: "hash-2",
+    fullBackfillPlanned: true,
   }), {
     performanceInput: {
       source: "thread-list",
@@ -2107,6 +2162,7 @@ test("thread detail first-paint reporting stage owns telemetry input shape", () 
       renderElapsedMs: 20,
       detailRenderMode: "first-paint",
       cached: false,
+      fullBackfillPlanned: true,
       mergeMs: 1,
       draftRestoreMs: 2,
       composerRenderMs: 3,
@@ -2126,6 +2182,7 @@ test("thread detail first-paint reporting stage owns telemetry input shape", () 
       omittedTurns: 2,
       rolloutSizeBytes: 12345,
       threadHash: "hash-2",
+      fullBackfillPlanned: true,
     },
     reason: "first-paint-reporting",
   });
@@ -2430,6 +2487,11 @@ test("thread detail first-paint post-render effects plan preserves order and bou
         seq: 7,
         source: "abcdefghijklmnopqrstuvwxyz1234567890EXTR",
       },
+      {
+        type: "schedule-current-thread-refresh-if-deferred-seed",
+        delayMs: 900,
+        reason: "deferred-projection-seed",
+      },
       { type: "schedule-usage-backfill-refresh" },
     ],
     reason: "first-paint-post-render",
@@ -2642,6 +2704,7 @@ test("thread detail first-paint telemetry effects plan preserves bounded event o
     omittedTurns: 2,
     rolloutSizeBytes: 12345.9,
     threadHash: "hash-1",
+    fullBackfillPlanned: true,
   }), {
     effects: [
       {
@@ -2655,6 +2718,7 @@ test("thread detail first-paint telemetry effects plan preserves bounded event o
         context: {
           action: "thread-detail-load",
           threadId: "thread-1",
+          fullBackfillPlanned: true,
         },
       },
       {
@@ -2869,6 +2933,41 @@ test("single-thread early shell execution plans loading terminal render", () => 
   });
 });
 
+test("single-thread early shell preserves same-thread visible DOM while loading", () => {
+  assert.deepEqual(renderPlan.planSingleThreadEarlyShellExecution({
+    threadId: "thread-1",
+    loadingWithoutVisibleTurns: true,
+    conversationSignature: "loading|thread-1",
+    patchShellSignature: "patch|thread-1",
+    renderedConversationSignature: JSON.stringify({
+      threadId: "thread-1",
+      turns: [{ id: "turn-1", items: [{ item: { type: "message" } }] }],
+    }),
+    renderedDomTurnCount: 1,
+    renderedDomItemCount: 3,
+    stickToBottom: true,
+  }), {
+    shouldRender: false,
+    mode: "detail",
+    reason: "preserve-existing-visible-dom",
+    html: "",
+    clearLiveOperationDock: false,
+    bindRetry: false,
+    retryThreadId: "",
+    conversationSignature: "loading|thread-1",
+    patchShellSignature: "patch|thread-1",
+    stickToBottom: true,
+  });
+
+  assert.equal(renderPlan.planSingleThreadEarlyShellExecution({
+    threadId: "thread-2",
+    loadingWithoutVisibleTurns: true,
+    conversationSignature: "loading|thread-2",
+    renderedConversationSignature: JSON.stringify({ threadId: "thread-1" }),
+    renderedDomTurnCount: 1,
+  }).shouldRender, true);
+});
+
 test("single-thread early shell execution plans load-error retry", () => {
   const plan = renderPlan.planSingleThreadEarlyShellExecution({
     currentThreadId: "thread-2",
@@ -3064,6 +3163,7 @@ test("single-thread full render shell preserves fragment order with primary cont
     taskToolbar: "<toolbar/>",
     omittedBanner: "<omitted/>",
     readWarning: "<warning/>",
+    taskCardReceiptsHtml: "<receipt/>",
     turnsHtml: "<turn/>",
     approvalsHtml: "<approval/>",
     taskCardsHtml: "<task/>",
@@ -3073,7 +3173,18 @@ test("single-thread full render shell preserves fragment order with primary cont
   assert.equal(plan.mode, "detail");
   assert.equal(plan.hasPrimaryContent, true);
   assert.equal(plan.emptyMessage, "No visible turns.");
-  assert.equal(plan.html, "<goal/><rollout/><loading/><toolbar/><omitted/><warning/><turn/><approval/><task/><plugin/>");
+  assert.equal(plan.html, "<goal/><rollout/><loading/><toolbar/><omitted/><warning/><turn/><receipt/><approval/><task/><plugin/>");
+});
+
+test("single-thread full render shell treats return receipts as primary conversation content", () => {
+  const plan = renderPlan.planSingleThreadFullRenderShell({
+    taskCardReceiptsHtml: "<receipt/>",
+  });
+
+  assert.equal(plan.mode, "detail");
+  assert.equal(plan.hasPrimaryContent, true);
+  assert.equal(plan.emptyMessage, "No visible turns.");
+  assert.equal(plan.html, "<receipt/>");
 });
 
 test("single-thread full render shell renders plugin notice before empty state", () => {

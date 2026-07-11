@@ -432,6 +432,10 @@ async function sendThreadTaskCardCommand(...args) {
   return composerRuntime.sendThreadTaskCardCommand(...args);
 }
 
+async function submitAtLoopRequest(...args) {
+  return composerRuntime.submitAtLoopRequest(...args);
+}
+
 async function sendMessage(...args) {
   return composerRuntime.sendMessage(...args);
 }
@@ -455,7 +459,10 @@ async function interruptActiveTurn(...args) {
 async function answerServerRequest(requestId, payload, options = {}) {
   const key = requestId !== null && requestId !== undefined ? String(requestId) : "";
   const request = state.pendingApprovals.get(key);
-  if (!request || request.status !== "waiting") return;
+  if (!request) {
+    throw new Error("Server request is not available in this browser session");
+  }
+  if (request.status !== "waiting") return;
   const threadId = approvalActionThreadId(request, options.threadId);
   request.status = "responding";
   request.decision = payload && (payload.decision || payload.action) || "submitted";
@@ -473,6 +480,15 @@ async function answerServerRequest(requestId, payload, options = {}) {
     markActivity(isUserInputRequest(request) ? "输入已发送" : "批准发送");
     scheduleApprovalThreadRender(threadId);
   } catch (err) {
+    if (isStaleServerRequestError(err)) {
+      state.pendingApprovals.delete(key);
+      $("connectionState").classList.remove("error");
+      $("connectionState").textContent = isUserInputRequest(request) ? "Response no longer pending" : "Approval no longer pending";
+      markActivity(isUserInputRequest(request) ? "输入已结束" : "批准已结束");
+      scheduleApprovalThreadRender(threadId);
+      scheduleCurrentThreadRefresh({ reason: "stale-server-request" });
+      return;
+    }
     request.status = "waiting";
     request.decision = null;
     showError(err);
@@ -480,8 +496,50 @@ async function answerServerRequest(requestId, payload, options = {}) {
   }
 }
 
+function isStaleServerRequestError(err) {
+  const status = Number(err && (err.status || err.statusCode) || 0);
+  const text = String(err && (err.code || err.message || err.detail) || err || "").toLowerCase();
+  if (status === 404) return true;
+  return text.includes("no longer pending")
+    || text.includes("not pending")
+    || text.includes("not found")
+    || text.includes("not available");
+}
+
 function answerApproval(requestId, decision, options = {}) {
-  return answerServerRequest(requestId, { decision }, options);
+  const key = requestId !== null && requestId !== undefined ? String(requestId) : "";
+  if (!key) return Promise.reject(new Error("Approval request id is missing"));
+  const request = state.pendingApprovals.get(key);
+  if (request) return answerServerRequest(key, { decision }, options);
+  const threadId = String(options.threadId || state.currentThreadId || "").trim();
+  markActivity("批准中");
+  if (threadId) scheduleApprovalThreadRender(threadId);
+  return api(`/api/approvals/${encodeURIComponent(key)}`, {
+    method: "POST",
+    body: JSON.stringify({ decision }),
+    timeoutMs: 20000,
+  }).then((result) => {
+    if (result && result.request) {
+      state.pendingApprovals.set(key, serverRequestWithThreadContext(result.request, threadId));
+    }
+    $("connectionState").classList.remove("error");
+    $("connectionState").textContent = "Approval sent";
+    markActivity("批准发送");
+    if (threadId) scheduleApprovalThreadRender(threadId);
+    return result;
+  }).catch((err) => {
+    if (isStaleServerRequestError(err)) {
+      state.pendingApprovals.delete(key);
+      $("connectionState").classList.remove("error");
+      $("connectionState").textContent = "Approval no longer pending";
+      markActivity("批准已结束");
+      if (threadId) scheduleApprovalThreadRender(threadId);
+      scheduleCurrentThreadRefresh({ reason: "stale-approval-request" });
+      return { ok: true, stale: true };
+    }
+    showError(err);
+    throw err;
+  });
 }
 
 function serverRequestPayload(request, responseText, questionId) {
@@ -778,6 +836,7 @@ function createComposerBridgeRuntime() {
   return {
       sendMessage: typeof sendMessage === "function" ? sendMessage : null,
       sendNewThreadMessage: typeof sendNewThreadMessage === "function" ? sendNewThreadMessage : null,
+      submitAtLoopRequest: typeof submitAtLoopRequest === "function" ? submitAtLoopRequest : null,
       answerServerRequest: typeof answerServerRequest === "function" ? answerServerRequest : null,
       answerApproval: typeof answerApproval === "function" ? answerApproval : null,
       declineServerRequest: typeof declineServerRequest === "function" ? declineServerRequest : null,
@@ -785,6 +844,8 @@ function createComposerBridgeRuntime() {
       replyTaskCard: typeof replyTaskCard === "function" ? replyTaskCard : null,
       queueThreadTaskCardDraftCreation: typeof queueThreadTaskCardDraftCreation === "function" ? queueThreadTaskCardDraftCreation : null,
       createThreadTaskCardDraft: typeof createThreadTaskCardDraft === "function" ? createThreadTaskCardDraft : null,
+      closeQuotaDetails: typeof closeQuotaDetails === "function" ? closeQuotaDetails : null,
+      toggleQuotaDetails: typeof toggleQuotaDetails === "function" ? toggleQuotaDetails : null,
   };
 }
 
@@ -887,6 +948,7 @@ const legacyGlobals = {
   requestGoalDialogSubmitFromButton,
   requestGoalDialogSubmit,
   sendThreadTaskCardCommand,
+  submitAtLoopRequest,
   sendMessage,
   sendNewThreadMessage,
   requestComposerSubmitFromButton,

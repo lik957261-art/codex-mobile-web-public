@@ -12,6 +12,9 @@
     "turns",
     "runtimeSettings",
     "threadTaskCards",
+    "taskCardReturnLedger",
+    "taskCardReturnLedgerStatusCounts",
+    "taskCardReturnLedgerIssueCodes",
     "mobileDetailLoaded",
     "mobileLoading",
     "mobileLoadError",
@@ -156,8 +159,12 @@
     if (!item || item.type !== "userMessage") return [];
     return [
       item.clientSubmissionId,
+      item.clientId,
+      item.client_id,
       item.submissionId,
+      item.submission_id,
       item.mobileSubmissionId,
+      item.mobile_submission_id,
       item.id && /^local-user-/.test(String(item.id)) ? String(item.id).replace(/^local-user-/, "") : "",
     ].map((value) => String(value || "").trim()).filter(Boolean);
   }
@@ -249,20 +256,29 @@
       ? thread.threadTaskCards.length
       : 0;
     const pendingTaskCardCount = boundedCount(thread && thread.pendingTaskCardCount);
+    const returnReceiptTaskCardCount = boundedCount(thread && thread.returnReceiptTaskCardCount);
+    const returnFollowUpTaskCardCount = boundedCount(thread && thread.returnFollowUpTaskCardCount);
     const hasActiveTurnEvidence = Boolean(thread && (thread.activeTurnId || thread.mobileRolloutActiveTurn));
+    const hasConversationEvidence = rolloutSizeBytes > 0
+      || omittedTurns > 0
+      || visibleItemKeyCount > 0
+      || hasActiveTurnEvidence;
+    const hasTaskCardEvidence = taskCardCount > 0
+      || pendingTaskCardCount > 0
+      || returnReceiptTaskCardCount > 0
+      || returnFollowUpTaskCardCount > 0;
     return {
-      hasEvidence: rolloutSizeBytes > 0
-        || omittedTurns > 0
-        || visibleItemKeyCount > 0
-        || hasActiveTurnEvidence
-        || taskCardCount > 0
-        || pendingTaskCardCount > 0,
+      hasEvidence: hasConversationEvidence,
+      hasConversationEvidence,
+      hasTaskCardOnlyEvidence: !hasConversationEvidence && hasTaskCardEvidence,
       rolloutSizeBytes,
       omittedTurns,
       visibleItemKeyCount,
       hasActiveTurnEvidence,
       taskCardCount,
       pendingTaskCardCount,
+      returnReceiptTaskCardCount,
+      returnFollowUpTaskCardCount,
     };
   }
 
@@ -283,7 +299,11 @@
     }
     const evidence = emptyDetailHistoryEvidenceForThread(thread);
     if (!evidence.hasEvidence) {
-      return { shouldRecover: false, reason: "no-history-evidence", evidence };
+      return {
+        shouldRecover: false,
+        reason: evidence.hasTaskCardOnlyEvidence ? "task-card-only-evidence" : "no-history-evidence",
+        evidence,
+      };
     }
     const readMode = String(thread.mobileReadMode || "");
     const recoveryKey = [threadId, readMode, evidence.rolloutSizeBytes, evidence.omittedTurns, evidence.visibleItemKeyCount].join("|");
@@ -372,7 +392,11 @@
 
   function threadUpdatedAtMs(thread) {
     if (!thread || typeof thread !== "object") return 0;
-    return timestampMs(thread.updatedAtMs)
+    return timestampMs(thread.mobileListUpdatedAtMs)
+      || timestampMs(thread.mobile_list_updated_at_ms)
+      || timestampMs(thread.listActivityAtMs)
+      || timestampMs(thread.list_activity_at_ms)
+      || timestampMs(thread.updatedAtMs)
       || timestampMs(thread.updatedAt)
       || timestampMs(thread.updated_at_ms)
       || timestampMs(thread.updated_at)
@@ -464,6 +488,7 @@
     if (threadHasReusableLoadedDetailState(thread)) {
       return {
         shouldUseCachedCurrent: true,
+        shouldRefreshCurrent: true,
         shouldReportEmptyCachedDetail: false,
         reason: "reusable-loaded-detail",
       };
@@ -674,10 +699,25 @@
         && completedIncomingTurnHasAuthoritativeReceipt(incomingTurn);
     }
 
+    function incomingTurnHasUserMessage(incomingTurn = null) {
+      return Array.isArray(incomingTurn && incomingTurn.items)
+        && incomingTurn.items.some((item) => item && item.type === "userMessage");
+    }
+
+    function isPendingSubmittedUserMessage(item) {
+      return Boolean(item
+        && item.type === "userMessage"
+        && !item.mobileSendError
+        && (item.mobilePendingSubmission || String(item.clientSubmissionId || "").trim()));
+    }
+
     function shouldPreserveLocalOnlyItem(item, preserveLocalVisible = false, suppressedVisualReceiptKeys = null, incomingTurn = null) {
       if (!item || itemVisibleWeight(item) <= 0) return false;
       if (visualReceiptMatchesSuppressionKeys(item, suppressedVisualReceiptKeys)) return false;
       if (shouldDropLocalOnlyReceiptForIncomingTurn(item, incomingTurn)) return false;
+      if (isPendingSubmittedUserMessage(item)
+        && completedIncomingTurnHasAuthoritativeReceipt(incomingTurn)
+        && !incomingTurnHasUserMessage(incomingTurn)) return true;
       if (item.type === "userMessage" && completedIncomingTurnHasAuthoritativeReceipt(incomingTurn)) return false;
       if (item.type === "userMessage" && /^mux-user-/.test(String(item.id || ""))) return true;
       return preserveLocalVisible && !isReasoningItem(item);

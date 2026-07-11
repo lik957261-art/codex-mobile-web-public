@@ -26,6 +26,7 @@ const { createThreadDetailActiveTurnEvidenceService } = require("./thread-detail
 const { createThreadDetailBoundedReadPolicyService } = require("./thread-detail-bounded-read-policy-service");
 const { createThreadDetailActiveOverlayProviderService } = require("./thread-detail-active-overlay-provider-service");
 const { createThreadDetailActiveWindowPrewarmService } = require("./thread-detail-active-window-prewarm-service");
+const { createThreadDetailFirstPaintPrewarmService } = require("./thread-detail-first-paint-prewarm-service");
 const { createThreadDetailTurnsListReadCoalescer } = require("./thread-detail-turns-list-read-coalescer-service");
 const { createThreadDetailReadOrchestrationService } = require("./thread-detail-read-orchestration-service");
 
@@ -54,6 +55,7 @@ function createThreadDetailRuntimeService(dependencies = {}) {
   let visibleItemId;
   let appendMissingRolloutCompletionTurnsToThread;
   let appendRolloutActiveAssistantItemsToDetailResult;
+  let appendRolloutLatestCompletedAssistantItemsToDetailResult;
   let appendRolloutEmptyCompletionDiagnosticsToThread;
   let appendRolloutFinalReceiptsToThread;
   let appendRolloutUserInputAnchorsToDetailResult;
@@ -76,7 +78,7 @@ function createThreadDetailRuntimeService(dependencies = {}) {
   const threadDetailProjectionService = config.threadDetailProjectionV4Enabled
     ? createThreadDetailProjectionV4Service({
       cacheDir: config.threadDetailProjectionCacheDir,
-      policyVersion: "state-relevant-receipt-v4",
+      policyVersion: "state-relevant-receipt-v5",
       maxTurns: config.maxFullThreadTurns,
     })
     : createThreadDetailProjectionService({
@@ -274,6 +276,7 @@ function createThreadDetailRuntimeService(dependencies = {}) {
   ({
     appendMissingRolloutCompletionTurnsToThread,
     appendRolloutActiveAssistantItemsToDetailResult,
+    appendRolloutLatestCompletedAssistantItemsToDetailResult,
     appendRolloutEmptyCompletionDiagnosticsToThread,
     appendRolloutFinalReceiptsToThread,
     appendRolloutUserInputAnchorsToDetailResult,
@@ -367,7 +370,9 @@ function createThreadDetailRuntimeService(dependencies = {}) {
   const threadDetailActiveOverlayProviderService = createThreadDetailActiveOverlayProviderService({
     projectionService: threadDetailProjectionService,
   });
-  const threadDetailTurnsListReadCoalescer = createThreadDetailTurnsListReadCoalescer();
+  const threadDetailTurnsListReadCoalescer = createThreadDetailTurnsListReadCoalescer({
+    maxInFlightMs: config.threadDetailRpcTimeoutMs,
+  });
   const threadDetailActiveWindowPrewarmService = createThreadDetailActiveWindowPrewarmService({
     resolveSummary: (requestCodex, threadId, options) => threadDetailSummaryService.resolveSummary(requestCodex, threadId, options),
     threadRuntimeSettings: dependencies.threadRuntimeSettings,
@@ -442,10 +447,21 @@ function createThreadDetailRuntimeService(dependencies = {}) {
     isReadTimeoutError,
     isUnmaterializedThreadError: dependencies.isUnmaterializedThreadError,
     threadRolloutSizeBytes,
+    deferredInitialTurnsListSeedDelayMs: config.threadDetailDeferredInitialSeedDelayMs,
     readTimeoutMs: config.readRpcTimeoutMs,
     threadDetailRpcTimeoutMs: config.threadDetailRpcTimeoutMs,
     maxThreadTurns: config.maxThreadTurns,
     maxFullThreadTurns: config.maxFullThreadTurns,
+  });
+  const threadDetailFirstPaintPrewarmService = createThreadDetailFirstPaintPrewarmService({
+    enabled: config.threadDetailFirstPaintPrewarmEnabled !== false,
+    delayMs: config.threadDetailFirstPaintPrewarmDelayMs,
+    minIntervalMs: config.threadDetailFirstPaintPrewarmMinIntervalMs,
+    minRolloutBytes: config.threadDetailFirstPaintPrewarmMinBytes,
+    maxPending: config.threadDetailFirstPaintPrewarmMaxPending,
+    resolveSummary: (requestCodex, threadId, options) => threadDetailSummaryService.resolveSummary(requestCodex, threadId, options),
+    readThreadDetail: (input) => threadDetailReadOrchestrationService.readThreadDetail(input),
+    log: (event, details) => dependencies.logThreadDetail(event, details),
   });
 
   function threadDetailProjectionInput(threadId, summary) {
@@ -456,6 +472,12 @@ function createThreadDetailRuntimeService(dependencies = {}) {
     return threadDetailProjectionResultService.prepareProjectedThreadReadResult(cached, summary, runtimeSettings, options);
   }
 
+  function projectedThreadReadiness(cached, summary, options = {}) {
+    return typeof threadDetailProjectionResultService.projectedThreadReadiness === "function"
+      ? threadDetailProjectionResultService.projectedThreadReadiness(cached, summary, options)
+      : { ready: Boolean(cached && cached.result && cached.result.thread), reason: "" };
+  }
+
   function scheduleRecentWindowProjectionRefresh(input = {}) {
     return threadDetailActiveWindowPrewarmService.schedule(input);
   }
@@ -464,14 +486,20 @@ function createThreadDetailRuntimeService(dependencies = {}) {
     const lookedUp = typeof threadDetailProjectionService.lookup === "function"
       ? threadDetailProjectionService.lookup(input, optionsForProjection)
       : { cached: threadDetailProjectionService.get(input, optionsForProjection), missReason: "" };
+    const cached = lookedUp && lookedUp.cached;
+    const readiness = projectedThreadReadiness(cached, summary, optionsForProjection);
+    const result = prepareProjectedThreadReadResult(
+      cached,
+      summary,
+      runtimeSettings,
+      optionsForProjection,
+    );
+    const projection = result && result.thread && result.thread.mobileProjection || {};
     return {
-      result: prepareProjectedThreadReadResult(
-        lookedUp && lookedUp.cached,
-        summary,
-        runtimeSettings,
-        optionsForProjection,
-      ),
-      missReason: lookedUp && lookedUp.missReason || "",
+      result,
+      missReason: lookedUp && lookedUp.missReason || (cached && !result ? readiness.reason : ""),
+      stalePartial: Boolean((cached && cached.stalePartial) || projection.stalePartial),
+      staleReason: (cached && cached.staleReason) || projection.staleReason || "",
     };
   }
 
@@ -531,6 +559,7 @@ function createThreadDetailRuntimeService(dependencies = {}) {
       threadDetailRpcTimeoutMs: config.threadDetailRpcTimeoutMs,
       responseBudgetOptions: options.responseBudgetOptions,
       compactThreadReadResult,
+      compactTurnsListResult,
       compactThreadDetailResponseResult,
       compactTurn,
       enrichThreadItemTimestampsFromRollout,
@@ -546,6 +575,7 @@ function createThreadDetailRuntimeService(dependencies = {}) {
       workspaceContextStatsForCwd: dependencies.workspaceContextStatsForCwd,
       backfillMissingRolloutCompletionTurnsForDetailResult,
       appendRolloutUserInputAnchorsToDetailResult,
+      appendRolloutLatestCompletedAssistantItemsToDetailResult,
       appendRolloutActiveAssistantItemsToDetailResult,
       finalizeActiveAssistantProjectionDetailResult,
       applyLocalActiveThreadStatusToResult: options.applyLocalActiveThreadStatusToResult,
@@ -640,6 +670,7 @@ function createThreadDetailRuntimeService(dependencies = {}) {
   return {
     appendMissingRolloutCompletionTurnsToThread,
     appendRolloutActiveAssistantItemsToDetailResult,
+    appendRolloutLatestCompletedAssistantItemsToDetailResult,
     appendRolloutEmptyCompletionDiagnosticsToThread,
     appendRolloutFinalReceiptsToThread,
     appendRolloutToolOutputImagesToThread,
@@ -702,6 +733,7 @@ function createThreadDetailRuntimeService(dependencies = {}) {
     threadDetailActiveTurnEvidenceService,
     threadDetailActiveWindowPrewarmService,
     threadDetailCompactionService,
+    threadDetailFirstPaintPrewarmService,
     threadDetailProjectionInput,
     threadDetailProjectionService,
     threadDetailReadOrchestrationService,

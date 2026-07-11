@@ -105,6 +105,20 @@ function clearThreadLoadWatchdog() {
   state.threadLoadWatchdogTimer = null;
 }
 
+function clearSettledServerBuildRefreshForThreadEntry(source = "") {
+  const runtime = window.CodexSettingsRuntime || null;
+  if (!runtime || typeof runtime.clearSettledServerBuildPluginRefreshAfterThreadEntry !== "function") return false;
+  try {
+    const result = runtime.clearSettledServerBuildPluginRefreshAfterThreadEntry({
+      source: String(source || "thread-entry").slice(0, 40),
+    });
+    if (result && typeof result.catch === "function") result.catch(() => {});
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function startThreadLoadWatchdog(threadId, details = {}) {
   clearThreadLoadWatchdog();
   const seq = state.threadLoadSeq;
@@ -149,6 +163,7 @@ async function loadThread(threadId, options = {}) {
   const switchStartedAt = nowPerfMs();
   const fromThreadId = state.currentThreadId || "";
   const source = String(options.source || "unknown").slice(0, 40);
+  clearSettledServerBuildRefreshForThreadEntry(source);
   const suppressLoadFailureDiagnostic = options.suppressLoadFailureDiagnostic === true;
   if (threadId !== fromThreadId) resetComposerRuntimeSelection();
   if (threadId !== fromThreadId) {
@@ -415,6 +430,7 @@ async function loadThread(threadId, options = {}) {
     threadId,
     detailRenderMode: "first-paint",
     cached: false,
+    fullBackfillPlanned: shouldBackfillFullThreadDetail(result.thread),
     timings: {
       elapsedMs: roundedDurationMs(switchStartedAt),
       apiElapsedMs,
@@ -473,7 +489,7 @@ function clearUsageBackfillRefresh() {
   state.usageBackfillAttempts = 0;
 }
 
-function scheduleUsageBackfillRefresh(delay = 1200) {
+function scheduleUsageBackfillRefresh(delay = 350, options = {}) {
   if (!state.currentThreadId || document.visibilityState === "hidden") return;
   const turn = latestSuccessfulCompletedTurnMissingUsage();
   if (!turn || !turn.id) {
@@ -488,14 +504,23 @@ function scheduleUsageBackfillRefresh(delay = 1200) {
     state.usageBackfillAttempts = 0;
   }
   if (state.usageBackfillAttempts >= 6 || state.usageBackfillTimer) return;
-  if (shouldSuppressAutomaticCurrentThreadRefresh("usage-backfill")) return;
+  const forceRefresh = options.force === true || options.userInitiated === true;
+  const suppressionContext = {
+    threadId: state.currentThreadId,
+    userInitiated: forceRefresh,
+  };
+  if (shouldSuppressAutomaticCurrentThreadRefresh("usage-backfill", suppressionContext)) return;
   state.usageBackfillAttempts += 1;
   state.usageBackfillTimer = setTimeout(() => {
     state.usageBackfillTimer = null;
     if (document.visibilityState === "hidden") return;
     if (!state.currentThreadId || `${state.currentThreadId}|${turn.id}` !== state.usageBackfillKey) return;
-    if (shouldSuppressAutomaticCurrentThreadRefresh("usage-backfill")) return;
-    refreshCurrentThread({ source: "usage-backfill" }).catch(showError);
+    if (shouldSuppressAutomaticCurrentThreadRefresh("usage-backfill", suppressionContext)) return;
+    refreshCurrentThread({
+      source: "usage-backfill",
+      force: forceRefresh,
+      userInitiated: forceRefresh,
+    }).catch(showError);
   }, delay);
 }
 
@@ -674,6 +699,17 @@ function applyThreadDetailPostRenderEffect(effect, context = {}) {
     }
     return true;
   }
+  if (type === "schedule-current-thread-refresh-if-deferred-seed") {
+    const deferredSeed = context.thread && context.thread.mobileDeferredProjectionSeed;
+    if (deferredSeed && typeof deferredSeed === "object") {
+      const delayMs = Number(deferredSeed.refreshAfterMs ?? item.delayMs);
+      scheduleCurrentThreadRefresh(
+        Number.isFinite(delayMs) && delayMs >= 0 ? delayMs : 900,
+        String(item.reason || deferredSeed.reason || "deferred-projection-seed").slice(0, 40),
+      );
+    }
+    return true;
+  }
   if (type === "schedule-usage-backfill-refresh") {
     scheduleUsageBackfillRefresh();
     return true;
@@ -699,6 +735,7 @@ function applyThreadDetailFirstPaintTelemetryEffect(effect, context = {}) {
       action: String(eventContext.action || ""),
       threadId: String(eventContext.threadId || ""),
       thread: context.thread,
+      fullBackfillPlanned: eventContext.fullBackfillPlanned === true,
     });
     return true;
   }
@@ -814,7 +851,16 @@ function applyThreadDetailRefreshResponseEffect(effect, context = {}) {
   }
   if (type === "merge-current-thread") {
     state.currentThread = mergeThreadPreservingVisibleItems(state.currentThread, thread);
+    if (typeof settleRecentSubmittedUserMessagesForThread === "function") {
+      settleRecentSubmittedUserMessagesForThread(state.currentThread, String(context.source || item.source || "refresh-detail-api"));
+    }
     rememberReusableThreadDetail(state.currentThread);
+    if (typeof recordRecentSubmittedEchoDiagnosticLogs === "function") {
+      recordRecentSubmittedEchoDiagnosticLogs("refresh-merge-current-thread", {
+        threadId: state.currentThread && state.currentThread.id || state.currentThreadId || "",
+        source: String(context.source || item.source || "refresh-detail-api").slice(0, 80),
+      });
+    }
     return true;
   }
   throw new Error(`Unknown thread detail refresh response effect: ${type || "empty"}`);
@@ -841,6 +887,14 @@ function applyThreadDetailRefreshExecutionEffect(effect) {
     };
   }
   if (type === "full-render") {
+    const conversationRenderStartedAt = nowPerfMs();
+    renderCurrentThread();
+    return {
+      timingTarget: "conversation-render",
+      elapsedMs: roundedDurationMs(conversationRenderStartedAt),
+    };
+  }
+  if (type === "shell-patch-render") {
     const conversationRenderStartedAt = nowPerfMs();
     renderCurrentThread();
     return {
@@ -1051,7 +1105,11 @@ async function refreshCurrentThread(options = {}) {
   const seq = requestPlan.seq;
   const source = requestPlan.source;
   const requestedMode = requestPlan.requestedMode;
-  if (shouldSuppressAutomaticCurrentThreadRefresh(source, { threadId })) return;
+  const refreshSuppressionContext = {
+    threadId,
+    userInitiated: options.userInitiated === true || options.force === true,
+  };
+  if (shouldSuppressAutomaticCurrentThreadRefresh(source, refreshSuppressionContext)) return;
   if (requestPlan.abortActiveRefresh && state.refreshThreadController) state.refreshThreadController.abort();
   const controller = new AbortController();
   state.refreshThreadController = controller;
@@ -1085,7 +1143,7 @@ async function refreshCurrentThread(options = {}) {
     source,
   });
   if (!responseEffectsPlan.shouldApply) return;
-  if (shouldSuppressAutomaticCurrentThreadRefresh(source, { threadId })) return;
+  if (shouldSuppressAutomaticCurrentThreadRefresh(source, refreshSuppressionContext)) return;
   const renderStartedAt = nowPerfMs();
   const mergeStartedAt = nowPerfMs();
   const previousThread = state.currentThread;
@@ -1229,7 +1287,23 @@ function turnsArrayFromListResult(result) {
 }
 
 function shouldBackfillFullThreadDetail(thread) {
-  return /turns-list-initial/i.test(String(thread && thread.mobileReadMode || ""));
+  if (!thread || typeof thread !== "object") return false;
+  const readMode = String(thread.mobileReadMode || "");
+  const projection = thread.mobileProjection && typeof thread.mobileProjection === "object"
+    ? thread.mobileProjection
+    : {};
+  const timings = thread.mobileDiagnostics
+    && thread.mobileDiagnostics.threadDetailTimings
+    && typeof thread.mobileDiagnostics.threadDetailTimings === "object"
+    ? thread.mobileDiagnostics.threadDetailTimings
+    : {};
+  const readDecision = String(timings.readDecision || "");
+  if (/turns-list-initial/i.test(readMode)) return true;
+  if (projection.partial === true) return true;
+  if (/projection-v?\d*-partial|projection-partial/i.test(readMode)) return true;
+  if (/projection-stale-partial-hit|projection-partial-hit/i.test(readDecision)) return true;
+  if (thread.mobileDeferredProjectionSeed && typeof thread.mobileDeferredProjectionSeed === "object") return false;
+  return false;
 }
 
 function threadHistoryAutoBackfillKey(thread) {
@@ -1632,6 +1706,10 @@ function pointInComposerGestureZone(point) {
   return point.clientY >= Math.max(0, rect.top - 10);
 }
 
+function syncSidebarOpenClass() {
+  document.documentElement.classList.toggle("sidebar-open", isSidebarOpen());
+}
+
 function closeSidebarMenu() {
   const sidebar = $("sidebar");
   if (!sidebar) return;
@@ -1642,6 +1720,7 @@ function closeSidebarMenu() {
   const settingsToggle = $("themeSettingsToggle");
   if (settingsPanel) settingsPanel.classList.add("hidden");
   if (settingsToggle) settingsToggle.setAttribute("aria-expanded", "false");
+  syncSidebarOpenClass();
   publishPluginNavigationState();
 }
 
@@ -1721,6 +1800,7 @@ function openSidebarMenu() {
   sidebar.style.removeProperty("--sidebar-edge-x");
   sidebar.classList.add("open");
   state.sidebarEdgeSwipe = null;
+  syncSidebarOpenClass();
   refreshSidebarListAfterOpen();
   publishPluginNavigationState({ force: true });
 }
@@ -1795,6 +1875,56 @@ function isSidebarOpen() {
   return Boolean(sidebar && sidebar.classList.contains("open"));
 }
 
+function sidebarLayoutToggleSupported() {
+  const width = Number(window.innerWidth || document.documentElement.clientWidth || 0);
+  const height = Number(window.innerHeight || document.documentElement.clientHeight || 0);
+  return width >= SIDEBAR_LAYOUT_TOGGLE_MIN_WIDTH && height >= SIDEBAR_LAYOUT_TOGGLE_MIN_HEIGHT;
+}
+
+function sidebarOverlayModeActive() {
+  return Boolean(state.sidebarLayoutOverlay && sidebarLayoutToggleSupported());
+}
+
+function syncSidebarLayoutOverlayState() {
+  const supported = sidebarLayoutToggleSupported();
+  const active = sidebarOverlayModeActive();
+  document.documentElement.classList.toggle("sidebar-layout-toggle-supported", supported);
+  document.documentElement.classList.toggle("sidebar-overlay-mode", active);
+  syncSidebarOpenClass();
+  if (!active) {
+    const sidebar = $("sidebar");
+    if (sidebar) {
+      sidebar.classList.remove("edge-dragging");
+      sidebar.style.removeProperty("--sidebar-edge-x");
+    }
+    state.sidebarEdgeSwipe = null;
+  }
+  return active;
+}
+
+function setSidebarLayoutOverlay(active, options = {}) {
+  const nextActive = Boolean(active) && sidebarLayoutToggleSupported();
+  state.sidebarLayoutOverlay = nextActive;
+  syncSidebarLayoutOverlayState();
+  if (nextActive && options.open === true) openSidebarMenu();
+  else closeSidebarMenu();
+  syncThreadDetailLayoutState();
+  if (state.threadTileMode) renderCurrentThread();
+  return nextActive;
+}
+
+function handleSidebarLayoutToggle() {
+  if (!sidebarLayoutToggleSupported()) return false;
+  if (!sidebarOverlayModeActive()) {
+    setSidebarLayoutOverlay(true);
+    return true;
+  }
+  if (isSidebarOpen()) closeSidebarMenu();
+  else openSidebarMenu();
+  syncThreadDetailLayoutState();
+  return true;
+}
+
 function sidebarTransformIsNone(transform) {
   const value = String(transform || "").replace(/\s+/g, "").toLowerCase();
   return !value
@@ -1853,10 +1983,38 @@ function threadDetailReturnButtonVisible() {
 function syncThreadDetailLayoutState() {
   const detailActive = Boolean(state.currentThreadId || state.currentThread);
   document.documentElement.classList.toggle("thread-detail-active", detailActive);
+  const sidebarToggle = sidebarLayoutToggleSupported();
+  const sidebarOverlay = syncSidebarLayoutOverlayState();
+  const sidebarOpen = isSidebarOpen();
+  const sidebarLayoutButton = $("sidebarLayoutToggle");
+  if (sidebarLayoutButton) {
+    const showSidebarLayoutButton = Boolean(sidebarToggle && !sidebarOverlay);
+    sidebarLayoutButton.hidden = !showSidebarLayoutButton;
+    sidebarLayoutButton.classList.toggle("sidebar-layout-toggle-visible", showSidebarLayoutButton);
+    sidebarLayoutButton.textContent = "‹";
+    sidebarLayoutButton.title = "收起 Session List";
+    sidebarLayoutButton.setAttribute("aria-label", "收起 Session List");
+  }
+  const closeMenuButton = $("closeMenu");
+  if (closeMenuButton) {
+    const sidebarOverlayClose = Boolean(sidebarToggle && sidebarOverlay);
+    closeMenuButton.classList.toggle("sidebar-layout-close", sidebarOverlayClose);
+    closeMenuButton.textContent = sidebarOverlayClose ? "‹" : "×";
+    closeMenuButton.title = sidebarOverlayClose ? "收起 Session List" : "Close menu";
+    closeMenuButton.setAttribute("aria-label", sidebarOverlayClose ? "收起 Session List" : "Close menu");
+  }
   const openMenuButton = $("openMenu");
   if (!openMenuButton) return;
-  const splitReturn = threadDetailReturnButtonVisible();
+  const splitReturn = !sidebarToggle && threadDetailReturnButtonVisible();
+  const sidebarOpenMenu = Boolean(sidebarToggle && sidebarOverlay && !sidebarOpen);
   openMenuButton.classList.toggle("split-return-visible", splitReturn);
+  openMenuButton.classList.toggle("sidebar-toggle-visible", sidebarOpenMenu);
+  if (sidebarToggle) {
+    openMenuButton.textContent = "☰";
+    openMenuButton.title = "打开 Session List";
+    openMenuButton.setAttribute("aria-label", "打开 Session List");
+    return;
+  }
   openMenuButton.textContent = splitReturn ? "←" : "☰";
   openMenuButton.title = splitReturn ? "返回线程列表" : "Menu";
   openMenuButton.setAttribute("aria-label", splitReturn ? "返回线程列表" : "Menu");
@@ -1876,6 +2034,7 @@ function returnToThreadListFromDetail() {
 }
 
 function handleOpenMenuClick() {
+  if (handleSidebarLayoutToggle()) return;
   if (threadDetailReturnButtonVisible() && returnToThreadListFromDetail()) return;
   openSidebarMenu();
 }
@@ -3093,8 +3252,31 @@ function checkPrimaryShellSelectionConflictAfterRender(metrics = {}) {
   });
 }
 
+function threadIdFromConversationSignatureValue(value) {
+  const signatureValue = String(value || "");
+  if (!signatureValue) return "";
+  if (signatureValue.startsWith("loading|")) return signatureValue.split("|")[1] || "";
+  if (signatureValue.startsWith("load-error|")) return signatureValue.split("|")[1] || "";
+  if (signatureValue[0] !== "{") return "";
+  try {
+    const parsed = JSON.parse(signatureValue);
+    return String(parsed && parsed.threadId || "");
+  } catch (_) {
+    return "";
+  }
+}
+
 function updateConversationHtml(html, signature, options = {}) {
   const conversation = $("conversation");
+  const renderedThreadIdBefore = threadIdFromConversationSignatureValue(state.renderedConversationSignature);
+  const currentRenderThreadId = String(state.currentThreadId || "");
+  const sameThreadRender = Boolean(
+    renderedThreadIdBefore
+      && currentRenderThreadId
+      && renderedThreadIdBefore === currentRenderThreadId,
+  );
+  const currentRenderThreadHash = diagnosticThreadHash(currentRenderThreadId);
+  const previousRenderedThreadHash = diagnosticThreadHash(renderedThreadIdBefore);
   const scrollAnchor = options.stickToBottom
     ? null
     : captureConversationViewportAnchor({ userReadingCurrentTurn: Boolean(options.userReadingCurrentTurn) });
@@ -3147,6 +3329,9 @@ function updateConversationHtml(html, signature, options = {}) {
     restoreConversationViewportAnchor(scrollAnchor);
     if (shouldCheckProjectionConsistency) {
       checkConversationProjectionConsistency(projectionConsistencySource, {
+        action: options.action,
+        routeKind: options.routeKind,
+        threadHash: options.threadHash,
         renderMode: String(options.renderMode || updatePlan.action || ""),
       });
     }
@@ -3195,7 +3380,7 @@ function updateConversationHtml(html, signature, options = {}) {
   } else if (updatePlan.action === "set-inner-html") {
     conversation.innerHTML = html;
   }
-  const postDomShape = conversationDomShape();
+  let postDomShape = conversationDomShape();
   const postApplyConsistencyPlan = threadDetailDomPatchApi.planConversationPostApplyDomConsistency({
     updatePlan,
     applicationPlan,
@@ -3219,6 +3404,10 @@ function updateConversationHtml(html, signature, options = {}) {
       reason: "post-apply-dom-inconsistent",
     });
   }
+  if (conversation && threadDetailDomPatchApi.removeDuplicateUserMessageDomNodes) {
+    threadDetailDomPatchApi.removeDuplicateUserMessageDomNodes({ root: conversation });
+    postDomShape = conversationDomShape();
+  }
   if (postApplyConsistencyPlan.shouldReport) {
     recordHomeAiDiagnosticFailure(
       threadDiagnosticEventsApi.detailPatchRejectedDiagnosticEvent(postApplyConsistencyPlan.diagnosticInput || {}),
@@ -3228,6 +3417,7 @@ function updateConversationHtml(html, signature, options = {}) {
     applicationPlan,
     updatePlan,
     threadId: state.currentThreadId || "",
+    clientBuildId: CLIENT_BUILD_ID,
     expectedVisibleTurnCount,
     renderedDomTurnCount,
   });
@@ -3236,6 +3426,9 @@ function updateConversationHtml(html, signature, options = {}) {
   restoreConversationViewportAnchor(scrollAnchor);
   if (shouldCheckProjectionConsistency) {
     checkConversationProjectionConsistency(projectionConsistencySource, {
+      action: options.action,
+      routeKind: options.routeKind,
+      threadHash: options.threadHash,
       renderMode: String(options.renderMode || applicationPlan.finalAction || updatePlan.action || ""),
     });
   }
@@ -3248,7 +3441,11 @@ function updateConversationHtml(html, signature, options = {}) {
     childCount: conversation ? conversation.childNodes.length : 0,
     stickToBottom: Boolean(options.stickToBottom),
     threadId: state.currentThreadId || "",
+    threadHash: currentRenderThreadHash,
+    previousRenderedThreadHash,
+    sameThreadRender,
     currentThreadStatus: statusText(state.currentThread && state.currentThread.status),
+    source: options.source || "conversation-update",
     html,
     slowThresholdMs: PERF_SLOW_RENDER_REPORT_MS,
     minIntervalMs: PERF_EVENT_THROTTLE_MS,
@@ -3257,7 +3454,9 @@ function updateConversationHtml(html, signature, options = {}) {
   applyFrontendRuntimeHealthEffectsPlan(state.frontendRuntimeHealthMonitor.recordRender({
     action: options.source || "conversation-update",
     routeKind: options.routeKind || diagnosticRouteKind(),
-    threadHash: options.threadHash || diagnosticThreadHash(state.currentThreadId),
+    threadHash: options.threadHash || currentRenderThreadHash,
+    previousRenderedThreadHash,
+    sameThreadRender,
     readMode: state.currentThread && state.currentThread.mobileReadMode || "",
     renderMode: String(options.renderMode || applicationPlan.finalAction || updatePlan.action || ""),
     finalAction: String(applicationPlan.finalAction || updatePlan.action || ""),
@@ -3945,6 +4144,9 @@ function completeLocalConversationDomUpdate(root, wasNearBottom, userReadingCurr
   })();
   const completionPlan = threadDetailDomPatchApi.planLocalConversationDomUpdateCompletion(completionSnapshot);
   if (!completionPlan.complete) return false;
+  if (threadDetailDomPatchApi.removeDuplicateUserMessageDomNodes && canPatchSingleThreadConversationDom()) {
+    threadDetailDomPatchApi.removeDuplicateUserMessageDomNodes({ root: $("conversation") });
+  }
   const effectsPlan = threadDetailDomPatchApi.planLocalConversationDomUpdateCompletionEffects(completionPlan);
   applyLocalConversationDomUpdateCompletionEffectsPlan(effectsPlan, { root });
   restoreConversationViewportAnchor(options.scrollAnchor || null);
@@ -4365,6 +4567,12 @@ function patchCurrentThreadDetailFromRefresh(previousThread, nextThread, previou
   });
   restoreConversationViewportAnchor(scrollAnchor);
   if (!applyResult.ok) return rejectThreadDetailPatch(applyResult.reason || "turn-patch-apply-failed");
+  const postPatchDomShape = conversationDomShape();
+  const expectedShape = visibleConversationShape(nextThread);
+  if (postPatchDomShape.duplicateUserMessageCount > Math.max(0, Number(expectedShape.duplicateUserMessageCount || 0))) {
+    renderCurrentThread({ stickToBottom: shouldFollowSubmittedMessageToBottom() });
+    return acceptThreadDetailPatch("full-render-after-duplicate-user-message-dom");
+  }
   return acceptThreadDetailPatch("patched");
 }
 
@@ -4682,6 +4890,7 @@ function renderCurrentThread(options = {}) {
     applySummaryOnlyCurrentThreadRecoveryEffectsPlan(summaryRecoveryEffectsPlan);
     thread = state.currentThread;
   }
+  const preRenderDomShape = conversationDomShape();
   const earlyShellPlan = threadDetailRenderPlanApi.planSingleThreadEarlyShellExecution({
     threadId: thread.id || state.currentThreadId || "",
     currentThreadId: state.currentThreadId,
@@ -4689,6 +4898,9 @@ function renderCurrentThread(options = {}) {
     loadError: thread.mobileLoadError,
     conversationSignature: conversationRenderSignature(thread),
     patchShellSignature: conversationPatchShellSignature(thread),
+    renderedConversationSignature: state.renderedConversationSignature,
+    renderedDomTurnCount: preRenderDomShape.turnCount,
+    renderedDomItemCount: preRenderDomShape.itemCount,
     stickToBottom: shouldStickToBottom,
     escapeHtml,
   });
@@ -4720,6 +4932,12 @@ function renderCurrentThread(options = {}) {
       shellPlan: earlyShellPlan,
       threadId: thread.id || state.currentThreadId || "",
     });
+    if (typeof recordRecentSubmittedEchoDiagnosticLogs === "function") {
+      recordRecentSubmittedEchoDiagnosticLogs("render-current-thread-early-shell", {
+        threadId: thread.id || state.currentThreadId || "",
+        renderMode: "early-shell",
+      });
+    }
     return;
   }
   const turns = visibleTurnsForConversation(thread);
@@ -4739,8 +4957,9 @@ function renderCurrentThread(options = {}) {
   const pluginRefreshNotice = renderPluginRefreshPendingNotice(previousKeys);
   const visibleTurnIds = new Set(turns.map((turn) => turn && turn.id).filter(Boolean).map(String));
   resetCopyTextStore();
-  const turnsHtml = turns.map((turn) => renderTurn(turn, previousKeys)).join("");
+  const turnsHtml = renderThreadConversationFlowWithReturnReceipts(thread, turns, previousKeys, (turn, keys) => renderTurn(turn, keys));
   const liveOperationDock = renderLiveOperationDock(thread, previousKeys);
+  const taskCardReceiptsHtml = "";
   const taskCardsHtml = renderThreadTaskCards(thread, previousKeys);
   const approvalsHtml = renderPendingApprovals(thread, previousKeys, (request) => {
     const turnId = approvalTurnId(request);
@@ -4755,6 +4974,7 @@ function renderCurrentThread(options = {}) {
     taskToolbar,
     omittedBanner,
     readWarning,
+    taskCardReceiptsHtml,
     turnsHtml,
     approvalsHtml,
     taskCardsHtml,
@@ -4765,7 +4985,7 @@ function renderCurrentThread(options = {}) {
   updateLiveOperationDockHtml(liveOperationDock);
   const previousChildCount = $("conversation") ? $("conversation").childNodes.length : 0;
   const renderVisibleShape = visibleConversationShape(thread);
-  const renderDomShape = conversationDomShape();
+  const renderDomShape = preRenderDomShape;
   const shellUpdatePlan = threadDetailRenderPlanApi.planSingleThreadShellConversationUpdate({
     shellPlan,
     conversationSignature: conversationRenderSignature(thread),
@@ -4777,7 +4997,7 @@ function renderCurrentThread(options = {}) {
     renderedDomItemCount: renderDomShape.itemCount,
     duplicateRenderKeyCount: renderDomShape.duplicateRenderKeyCount,
     duplicateUserMessageCount: renderDomShape.duplicateUserMessageCount,
-    expectedDuplicateUserMessageCount: renderVisibleShape.duplicateUserMessageCount,
+    expectedDuplicateUserMessageCount: 0,
     expectedTurnIds: visibleRenderableTurnIds(thread),
     renderedDomTurnIds: conversationDomTurnIds(),
     source: "single-thread-render",
@@ -4806,6 +5026,13 @@ function renderCurrentThread(options = {}) {
     shellPlan,
     threadId: thread.id || state.currentThreadId || "",
   });
+  if (typeof recordRecentSubmittedEchoDiagnosticLogs === "function") {
+    recordRecentSubmittedEchoDiagnosticLogs("render-current-thread-full", {
+      threadId: thread.id || state.currentThreadId || "",
+      renderMode: "full-render",
+      shellUpdateReason: shellUpdatePlan.reason || "",
+    });
+  }
 }
 
 function renderNewThreadDraft() {

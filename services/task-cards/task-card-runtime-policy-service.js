@@ -7,6 +7,31 @@ const {
   createWorkspaceSourceWriteGuard,
 } = require("../../adapters/workspace-source-write-guard-service");
 
+const REASONING_EFFORT_RANK = {
+  low: 1,
+  medium: 2,
+  high: 3,
+  xhigh: 4,
+};
+
+function normalizeReasoningEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  return REASONING_EFFORT_RANK[effort] ? effort : "";
+}
+
+function applyReasoningEffortFloor(settings = {}, minimumReasoningEffort = "") {
+  const floor = normalizeReasoningEffort(minimumReasoningEffort);
+  const base = Object.assign({}, settings || {});
+  if (!floor) return base;
+  const current = normalizeReasoningEffort(base.reasoningEffort);
+  if (current && REASONING_EFFORT_RANK[current] >= REASONING_EFFORT_RANK[floor]) {
+    base.reasoningEffort = current;
+    return base;
+  }
+  base.reasoningEffort = floor;
+  return base;
+}
+
 function createTaskCardRuntimePolicyService(options = {}) {
   const fs = options.fs || fsDefault;
   const path = options.path || pathDefault;
@@ -41,6 +66,9 @@ function createTaskCardRuntimePolicyService(options = {}) {
   const attachWorkspaceDelegationRuntimeGuidance = typeof options.attachWorkspaceDelegationRuntimeGuidance === "function"
     ? options.attachWorkspaceDelegationRuntimeGuidance
     : () => {};
+  const attachTaskCardRuntimeGuidance = typeof options.attachTaskCardRuntimeGuidance === "function"
+    ? options.attachTaskCardRuntimeGuidance
+    : attachWorkspaceDelegationRuntimeGuidance;
   const readStateDbThread = typeof options.readStateDbThread === "function" ? options.readStateDbThread : () => null;
   const readStartedThread = typeof options.readStartedThread === "function" ? options.readStartedThread : () => null;
   const readRolloutSessionFallbackThread = typeof options.readRolloutSessionFallbackThread === "function"
@@ -239,6 +267,13 @@ function createTaskCardRuntimePolicyService(options = {}) {
     return params;
   }
 
+  function isNonBlockingFullAccessRuntime(settings = {}) {
+    if (!settings || typeof settings !== "object") return false;
+    if (String(settings.approvalPolicy || "").trim() !== "never") return false;
+    return normalizeSandboxPolicyType(settings.sandboxPolicy && settings.sandboxPolicy.type) === "dangerFullAccess"
+      || String(settings.sandboxMode || "").trim() === "danger-full-access";
+  }
+
   function applyWorkspaceDelegationRuntimeGuard(params, settings, applyOptions = {}) {
     if (!params || typeof params !== "object") return params;
     if (!workspaceDelegationPublicSettings().enabled) return params;
@@ -246,6 +281,7 @@ function createTaskCardRuntimePolicyService(options = {}) {
     const cwd = runtimeCwdForParams(params);
     if (!cwd) return params;
     params.cwd = cwd;
+    if (isNonBlockingFullAccessRuntime(settings)) return params;
     if (workspaceDelegationGuardExemptCwd(cwd)) return params;
     if (options.workspaceDelegationApprovalProxyOnly && !options.workspaceDelegationEnforceSandboxGuard) {
       return applyWorkspaceDelegationFullAccessCompatRuntime(params, applyOptions);
@@ -269,6 +305,7 @@ function createTaskCardRuntimePolicyService(options = {}) {
       if (settings.permissionProfile) params.permissionProfile = settings.permissionProfile;
       else if (settings.sandboxMode) params.sandbox = settings.sandboxMode;
       if (settings.model) params.model = settings.model;
+      if (settings.reasoningEffort) params.effort = settings.reasoningEffort;
       const config = {};
       if (settings.reasoningSummary) config.model_reasoning_summary = settings.reasoningSummary;
       if (settings.modelVerbosity) config.model_verbosity = settings.modelVerbosity;
@@ -277,8 +314,11 @@ function createTaskCardRuntimePolicyService(options = {}) {
     return applyWorkspaceDelegationRuntimeGuard(params, settings, { useSandboxPolicy: false });
   }
 
-  function applyStartThreadRuntimeSettings(params, settings) {
-    attachWorkspaceDelegationRuntimeGuidance(params);
+  function applyStartThreadRuntimeSettings(params, settings, applyOptions = {}) {
+    if (!applyOptions.skipWorkspaceDelegationRuntimeGuidance) {
+      if (applyOptions.taskCardRuntimeGuidance) attachTaskCardRuntimeGuidance(params);
+      else attachWorkspaceDelegationRuntimeGuidance(params);
+    }
     if (settings) {
       if (settings.approvalPolicy) params.approvalPolicy = settings.approvalPolicy;
       if (settings.permissionProfile) params.permissionProfile = settings.permissionProfile;
@@ -292,8 +332,9 @@ function createTaskCardRuntimePolicyService(options = {}) {
     return applyWorkspaceDelegationRuntimeGuard(params, settings, { useSandboxPolicy: false });
   }
 
-  function applyTurnRuntimeSettings(params, settings) {
-    attachWorkspaceDelegationRuntimeGuidance(params);
+  function applyTurnRuntimeSettings(params, settings, applyOptions = {}) {
+    if (applyOptions.taskCardRuntimeGuidance) attachTaskCardRuntimeGuidance(params);
+    else attachWorkspaceDelegationRuntimeGuidance(params);
     if (settings) {
       if (settings.approvalPolicy) params.approvalPolicy = settings.approvalPolicy;
       if (settings.sandboxPolicy) params.sandboxPolicy = settings.sandboxPolicy;
@@ -316,6 +357,7 @@ function createTaskCardRuntimePolicyService(options = {}) {
 
   return {
     applyCodexFastServiceTier,
+    applyReasoningEffortFloor,
     applyResumeRuntimeSettings,
     applyStartThreadRuntimeSettings,
     applyTurnRuntimeSettings,
@@ -341,5 +383,7 @@ function createTaskCardRuntimePolicyService(options = {}) {
 }
 
 module.exports = {
+  applyReasoningEffortFloor,
   createTaskCardRuntimePolicyService,
+  normalizeReasoningEffort,
 };

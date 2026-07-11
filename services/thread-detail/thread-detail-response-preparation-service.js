@@ -12,6 +12,7 @@ function createThreadDetailResponsePreparationService(dependencies = {}) {
     ? dependencies.responseBudgetOptions
     : () => ({});
   const compactThreadReadResult = typeof dependencies.compactThreadReadResult === "function" ? dependencies.compactThreadReadResult : (result) => result;
+  const compactTurnsListResult = typeof dependencies.compactTurnsListResult === "function" ? dependencies.compactTurnsListResult : (result) => result;
   const compactThreadDetailResponseResult = typeof dependencies.compactThreadDetailResponseResult === "function" ? dependencies.compactThreadDetailResponseResult : (result) => result;
   const compactTurn = typeof dependencies.compactTurn === "function" ? dependencies.compactTurn : (turn) => turn;
   const enrichThreadItemTimestampsFromRollout = typeof dependencies.enrichThreadItemTimestampsFromRollout === "function" ? dependencies.enrichThreadItemTimestampsFromRollout : (thread) => thread;
@@ -27,6 +28,7 @@ function createThreadDetailResponsePreparationService(dependencies = {}) {
   const workspaceContextStatsForCwd = typeof dependencies.workspaceContextStatsForCwd === "function" ? dependencies.workspaceContextStatsForCwd : () => ({});
   const backfillMissingRolloutCompletionTurnsForDetailResult = typeof dependencies.backfillMissingRolloutCompletionTurnsForDetailResult === "function" ? dependencies.backfillMissingRolloutCompletionTurnsForDetailResult : (result) => result;
   const appendRolloutUserInputAnchorsToDetailResult = typeof dependencies.appendRolloutUserInputAnchorsToDetailResult === "function" ? dependencies.appendRolloutUserInputAnchorsToDetailResult : (result) => result;
+  const appendRolloutLatestCompletedAssistantItemsToDetailResult = typeof dependencies.appendRolloutLatestCompletedAssistantItemsToDetailResult === "function" ? dependencies.appendRolloutLatestCompletedAssistantItemsToDetailResult : (result) => result;
   const appendRolloutActiveAssistantItemsToDetailResult = typeof dependencies.appendRolloutActiveAssistantItemsToDetailResult === "function" ? dependencies.appendRolloutActiveAssistantItemsToDetailResult : (result) => result;
   const finalizeActiveAssistantProjectionDetailResult = typeof dependencies.finalizeActiveAssistantProjectionDetailResult === "function" ? dependencies.finalizeActiveAssistantProjectionDetailResult : (result) => result;
   const applyLocalActiveThreadStatusToResult = typeof dependencies.applyLocalActiveThreadStatusToResult === "function" ? dependencies.applyLocalActiveThreadStatusToResult : (result) => result;
@@ -42,13 +44,20 @@ function createThreadDetailResponsePreparationService(dependencies = {}) {
   const attachPendingServerRequestsToResult = typeof dependencies.attachPendingServerRequestsToResult === "function" ? dependencies.attachPendingServerRequestsToResult : (result) => result;
   const attachThreadTaskCardsToResult = typeof dependencies.attachThreadTaskCardsToResult === "function" ? dependencies.attachThreadTaskCardsToResult : (result) => result;
 
-  function threadFromTurnsList(threadId, summary, turnsResult) {
+  function isWindowOnlyTurnsListMode(mode) {
+    return mode === "turns-list-initial" || mode === "turns-list-large";
+  }
+
+  function threadFromTurnsList(threadId, summary, turnsResult, options = {}) {
     const data = Array.isArray(turnsResult && turnsResult.data)
       ? turnsResult.data
       : Array.isArray(turnsResult && turnsResult.turns)
         ? turnsResult.turns
         : [];
-    const enriched = enrichThreadItemTimestampsFromRollout(Object.assign({ turns: data }, summary || {}, { id: threadId }));
+    const source = Object.assign({ turns: data }, summary || {}, { id: threadId });
+    const enriched = options.skipRolloutEnrichment === true
+      ? source
+      : enrichThreadItemTimestampsFromRollout(source);
     const turns = sortTurnsChronologically(enriched.turns).slice(-MAX_THREAD_TURNS);
     const latest = turns[turns.length - 1];
     const status = latest && isLiveTurn(latest) ? { type: "active" } : (summary && summary.status) || { type: "notLoaded" };
@@ -132,32 +141,65 @@ function createThreadDetailResponsePreparationService(dependencies = {}) {
     return out;
   }
 
+  function markPrepareTiming(timings, name, startedAtMs) {
+    if (!timings || typeof timings !== "object") return 0;
+    const elapsed = Math.max(0, Date.now() - Number(startedAtMs || Date.now()));
+    timings[name] = elapsed;
+    return elapsed;
+  }
+
   async function prepareThreadDetailResponseResult(result, details = {}) {
-    const completionBackfilled = backfillMissingRolloutCompletionTurnsForDetailResult(result, details);
+    const timings = {};
+    details.prepareResponseTimings = timings;
+    const turnsListWindow = details.turnsListWindow === true;
+    let phaseStartedAtMs = Date.now();
+    const completionBackfilled = turnsListWindow
+      ? result
+      : backfillMissingRolloutCompletionTurnsForDetailResult(result, details);
+    markPrepareTiming(timings, "prepareCompletionBackfillMs", phaseStartedAtMs);
+    phaseStartedAtMs = Date.now();
     const usageDecorated = attachRolloutUsageSummariesToDetailResult(completionBackfilled);
+    markPrepareTiming(timings, "prepareUsageSummariesMs", phaseStartedAtMs);
+    phaseStartedAtMs = Date.now();
     const inputAnchored = appendRolloutUserInputAnchorsToDetailResult(usageDecorated);
-    const activeAssistantDecorated = appendRolloutActiveAssistantItemsToDetailResult(inputAnchored);
+    markPrepareTiming(timings, "prepareUserInputAnchorsMs", phaseStartedAtMs);
+    phaseStartedAtMs = Date.now();
+    const latestCompletedAssistantDecorated = appendRolloutLatestCompletedAssistantItemsToDetailResult(inputAnchored);
+    markPrepareTiming(timings, "prepareLatestCompletedAssistantMs", phaseStartedAtMs);
+    phaseStartedAtMs = Date.now();
+    const activeAssistantDecorated = appendRolloutActiveAssistantItemsToDetailResult(latestCompletedAssistantDecorated);
+    markPrepareTiming(timings, "prepareActiveAssistantMs", phaseStartedAtMs);
+    phaseStartedAtMs = Date.now();
     const detailResult = finalizeActiveAssistantProjectionDetailResult(activeAssistantDecorated);
+    markPrepareTiming(timings, "prepareFinalizeActiveAssistantMs", phaseStartedAtMs);
+    phaseStartedAtMs = Date.now();
     const prepared = applyLocalActiveThreadStatusToResult(
       await prepareThreadTaskCardsToResult(applyLocalActiveThreadStatusToResult(detailResult, details)),
       details,
     );
+    markPrepareTiming(timings, "prepareTaskCardsMs", phaseStartedAtMs);
+    phaseStartedAtMs = Date.now();
     const finalized = applyLocalActiveThreadStatusToResult(
       finalizeThreadDetailProjectionResult(prepared, details),
       details,
     );
+    markPrepareTiming(timings, "prepareProjectionFinalizeMs", phaseStartedAtMs);
+    phaseStartedAtMs = Date.now();
     const budgetOptions = Object.assign({}, responseBudgetOptions() || {}, {
       compactTurn,
       responseBudgetEvidence: details.responseBudgetEvidence || "",
     });
-    return applyLocalActiveThreadStatusToResult(
+    const budgeted = applyLocalActiveThreadStatusToResult(
       compactThreadDetailResponseResult(finalized, budgetOptions),
       details,
     );
+    markPrepareTiming(timings, "prepareResponseBudgetMs", phaseStartedAtMs);
+    return budgeted;
   }
 
   async function turnsListThreadReadResult(threadId, summary, runtimeSettings, warning, mode = "turns-list", threadLog = null, responseBudgetEvidence = "") {
     const startedAtMs = Date.now();
+    const turnsListWindow = isWindowOnlyTurnsListMode(mode);
     if (threadLog) {
       threadLog("turns_list_start", {
         limit: MAX_THREAD_TURNS,
@@ -165,12 +207,22 @@ function createThreadDetailResponsePreparationService(dependencies = {}) {
         fallbackFrom: mode,
       });
     }
-    const turnsResult = await codex.request("thread/turns/list", {
+    const rawTurnsResult = await codex.request("thread/turns/list", {
       threadId,
       limit: MAX_THREAD_TURNS,
       sortDirection: "desc",
     }, { timeoutMs: THREAD_DETAIL_RPC_TIMEOUT_MS, retry: false, resetOnTimeout: false });
-    const result = compactThreadReadResult({ thread: threadFromTurnsList(threadId, summary, turnsResult) });
+    const turnsResult = turnsListWindow
+      ? compactTurnsListResult(rawTurnsResult, { threadId, summary })
+      : rawTurnsResult;
+    const result = compactThreadReadResult({
+      thread: threadFromTurnsList(threadId, summary, turnsResult, {
+        skipRolloutEnrichment: turnsListWindow,
+      }),
+    }, {
+      maxTurns: MAX_THREAD_TURNS,
+      turnsListWindow,
+    });
     if (result.thread) {
       result.thread.runtimeSettings = publicRuntimeSettings(runtimeSettings);
       result.thread.mobileReadMode = mode;
@@ -186,7 +238,12 @@ function createThreadDetailResponsePreparationService(dependencies = {}) {
         mode,
       });
     }
-    return prepareThreadDetailResponseResult(result, { threadId, source: mode, responseBudgetEvidence });
+    return prepareThreadDetailResponseResult(result, {
+      threadId,
+      source: mode,
+      responseBudgetEvidence,
+      turnsListWindow,
+    });
   }
 
   async function readRawThreadDetailForOrchestrator({ threadId, summary, runtimeSettings }) {

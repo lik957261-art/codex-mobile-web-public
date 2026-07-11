@@ -66,7 +66,20 @@
   }
 
   function threadUpdatedAtMs(thread) {
-    return timestampMs(thread && (thread.updatedAtMs || thread.updatedAt || thread.updated_at_ms || thread.updated_at));
+    return timestampMs(thread && (
+      thread.mobileListUpdatedAtMs
+      || thread.mobile_list_updated_at_ms
+      || thread.listActivityAtMs
+      || thread.list_activity_at_ms
+      || thread.updatedAtMs
+      || thread.updatedAt
+      || thread.updated_at_ms
+      || thread.updated_at
+      || thread.lastActivityAtMs
+      || thread.lastActivityAt
+      || thread.last_activity_at_ms
+      || thread.last_activity_at
+    ));
   }
 
   function terminalTurnAtMs(turn) {
@@ -152,13 +165,13 @@
     if (!isSettledStatus(status)) return false;
     if (input.currentThreadRefreshing) return true;
     if (isDeployLaneSettledIdle(input.thread, status)) return false;
-    if (isIdleStatus(status) && !latestTerminalTurn(input.thread) && !input.eventIsTerminal) return true;
+    const idleWithoutTerminalEvidence = isIdleStatus(status) && !latestTerminalTurn(input.thread) && !input.eventIsTerminal;
     if (input.allowLocalProcessing !== false
-      && isIdleStatus(status)
-      && !latestTerminalTurn(input.thread)
+      && idleWithoutTerminalEvidence
       && hasFreshSubmittedProcessingHint(input.submittedProcessingHintedAtMs, input.nowMs, input.submittedProcessingHintStaleMs)) {
       return true;
     }
+    if (idleWithoutTerminalEvidence) return false;
     if (input.currentThreadId && threadId === String(input.currentThreadId) && input.currentThreadSettled) return false;
     if (input.currentThreadHasLiveTurn) return true;
     if (!input.mobileReplay && (isTerminalStatus(status) || latestTerminalTurn(input.thread) || input.eventIsTerminal)) return false;

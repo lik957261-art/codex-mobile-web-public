@@ -10,6 +10,14 @@ function defaultCounts() {
     pendingTotal: 0,
     pendingIncoming: 0,
     pendingOutgoing: 0,
+    returnReceiptTotal: 0,
+    returnFollowUpTotal: 0,
+    latestReturnReceiptId: "",
+    latestReturnReceiptAt: "",
+    latestReturnReceiptStatus: "",
+    latestReturnFollowUpId: "",
+    latestReturnFollowUpAt: "",
+    latestReturnFollowUpStatus: "",
   };
 }
 
@@ -24,6 +32,9 @@ function createThreadListStateService(dependencies = {}) {
   const pendingCountsForThreads = typeof threadTaskCardService.pendingCountsForThreads === "function"
     ? (threadIds) => threadTaskCardService.pendingCountsForThreads(threadIds)
     : () => new Map();
+  const summaryCountsForThreads = typeof threadTaskCardService.summaryCountsForThreads === "function"
+    ? (threadIds) => threadTaskCardService.summaryCountsForThreads(threadIds)
+    : pendingCountsForThreads;
   const threadGoalService = dependencies.threadGoalService || {};
   const attachGoalsToThreadListResult = typeof threadGoalService.attachGoalsToThreadListResult === "function"
     ? (result) => threadGoalService.attachGoalsToThreadListResult(result)
@@ -31,6 +42,9 @@ function createThreadListStateService(dependencies = {}) {
   const upsertThreadListFallbackCacheThread = typeof dependencies.upsertThreadListFallbackCacheThread === "function"
     ? dependencies.upsertThreadListFallbackCacheThread
     : () => false;
+  const upsertThreadListFallbackCacheThreadsBulk = typeof dependencies.upsertThreadListFallbackCacheThreadsBulk === "function"
+    ? dependencies.upsertThreadListFallbackCacheThreadsBulk
+    : null;
   const readGlobalState = typeof dependencies.readGlobalState === "function" ? dependencies.readGlobalState : () => ({});
   const visibleWorkspaceRoots = typeof dependencies.visibleWorkspaceRoots === "function"
     ? dependencies.visibleWorkspaceRoots
@@ -63,6 +77,9 @@ function createThreadListStateService(dependencies = {}) {
     const rows = Array.isArray(resultOrThreads)
       ? resultOrThreads
       : threadListRowsFromResult(resultOrThreads);
+    if (upsertThreadListFallbackCacheThreadsBulk) {
+      return upsertThreadListFallbackCacheThreadsBulk(rows, options);
+    }
     let changed = 0;
     for (const thread of rows) {
       if (upsertThreadListFallbackCacheThread(thread, options)) changed += 1;
@@ -77,6 +94,15 @@ function createThreadListStateService(dependencies = {}) {
     summary.pendingTaskCardCount = Number(counts.pendingTotal || 0);
     summary.pendingIncomingTaskCardCount = Number(counts.pendingIncoming || 0);
     summary.pendingOutgoingTaskCardCount = Number(counts.pendingOutgoing || 0);
+    summary.returnReceiptTaskCardCount = Number(counts.returnReceiptTotal || 0);
+    summary.returnFollowUpTaskCardCount = Number(counts.returnFollowUpTotal || 0);
+    summary.returnFollowUpPending = Number(counts.returnFollowUpTotal || 0) > 0;
+    summary.latestReturnReceiptTaskCardId = String(counts.latestReturnReceiptId || "");
+    summary.latestReturnReceiptAt = String(counts.latestReturnReceiptAt || "");
+    summary.latestReturnReceiptStatus = String(counts.latestReturnReceiptStatus || "");
+    summary.latestReturnFollowUpTaskCardId = String(counts.latestReturnFollowUpId || "");
+    summary.latestReturnFollowUpAt = String(counts.latestReturnFollowUpAt || "");
+    summary.latestReturnFollowUpStatus = String(counts.latestReturnFollowUpStatus || "");
     return summary;
   }
 
@@ -87,7 +113,7 @@ function createThreadListStateService(dependencies = {}) {
   function attachThreadTaskCardCountsToThreadListResult(result) {
     if (!result || typeof result !== "object") return result;
     const threads = threadListRowsFromResult(result);
-    const countsByThreadId = pendingCountsForThreads(threads.map((thread) => thread && thread.id));
+    const countsByThreadId = summaryCountsForThreads(threads.map((thread) => thread && thread.id));
     const attach = (thread) => {
       const threadId = String(thread && thread.id || "");
       return attachThreadTaskCardCountsToSummary(thread, countsByThreadId.get(threadId));

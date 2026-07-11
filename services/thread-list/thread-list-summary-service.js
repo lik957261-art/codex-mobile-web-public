@@ -4,6 +4,9 @@ const THREAD_DETAIL_ONLY_SUMMARY_FIELDS = Object.freeze([
   "turns",
   "runtimeSettings",
   "threadTaskCards",
+  "taskCardReturnLedger",
+  "taskCardReturnLedgerStatusCounts",
+  "taskCardReturnLedgerIssueCodes",
   "pendingServerRequests",
   "mobileDetailLoaded",
   "mobileLoading",
@@ -23,6 +26,8 @@ const THREAD_DETAIL_ONLY_SUMMARY_FIELDS = Object.freeze([
   "mobilePendingSubmission",
   "mobileActiveOverlay",
   "mobileActiveOverlayBackfill",
+  "mobileDetailStatusAuthority",
+  "mobileListResultSummary",
 ]);
 
 function stripThreadListDetailFields(thread) {

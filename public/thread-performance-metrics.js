@@ -249,6 +249,7 @@
     const detailPerformance = threadDetailEventFieldsWithClient(thread, source);
     const performancePhase = classifyThreadDetailPhase(detailPerformance.serverTimings, {
       cached,
+      fullBackfillPlanned: source.fullBackfillPlanned === true,
       readMode: thread && thread.mobileReadMode,
       readDecision: source.readDecision,
     });
@@ -472,6 +473,7 @@
     const responseBudgetProgressiveActiveApplied = Boolean(contract.responseBudgetProgressiveActiveApplied || source.responseBudgetProgressiveActiveApplied);
     const responseBudgetActiveTurnCount = boundedCount(contract.responseBudgetActiveTurnCount || source.responseBudgetActiveTurnCount);
     const responseBudgetRetainedItemCount = boundedCount(contract.responseBudgetRetainedItemCount || source.responseBudgetRetainedItemCount);
+    const fullBackfillPlanned = Boolean(fields.fullBackfillPlanned || contract.fullBackfillPlanned || source.fullBackfillPlanned);
     const olderCursor = Boolean(contract.olderCursor || source.olderCursor);
     const newerCursor = Boolean(contract.newerCursor || source.newerCursor);
     const turns = boundedCount(fields.turns || contract.turns || detailShape.turns);
@@ -484,7 +486,11 @@
     const activeLike = Boolean(source.expectedActiveFullRead) || activeTurns > 0 || activeLikeStatus(status);
     const windowedMode = /turns-list|projection-v?\d*-partial|projection-partial|summary-timeout|unmaterialized|fallback/.test(readMode)
       || /bounded-large|turns-list|partial|fallback/.test(performancePhase);
-    const partialProjectionMode = projectionPartial || /projection-v?\d*-partial|projection-partial/.test(readMode);
+    const activeOverlayProjectionMode = /projection-active-overlay/.test(readMode)
+      || /active-overlay-window/.test(projectionPartialKind);
+    const partialProjectionMode = projectionPartial
+      || activeOverlayProjectionMode
+      || /projection-v?\d*-partial|projection-partial/.test(readMode);
     const hasActiveProjectionEvidence = activeTurns > 0 || responseBudgetActiveTurnCount > 0;
     const hasVisibleProjectionEvidence = visibleItems > 0 || responseBudgetRetainedItemCount > 0;
     const activePartialProjectionOk = !source.expectedActiveFullRead
@@ -494,8 +500,13 @@
       && (
         responseBudgetApplied
         || responseBudgetProgressiveActiveApplied
+        || activeOverlayProjectionMode
         || /warm-projection-partial|projection-partial/.test(performancePhase)
       );
+    const partialProjectionBackfillOk = !source.expectedActiveFullRead
+      && fullBackfillPlanned
+      && partialProjectionMode
+      && hasVisibleProjectionEvidence;
     const projectionModeMarkedFull = /projection-v?\d*-(cache|dynamic)|projection-(cache|dynamic)/.test(readMode)
       && !projectionPartial;
     let reason = "";
@@ -506,7 +517,7 @@
     } else if (turns > 0 && visibleItems === 0 && (items === 0 || projectionPartial || projectionPartialKind === "notification-shell")) {
       reason = "empty-projection-shell";
       severityHint = "H2";
-    } else if (activeLike && windowedMode && !activePartialProjectionOk) {
+    } else if (activeLike && windowedMode && !activePartialProjectionOk && !partialProjectionBackfillOk) {
       reason = "active-thread-window-downgrade";
       severityHint = "H2";
     }
@@ -528,6 +539,7 @@
       responseBudgetProgressiveActiveApplied,
       responseBudgetActiveTurnCount,
       responseBudgetRetainedItemCount,
+      fullBackfillPlanned,
       olderCursor,
       newerCursor,
       turns,

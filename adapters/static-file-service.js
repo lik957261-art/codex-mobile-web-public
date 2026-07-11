@@ -10,7 +10,6 @@ const DEFAULT_SHELL_MODE_CLASSIC = "classic";
 const DEFAULT_SHELL_MODE_VITE_APP_PREVIEW = "vite-app-preview";
 const VITE_SHELL_STABLE_APP_PREVIEW_ENTRY = "/vite-shell/app-preview-entry.js";
 const VITE_SHELL_HASHED_ENTRY_PATTERN = /^\/vite-shell\/assets\/vite-shell-entry-[^/]+\.js$/;
-const VITE_SHELL_HASHED_ASSET_PATTERN = /\/vite-shell\/assets\/[^/]+-[A-Za-z0-9_-]{6,}\.js$/;
 const STATIC_COMPRESSIBLE_EXTENSIONS = new Set([
   ".css",
   ".html",
@@ -34,6 +33,10 @@ function acceptsEncoding(req, encoding) {
 
 function defaultRequestUrl(req) {
   return new URL(req.url, `http://${req.headers.host || "localhost"}`);
+}
+
+function safeJsCommentText(value) {
+  return String(value == null ? "" : value).replace(/\*\//g, "* /");
 }
 
 function normalizeDefaultShellMode(value) {
@@ -142,18 +145,18 @@ function createStaticFileService(options = {}) {
     };
   }
 
-  function staticCacheControl(target) {
-    const normalized = String(target || "").replace(/\\/g, "/");
-    if (VITE_SHELL_HASHED_ASSET_PATTERN.test(normalized)) {
-      return "public, max-age=31536000, immutable";
-    }
-    return "no-cache";
-  }
-
   function writeStaticResponse(res, headers, body) {
     headers["Content-Length"] = body.length;
     res.writeHead(200, headers);
     res.end(body);
+  }
+
+  function appJsShellBuildProbeSuffix(url, rel) {
+    const pathname = `/${String(rel || "").replace(/^\/+/, "")}`;
+    if (pathname !== "/app.js") return "";
+    const shellBuild = String(url.searchParams.get("shellBuild") || "").trim();
+    if (!shellBuild) return "";
+    return `\n;/* codex-mobile shellBuild probe ${safeJsCommentText(shellBuild)} */\n`;
   }
 
   function staticPathnameForRequestUrl(url) {
@@ -196,13 +199,14 @@ function createStaticFileService(options = {}) {
         }
         const headers = {
           "Content-Type": mimeFor(target),
-          "Cache-Control": staticCacheControl(target),
+          "Cache-Control": "no-cache",
         };
         if (target.endsWith(".html")) {
           headers["Content-Security-Policy"] = `frame-ancestors ${frameAncestorsHeader()}`;
         }
-        const encoding = staticCompressionEncoding(req, target, stat.size);
-        const cacheKey = encoding ? staticCompressionCacheKey(target, stat, encoding) : "";
+        const responseSuffix = appJsShellBuildProbeSuffix(url, rel);
+        const encoding = staticCompressionEncoding(req, target, stat.size + Buffer.byteLength(responseSuffix));
+        const cacheKey = encoding && !responseSuffix ? staticCompressionCacheKey(target, stat, encoding) : "";
         const cached = cacheKey ? getStaticCompressionCache(cacheKey) : null;
         if (cached) {
           headers["Content-Encoding"] = encoding;
@@ -216,13 +220,16 @@ function createStaticFileService(options = {}) {
             res.end("Not found");
             return;
           }
+          const body = responseSuffix
+            ? Buffer.concat([data, Buffer.from(responseSuffix, "utf8")])
+            : data;
           if (!encoding) {
-            writeStaticResponse(res, headers, data);
+            writeStaticResponse(res, headers, body);
             return;
           }
-          compressStaticBody(data, encoding, (compressErr, compressed) => {
+          compressStaticBody(body, encoding, (compressErr, compressed) => {
             if (compressErr) {
-              writeStaticResponse(res, headers, data);
+              writeStaticResponse(res, headers, body);
               return;
             }
             headers["Content-Encoding"] = encoding;

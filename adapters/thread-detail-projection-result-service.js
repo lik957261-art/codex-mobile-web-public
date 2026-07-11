@@ -66,6 +66,16 @@ function isActiveLikeStatus(value) {
     .test(statusText(value).trim());
 }
 
+function isRestingLikeStatus(value) {
+  return /^(completed|complete|done|success|succeeded|failed|failure|cancelled|canceled|cancel|error|interrupted|stopped|stop)$/i
+    .test(statusText(value).trim());
+}
+
+function summaryHasRestingPrimaryStatus(summary) {
+  if (!summary || typeof summary !== "object") return false;
+  return [summary.status, summary.mobileStatus].filter(Boolean).some(isRestingLikeStatus);
+}
+
 function latestProjectedTurn(thread) {
   const turns = Array.isArray(thread && thread.turns) ? thread.turns : [];
   return turns.length ? turns[turns.length - 1] : null;
@@ -77,6 +87,7 @@ function latestProjectedTurnIsActiveLike(thread) {
 }
 
 function summaryLocalActiveTurnId(summary) {
+  if (summaryHasRestingPrimaryStatus(summary)) return "";
   return String(summary && (
     summary.activeTurnId
     || summary.active_turn_id
@@ -86,6 +97,7 @@ function summaryLocalActiveTurnId(summary) {
 }
 
 function summaryIsStatusOnlyActive(summary) {
+  if (summaryHasRestingPrimaryStatus(summary)) return false;
   return !summaryLocalActiveTurnId(summary)
     && (isActiveLikeStatus(summary && summary.status)
       || isActiveLikeStatus(summary && summary.mobileStatus)
@@ -170,6 +182,37 @@ function createThreadDetailProjectionResultService(options = {}) {
     return false;
   }
 
+  function projectedThreadReadiness(cached, summary, options = {}) {
+    if (!cached || !cached.result || !cached.result.thread) {
+      return { ready: false, reason: "cached-result-missing" };
+    }
+    const stalePartial = cached.stalePartial === true && cached.partial === true;
+    if (options.activeOverlay !== true && !projectedThreadSatisfiesLocalActiveSummary(cached, summary)) {
+      return { ready: false, reason: "local-active-turn-missing" };
+    }
+    const coversSummary = projectedThreadCoversSummaryUpdatedAt(cached, summary);
+    const summaryStalePartial = Boolean(
+      options.activeOverlay !== true
+        && options.allowStalePartial === true
+        && cached.partial === true
+        && stalePartial !== true
+        && !summaryHasActiveEvidence(summary)
+        && !coversSummary,
+    );
+    if (options.activeOverlay !== true && !stalePartial && !coversSummary && !summaryStalePartial) {
+      return { ready: false, reason: "summary-updated-after-window" };
+    }
+    return {
+      ready: true,
+      stalePartial: stalePartial || summaryStalePartial,
+      staleReason: stalePartial
+        ? (cached.staleReason || "backing-signature-mismatch")
+        : summaryStalePartial
+          ? "summary-updated-after-window"
+          : "",
+    };
+  }
+
   function isResponseReadyV4Projection(cached, result) {
     if (!cached || String(cached.version || "") !== "v4") return false;
     const thread = result && result.thread;
@@ -205,9 +248,8 @@ function createThreadDetailProjectionResultService(options = {}) {
   }
 
   function prepareProjectedThreadReadResult(cached, summary, runtimeSettings, options = {}) {
-    if (!cached || !cached.result || !cached.result.thread) return null;
-    if (options.activeOverlay !== true && !projectedThreadSatisfiesLocalActiveSummary(cached, summary)) return null;
-    if (options.activeOverlay !== true && !projectedThreadCoversSummaryUpdatedAt(cached, summary)) return null;
+    const readiness = projectedThreadReadiness(cached, summary, options);
+    if (!readiness.ready) return null;
     const mergedResult = Object.assign({}, cached.result, {
       thread: mergeThreadDisplaySummary(cached.result.thread, summary) || cached.result.thread,
     });
@@ -231,9 +273,9 @@ function createThreadDetailProjectionResultService(options = {}) {
       updatedAtMs: cached.updatedAtMs || cached.cachedAtMs || null,
       ageMs: cached.updatedAtMs ? Math.max(0, now() - cached.updatedAtMs) : null,
     };
-    if (cached.stalePartial === true) {
+    if (readiness.stalePartial === true) {
       result.thread.mobileProjection.stalePartial = true;
-      result.thread.mobileProjection.staleReason = cached.staleReason || "";
+      result.thread.mobileProjection.staleReason = readiness.staleReason || "";
     }
     return decorateThreadReadResult(result, {
       cached,
@@ -245,6 +287,7 @@ function createThreadDetailProjectionResultService(options = {}) {
 
   return {
     prepareProjectedThreadReadResult,
+    projectedThreadReadiness,
   };
 }
 

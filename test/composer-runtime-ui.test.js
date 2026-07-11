@@ -81,7 +81,7 @@ test("composer runtime is created after its constant dependencies", () => {
 
 test("composer runtime receives composer target thread as an explicit dependency", () => {
   assert.match(composerRuntimeJs, /composerTargetThread = \(\) => null/);
-  assert.match(appJs, /composerTargetThread,\n  composerTargetActiveTurnId,/);
+  assert.match(appJs, /composerTargetThread,\n\s+composerTargetActiveTurnId,/);
 
   const runtime = composerRuntime.createComposerRuntime({
     state: {
@@ -118,6 +118,8 @@ test("composer bridge runtime preserves CommonJS and legacy global entry points"
     "replyTaskCard",
     "queueThreadTaskCardDraftCreation",
     "createThreadTaskCardDraft",
+    "closeQuotaDetails",
+    "toggleQuotaDetails",
   ]) {
     assert.equal(typeof bridge[name], "function", `${name} should be exported`);
     assert.equal(typeof globalThis[name], "function", `${name} should remain a legacy global`);
@@ -127,6 +129,16 @@ test("composer bridge runtime preserves CommonJS and legacy global entry points"
   assert.match(composerBridgeRuntimeJs, /root\.CodexComposerBridgeRuntime = api/);
 });
 
+test("quota toggle reports success so synthetic click suppression works", () => {
+  assert.match(runtimeBody("closeQuotaDetails"), /return true;/);
+  assert.match(runtimeBody("toggleQuotaDetails"), /return Boolean\(panel\);/);
+  assert.match(appJs, /target\.closest\("#quotaUsage"\)/);
+  assert.match(appJs, /document\.addEventListener\("pointerdown", handleQuotaToggle\)/);
+  assert.match(appJs, /if \(!toggleQuotaDetailsFromRuntime\(quotaUsage\)\)/);
+  assert.match(appJs, /if \(quotaDetailsAreOpen\(quotaUsage\)\) \{/);
+  assert.match(appJs, /suppressSyntheticQuotaToggleUntil = now \+ 2200/);
+});
+
 test("composer runtime is part of the current static shell", () => {
   assert.match(indexHtml, /<script src="\/composer-runtime\.js"><\/script>/);
   assert.ok(shellManifest.precacheAssets.includes("/composer-runtime.js"));
@@ -134,6 +146,6 @@ test("composer runtime is part of the current static shell", () => {
   assert.ok(shellManifest.hashAssets.includes("/composer-runtime.js"));
   assert.match(swJs, /shell-asset-manifest\.js/);
   assert.match(serverRuntimeUtilsJs, /shell-asset-manifest\.json/);
-  assert.match(shellManifest.clientBuildId, /^0\.1\.12\|codex-mobile-shell-v628-[a-f0-9]{12}$/);
-  assert.match(shellManifest.shellCacheName, /^codex-mobile-shell-v628-[a-f0-9]{12}$/);
+  assert.match(shellManifest.clientBuildId, /^0\.1\.13\|codex-mobile-shell-v629-[a-f0-9]{12}$/);
+  assert.match(shellManifest.shellCacheName, /^codex-mobile-shell-v629-[a-f0-9]{12}$/);
 });

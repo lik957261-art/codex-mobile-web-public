@@ -7,10 +7,92 @@ const {
   publicSensitiveContext,
 } = require("../services/runtime/home-ai-secret-ref-service");
 
+const DEFAULT_ACTIVE_TURN_STEER_FAST_ACCEPT_MS = 120;
+const DEFAULT_ACTIVE_TURN_PREFLIGHT_FAST_ACCEPT_MS = 120;
+
+function scheduleDetachedTask(task) {
+  const run = () => Promise.resolve()
+    .then(task)
+    .catch(() => {});
+  if (typeof setImmediate === "function") {
+    const timer = setImmediate(run);
+    if (timer && typeof timer.unref === "function") timer.unref();
+    return;
+  }
+  const timer = setTimeout(run, 0);
+  if (timer && typeof timer.unref === "function") timer.unref();
+}
+
+function resolveAfter(ms, value) {
+  return new Promise((resolve) => {
+    setTimeout(() => resolve(value), Math.max(0, Number(ms) || 0));
+  });
+}
+
+function markSubmitTiming(timings, name, startedAtMs) {
+  if (!timings || !name) return 0;
+  const elapsed = Math.max(0, Date.now() - Number(startedAtMs || Date.now()));
+  timings[name] = elapsed;
+  return elapsed;
+}
+
+function markSubmitTimingAliases(timings, names, startedAtMs) {
+  const list = Array.isArray(names) ? names.filter(Boolean) : [names].filter(Boolean);
+  if (!list.length) return 0;
+  const elapsed = Math.max(0, Date.now() - Number(startedAtMs || Date.now()));
+  for (const name of list) timings[name] = elapsed;
+  return elapsed;
+}
+
+function turnStartResultTurnId(result) {
+  return String(result && (
+    result.turnId
+    || result.id
+    || result.turn && (result.turn.id || result.turn.turnId || result.turn.turn_id)
+  ) || "").trim();
+}
+
+function compactErrorText(err) {
+  if (!err) return "";
+  const parts = [
+    err.code,
+    err.errorCode,
+    err.name,
+    err.message,
+    err.reason,
+  ].filter(Boolean);
+  return parts.map((part) => String(part || "").trim()).filter(Boolean).join(" ").toLowerCase();
+}
+
+function turnStartRequiresThreadResume(err) {
+  const text = compactErrorText(err);
+  if (!text) return false;
+  if (/\bthread[_ -]?not[_ -]?loaded\b/.test(text)) return true;
+  if (/\bthread\b.{0,80}\bnot\s+loaded\b/.test(text)) return true;
+  if (/\bthread[_ -]?not[_ -]?found\b/.test(text)) return true;
+  if (/\bthread\b.{0,80}\bnot\s+found\b/.test(text)) return true;
+  if (/\bthread[_ -]?unloaded\b/.test(text)) return true;
+  if (/\bunloaded\s+thread\b/.test(text)) return true;
+  if (/\bthread[_ -]?unmaterialized\b/.test(text)) return true;
+  if (/\bunmaterialized\s+thread\b/.test(text)) return true;
+  if (/\bthread\b.{0,80}\b(?:must|needs|requires)\b.{0,80}\bresume\b/.test(text)) return true;
+  if (/\bresume\b.{0,40}\bthread\b.{0,40}\bbefore\b/.test(text)) return true;
+  if (/\b(?:conversation|session)\b.{0,80}\b(?:not\s+loaded|unloaded)\b/.test(text)) return true;
+  if (/\b(?:conversation|session)\b.{0,80}\bnot\s+found\b/.test(text)) return true;
+  return false;
+}
+
+function isThreadResumeAlreadyLoadedError(err) {
+  const text = compactErrorText(err);
+  if (!text) return false;
+  return /\balready\b.{0,80}\b(?:loaded|active|running|resumed)\b/.test(text);
+}
+
 function createThreadMessageRouteService(dependencies = {}) {
   const {
     codex,
     modelOptions = [],
+    resolveModelOptions,
     reasoningEffortOptions = [],
     mutationRpcTimeoutMs = 120000,
     startThreadFromRequestBody,
@@ -46,7 +128,34 @@ function createThreadMessageRouteService(dependencies = {}) {
     isTurnSteerUnsupportedError,
     isStaleActiveTurnError,
     autoRecoverThreadTurn,
+    activeTurnSteerFastAcceptMs = DEFAULT_ACTIVE_TURN_STEER_FAST_ACCEPT_MS,
+    activeTurnPreflightFastAcceptMs = DEFAULT_ACTIVE_TURN_PREFLIGHT_FAST_ACCEPT_MS,
+    scheduleBackgroundTask = scheduleDetachedTask,
   } = dependencies;
+
+  function normalizeOptionList(values) {
+    return [...new Set((Array.isArray(values) ? values : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean))];
+  }
+
+  async function effectiveModelOptions() {
+    const fallback = normalizeOptionList(modelOptions);
+    if (typeof resolveModelOptions !== "function") return fallback;
+    try {
+      const resolved = normalizeOptionList(await resolveModelOptions());
+      return resolved.length ? resolved : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  async function allowedRequestedModel(value) {
+    const requested = String(value || "").trim();
+    if (!requested) return "";
+    const options = await effectiveModelOptions();
+    return options.includes(requested) ? requested : "";
+  }
 
   async function handleRoute(options = {}) {
     const url = options.url;
@@ -76,9 +185,7 @@ function createThreadMessageRouteService(dependencies = {}) {
         workspaceCwd: cwd,
       });
       const textForInput = appendSecretRefReceiptText(text, secretContext).trim();
-      const requestedModel = modelOptions.includes(String(body.model || "").trim())
-        ? String(body.model || "").trim()
-        : "";
+      const requestedModel = await allowedRequestedModel(body.model);
       const requestedEffort = reasoningEffortOptions.includes(String(body.effort || "").trim())
         ? String(body.effort || "").trim()
         : "";
@@ -214,8 +321,19 @@ function createThreadMessageRouteService(dependencies = {}) {
 
     const messages = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages$/);
     if (messages && method === "POST") {
+      const routeStartedAtMs = Date.now();
+      const timings = {};
+      const timedSendJson = (status, body) => {
+        const sendJsonStartedAtMs = Date.now();
+        const response = sendJson(status, body);
+        markSubmitTiming(timings, "sendJsonMs", sendJsonStartedAtMs);
+        return response;
+      };
       const threadId = decodeURIComponent(messages[1]);
+      const bodyReadStartedAtMs = Date.now();
       const { fields: body, uploads } = await readMessage(threadId);
+      markSubmitTimingAliases(timings, ["readMessageMs", "bodyReadMs"], bodyReadStartedAtMs);
+      const inputStartedAtMs = Date.now();
       const text = String(body.text || "").trim();
       const secretContext = normalizeSecretRefsFromInput(body, {
         source: "message",
@@ -226,13 +344,16 @@ function createThreadMessageRouteService(dependencies = {}) {
       const textForInput = appendSecretRefReceiptText(text, secretContext).trim();
       const input = buildTurnInput(textForInput, uploads);
       const persistExtendedHistory = persistExtendedHistoryForUploads(uploads);
+      markSubmitTiming(timings, "inputBuildMs", inputStartedAtMs);
       if (!input.length) {
+        timings.totalMs = Math.max(0, Date.now() - routeStartedAtMs);
+        timedSendJson(400, { error: "Message text or attachment is required" });
         logMessageSubmit("empty", {
           threadId,
           clientSubmissionId: body.clientSubmissionId,
           uploads: uploads.length,
+          timings,
         });
-        sendJson(400, { error: "Message text or attachment is required" });
         return { handled: true };
       }
       logMessageSubmit("received", {
@@ -242,21 +363,70 @@ function createThreadMessageRouteService(dependencies = {}) {
         activeTurnId: body.activeTurnId || "",
         clientSubmissionId: body.clientSubmissionId,
       });
+      const submissionKeyStartedAtMs = Date.now();
       const submissionKeys = messageSubmissionKeys(threadId, body, textForInput, uploads);
-      const runtimeSettings = applyPermissionModeOverride(await resolveThreadRuntimeSettings(threadId), body.permissionMode, body.cwd || null);
-      const requestedModel = modelOptions.includes(String(body.model || "").trim())
-        ? String(body.model || "").trim()
-        : "";
+      markSubmitTiming(timings, "submissionKeyMs", submissionKeyStartedAtMs);
+      const requestedModel = await allowedRequestedModel(body.model);
       const requestedEffort = reasoningEffortOptions.includes(String(body.effort || "").trim())
         ? String(body.effort || "").trim()
         : "";
       const requestedFastMode = requestedCodexFastMode(body.fastMode);
       let result;
       try {
+        const dedupeStartedAtMs = Date.now();
         result = await runMessageSubmissionOnce(submissionKeys, uploads, async () => {
+          const runtimeStartedAtMs = Date.now();
+          const runtimeSettings = applyPermissionModeOverride(await resolveThreadRuntimeSettings(threadId), body.permissionMode, body.cwd || null);
+          markSubmitTiming(timings, "runtimeSettingsMs", runtimeStartedAtMs);
           let skipTurnSteer = false;
           if (body.activeTurnId) {
-            const stalePreflight = await staleActiveTurnPreflight(codex, threadId, String(body.activeTurnId));
+            const preflightStartedAtMs = Date.now();
+            const preflightPromise = Promise.resolve()
+              .then(() => staleActiveTurnPreflight(codex, threadId, String(body.activeTurnId)))
+              .then(
+                (result) => ({ ok: true, result }),
+                (err) => ({ ok: false, error: err }),
+              );
+            const preflightFastAcceptMs = Math.max(0, Number(activeTurnPreflightFastAcceptMs) || 0);
+            const preflightOutcome = await Promise.race([
+              preflightPromise,
+              resolveAfter(preflightFastAcceptMs, { pending: true }),
+            ]);
+            markSubmitTiming(timings, "stalePreflightMs", preflightStartedAtMs);
+            if (preflightOutcome && preflightOutcome.pending) {
+              timings.stalePreflightQueued = true;
+              timings.stalePreflightFastAcceptMs = preflightFastAcceptMs;
+              scheduleBackgroundTask(async () => {
+                const backgroundStartedAtMs = Date.now();
+                const backgroundOutcome = await preflightPromise;
+                logMessageSubmit(backgroundOutcome && backgroundOutcome.ok
+                  ? "active-turn-stale-preflight-background-done"
+                  : "active-turn-stale-preflight-background-error", {
+                  threadId,
+                  turnId: String(body.activeTurnId),
+                  clientSubmissionId: body.clientSubmissionId,
+                  stale: Boolean(backgroundOutcome && backgroundOutcome.ok && backgroundOutcome.result && backgroundOutcome.result.stale),
+                  reason: backgroundOutcome && backgroundOutcome.ok && backgroundOutcome.result && backgroundOutcome.result.reason || "",
+                  error: backgroundOutcome && !backgroundOutcome.ok && backgroundOutcome.error
+                    ? backgroundOutcome.error.message || String(backgroundOutcome.error)
+                    : "",
+                  timings: {
+                    stalePreflightBackgroundMs: Math.max(0, Date.now() - backgroundStartedAtMs),
+                  },
+                });
+              });
+              logMessageSubmit("active-turn-stale-preflight-queued", {
+                threadId,
+                turnId: String(body.activeTurnId),
+                clientSubmissionId: body.clientSubmissionId,
+                timings,
+              });
+            } else if (preflightOutcome && !preflightOutcome.ok) {
+              throw preflightOutcome.error;
+            }
+            const stalePreflight = preflightOutcome && preflightOutcome.ok
+              ? preflightOutcome.result
+              : { stale: false, reason: "preflight-queued" };
             if (stalePreflight.stale) {
               skipTurnSteer = true;
               logMessageSubmit("active-turn-stale-preflight", {
@@ -266,13 +436,17 @@ function createThreadMessageRouteService(dependencies = {}) {
                 reason: stalePreflight.reason,
                 quietMs: stalePreflight.quietMs,
               });
+              let interruptStartedAtMs = Date.now();
               try {
                 await codex.request("turn/interrupt", {
                   threadId,
                   turnId: String(body.activeTurnId),
                 }, { timeoutMs: 20000, retry: false });
+                markSubmitTiming(timings, "interruptMs", interruptStartedAtMs);
                 await new Promise((resolve) => setTimeout(resolve, 250));
+                timings.interruptSettleMs = 250;
               } catch (err) {
+                markSubmitTiming(timings, "interruptMs", interruptStartedAtMs);
                 logMessageSubmit("active-turn-stale-interrupt-failed", {
                   threadId,
                   turnId: String(body.activeTurnId),
@@ -282,56 +456,21 @@ function createThreadMessageRouteService(dependencies = {}) {
               }
             }
           }
-          if (body.activeTurnId && !skipTurnSteer) {
-            let pendingSteerEchoKey = "";
+          const resumeThreadBeforeTurnStart = async (targetTimings = timings) => {
+            const resumeStartedAtMs = Date.now();
             try {
-              pendingSteerEchoKey = pendingSteerEchoStore.remember({
+              await codex.request("thread/resume", applyResumeRuntimeSettings({
                 threadId,
-                turnId: String(body.activeTurnId),
-                input,
-                clientSubmissionId: body.clientSubmissionId,
-              });
-              const steerResult = await codex.request("turn/steer", {
-                threadId,
-                input,
-                expectedTurnId: String(body.activeTurnId),
-              }, { timeoutMs: mutationRpcTimeoutMs, retry: false });
-              codex.notifyMuxUserMessage({
-                threadId,
-                turnId: String(body.activeTurnId),
-                input,
-                clientSubmissionId: body.clientSubmissionId,
-              });
-              return steerResult;
+                cwd: body.cwd || null,
+                persistExtendedHistory,
+              }, runtimeSettings), { timeoutMs: mutationRpcTimeoutMs, retry: false });
+              markSubmitTimingAliases(targetTimings, ["threadResumeMs", "resumeMs"], resumeStartedAtMs);
             } catch (err) {
-              if (isTurnSteerUnsupportedError(err)) {
-                codex.notifyMuxUserMessage({
-                  threadId,
-                  turnId: String(body.activeTurnId),
-                  input,
-                  clientSubmissionId: body.clientSubmissionId,
-                });
-                return {};
-              }
-              if (pendingSteerEchoKey) pendingSteerEchoStore.forget(pendingSteerEchoKey);
-              if (!isStaleActiveTurnError(err)) throw err;
-              logMessageSubmit("active-turn-stale", {
-                threadId,
-                turnId: String(body.activeTurnId),
-                clientSubmissionId: body.clientSubmissionId,
-                error: err.message || String(err),
-              });
+              markSubmitTimingAliases(targetTimings, ["threadResumeMs", "resumeMs"], resumeStartedAtMs);
+              if (!isThreadResumeAlreadyLoadedError(err)) throw err;
+              targetTimings.resumeAlreadyLoaded = true;
             }
-          }
-          try {
-            await codex.request("thread/resume", applyResumeRuntimeSettings({
-              threadId,
-              cwd: body.cwd || null,
-              persistExtendedHistory,
-            }, runtimeSettings), { timeoutMs: mutationRpcTimeoutMs, retry: false });
-          } catch (err) {
-            if (!/already|loaded|active/i.test(err.message || "")) throw err;
-          }
+          };
           const params = applyCodexFastServiceTier(applyTurnRuntimeSettings({
             threadId,
             input,
@@ -339,33 +478,256 @@ function createThreadMessageRouteService(dependencies = {}) {
           if (body.cwd) params.cwd = body.cwd;
           if (requestedModel) params.model = requestedModel;
           if (requestedEffort) params.effort = requestedEffort;
-          const turnResult = await codex.request("turn/start", params, { timeoutMs: mutationRpcTimeoutMs, retry: false });
-          rememberThreadIdForTurnId(threadId, notifyLocalTurnStarted(threadId, turnResult, { source: "message-submit" }));
-          return turnResult;
+          const startTurn = async (timingNames, targetTimings = timings) => {
+            const turnStartStartedAtMs = Date.now();
+            try {
+              return await codex.request("turn/start", params, { timeoutMs: mutationRpcTimeoutMs, retry: false });
+            } finally {
+              markSubmitTimingAliases(targetTimings, timingNames, turnStartStartedAtMs);
+            }
+          };
+          const startReplacementTurn = async (targetTimings = timings) => {
+            let turnResult;
+            const turnStartTotalStartedAtMs = Date.now();
+            if (persistExtendedHistory) {
+              targetTimings.threadResumeMode = "pre-turn-start";
+              await resumeThreadBeforeTurnStart(targetTimings);
+              turnResult = await startTurn(["turnStartInitialMs", "turnStartMs"], targetTimings);
+            } else {
+              targetTimings.threadResumeMode = "optimistic-turn-start";
+              targetTimings.threadResumeSkipped = true;
+              targetTimings.threadResumeMs = 0;
+              targetTimings.resumeMs = 0;
+              try {
+                turnResult = await startTurn(["turnStartInitialMs", "turnStartMs"], targetTimings);
+              } catch (err) {
+                if (!turnStartRequiresThreadResume(err)) {
+                  targetTimings.turnStartMs = Math.max(0, Date.now() - turnStartTotalStartedAtMs);
+                  throw err;
+                }
+                targetTimings.turnStartResumeFallback = true;
+                targetTimings.turnStartResumeFallbackReason = "thread-resume-required";
+                targetTimings.threadResumeSkipped = false;
+                await resumeThreadBeforeTurnStart(targetTimings);
+                turnResult = await startTurn("turnStartRetryMs", targetTimings);
+                targetTimings.turnStartMs = Math.max(0, Date.now() - turnStartTotalStartedAtMs);
+              }
+            }
+            const notifyStartedAtMs = Date.now();
+            const immediateTurnId = turnStartResultTurnId(turnResult);
+            if (immediateTurnId) {
+              rememberThreadIdForTurnId(threadId, immediateTurnId);
+              pendingSteerEchoStore.remember({
+                threadId,
+                turnId: immediateTurnId,
+                input,
+                clientSubmissionId: body.clientSubmissionId,
+              });
+              targetTimings.notifyLocalTurnStartedQueued = true;
+              markSubmitTimingAliases(targetTimings, ["notifyLocalTurnStartedMs", "notifyMs"], notifyStartedAtMs);
+              scheduleBackgroundTask(async () => {
+                const backgroundTimings = {};
+                const backgroundStartedAtMs = Date.now();
+                try {
+                  const notifiedTurnId = notifyLocalTurnStarted(threadId, turnResult, { source: "message-submit" });
+                  markSubmitTimingAliases(backgroundTimings, ["notifyLocalTurnStartedMs", "notifyMs"], backgroundStartedAtMs);
+                  if (notifiedTurnId) rememberThreadIdForTurnId(threadId, notifiedTurnId);
+                  logMessageSubmit("notify-done", {
+                    threadId,
+                    turnId: notifiedTurnId || immediateTurnId,
+                    clientSubmissionId: body.clientSubmissionId,
+                    timings: backgroundTimings,
+                  });
+                } catch (err) {
+                  markSubmitTimingAliases(backgroundTimings, ["notifyLocalTurnStartedMs", "notifyMs"], backgroundStartedAtMs);
+                  logMessageSubmit("notify-failed", {
+                    threadId,
+                    turnId: immediateTurnId,
+                    clientSubmissionId: body.clientSubmissionId,
+                    error: err.message || String(err),
+                    timings: backgroundTimings,
+                  });
+                }
+              });
+            } else {
+              rememberThreadIdForTurnId(threadId, notifyLocalTurnStarted(threadId, turnResult, { source: "message-submit" }));
+              markSubmitTimingAliases(targetTimings, ["notifyLocalTurnStartedMs", "notifyMs"], notifyStartedAtMs);
+            }
+            return turnResult;
+          };
+          if (body.activeTurnId && !skipTurnSteer) {
+            let pendingSteerEchoKey = "";
+            const activeTurnId = String(body.activeTurnId);
+            const rememberPendingSteerEcho = () => {
+              if (pendingSteerEchoKey) return pendingSteerEchoKey;
+              pendingSteerEchoKey = pendingSteerEchoStore.remember({
+                threadId,
+                turnId: activeTurnId,
+                input,
+                clientSubmissionId: body.clientSubmissionId,
+              });
+              return pendingSteerEchoKey;
+            };
+            const notifySteeredUserMessage = () => {
+              codex.notifyMuxUserMessage({
+                threadId,
+                turnId: activeTurnId,
+                input,
+                clientSubmissionId: body.clientSubmissionId,
+              });
+            };
+            const startSteerRequest = () => {
+              rememberPendingSteerEcho();
+              const steerStartedAtMs = Date.now();
+              return codex.request("turn/steer", {
+                threadId,
+                input,
+                expectedTurnId: activeTurnId,
+              }, { timeoutMs: mutationRpcTimeoutMs, retry: false })
+                .then((steerResult) => ({
+                  ok: true,
+                  result: steerResult,
+                  elapsedMs: Math.max(0, Date.now() - steerStartedAtMs),
+                }))
+                .catch((err) => ({
+                  ok: false,
+                  error: err,
+                  elapsedMs: Math.max(0, Date.now() - steerStartedAtMs),
+                }));
+            };
+            const handleSteerOutcome = async (outcome, options = {}) => {
+              const background = options.background === true;
+              const targetTimings = options.timings || timings;
+              targetTimings.steerMs = Math.max(0, Number(outcome && outcome.elapsedMs) || 0);
+              if (outcome && outcome.ok) {
+                notifySteeredUserMessage();
+                if (background) {
+                  targetTimings.totalMs = targetTimings.steerMs;
+                  logMessageSubmit("steer-background-done", {
+                    threadId,
+                    turnId: activeTurnId,
+                    clientSubmissionId: body.clientSubmissionId,
+                    timings: targetTimings,
+                  });
+                }
+                return { handled: true, result: outcome.result || {} };
+              }
+              const err = outcome && outcome.error;
+              if (isTurnSteerUnsupportedError(err)) {
+                notifySteeredUserMessage();
+                if (background) {
+                  logMessageSubmit("steer-background-unsupported", {
+                    threadId,
+                    turnId: activeTurnId,
+                    clientSubmissionId: body.clientSubmissionId,
+                    timings: targetTimings,
+                  });
+                }
+                return { handled: true, result: {} };
+              }
+              if (!isStaleActiveTurnError(err)) throw err;
+              if (!background && pendingSteerEchoKey) pendingSteerEchoStore.forget(pendingSteerEchoKey);
+              logMessageSubmit(background ? "active-turn-stale-background" : "active-turn-stale", {
+                threadId,
+                turnId: activeTurnId,
+                clientSubmissionId: body.clientSubmissionId,
+                error: err.message || String(err),
+                timings: targetTimings,
+              });
+              return { handled: false, error: err };
+            };
+            const steerPromise = startSteerRequest();
+            const fastAcceptMs = Math.max(0, Number(activeTurnSteerFastAcceptMs) || 0);
+            const firstSteerOutcome = await Promise.race([
+              steerPromise,
+              resolveAfter(fastAcceptMs, { pending: true }),
+            ]);
+            if (firstSteerOutcome && firstSteerOutcome.pending) {
+              timings.steerQueued = true;
+              timings.steerFastAcceptMs = Math.max(0, Date.now() - routeStartedAtMs);
+              timings.steerMs = Math.max(0, Number(fastAcceptMs) || 0);
+              scheduleBackgroundTask(async () => {
+                const backgroundTimings = {};
+                try {
+                  const backgroundOutcome = await steerPromise;
+                  const handled = await handleSteerOutcome(backgroundOutcome, {
+                    background: true,
+                    timings: backgroundTimings,
+                  });
+                  if (!handled.handled) {
+                    backgroundTimings.staleFallback = true;
+                    const fallbackStartedAtMs = Date.now();
+                    const fallbackResult = await startReplacementTurn(backgroundTimings);
+                    backgroundTimings.staleFallbackMs = Math.max(0, Date.now() - fallbackStartedAtMs);
+                    backgroundTimings.totalMs = Number(backgroundTimings.steerMs || 0)
+                      + Number(backgroundTimings.staleFallbackMs || 0);
+                    logMessageSubmit("steer-background-stale-fallback-done", {
+                      threadId,
+                      staleTurnId: activeTurnId,
+                      clientSubmissionId: body.clientSubmissionId,
+                      resultTurnId: fallbackResult && (fallbackResult.turnId || fallbackResult.id || fallbackResult.turn && fallbackResult.turn.id || ""),
+                      timings: backgroundTimings,
+                    });
+                  }
+                } catch (err) {
+                  if (pendingSteerEchoKey) pendingSteerEchoStore.forget(pendingSteerEchoKey);
+                  logMessageSubmit("steer-background-failed", {
+                    threadId,
+                    turnId: activeTurnId,
+                    clientSubmissionId: body.clientSubmissionId,
+                    error: err.message || String(err),
+                    timings: backgroundTimings,
+                  });
+                }
+              });
+              logMessageSubmit("steer-queued", {
+                threadId,
+                turnId: activeTurnId,
+                clientSubmissionId: body.clientSubmissionId,
+                timings,
+              });
+              return {
+                ok: true,
+                turnId: activeTurnId,
+                activeTurnId,
+                steeringQueued: true,
+              };
+            }
+            const handledSteer = await handleSteerOutcome(firstSteerOutcome);
+            if (handledSteer.handled) {
+              return handledSteer.result;
+            }
+          }
+          return await startReplacementTurn(timings);
         });
+        markSubmitTiming(timings, "dedupeWaitMs", dedupeStartedAtMs);
+        timings.totalMs = Math.max(0, Date.now() - routeStartedAtMs);
+        if (secretContext) {
+          result = Object.assign({}, result || {}, {
+            sensitiveContext: publicSensitiveContext(secretContext),
+          });
+        }
+        timedSendJson(200, result);
         logMessageSubmit("done", {
           threadId,
           clientSubmissionId: body.clientSubmissionId,
           resultTurnId: result && (result.turnId || result.id || result.turn && result.turn.id || ""),
+          timings,
         });
       } catch (err) {
+        timings.totalMs = Math.max(0, Date.now() - routeStartedAtMs);
         logMessageSubmit("failed", {
           threadId,
           clientSubmissionId: body.clientSubmissionId,
           error: err.message || String(err),
+          timings,
         });
         if (isCodexAccountAuthError(err)) {
-          sendJson(409, codexAccountAuthErrorPayload(err));
+          timedSendJson(409, codexAccountAuthErrorPayload(err));
           return { handled: true };
         }
         throw err;
       }
-      if (secretContext) {
-        result = Object.assign({}, result || {}, {
-          sensitiveContext: publicSensitiveContext(secretContext),
-        });
-      }
-      sendJson(200, result);
       return { handled: true };
     }
 
@@ -384,4 +746,8 @@ function createThreadMessageRouteService(dependencies = {}) {
   return { handleRoute };
 }
 
-module.exports = { createThreadMessageRouteService };
+module.exports = {
+  createThreadMessageRouteService,
+  isThreadResumeAlreadyLoadedError,
+  turnStartRequiresThreadResume,
+};

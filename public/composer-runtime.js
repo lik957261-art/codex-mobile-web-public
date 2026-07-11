@@ -31,6 +31,7 @@ function createComposerRuntime(deps = {}) {
     diagnosticErrorStatus,
     diagnosticTaskHash,
     diagnosticThreadHash,
+    diagnosticTurnHash,
     document,
     draftKeyForThread,
     effectiveComposerPermissionMode,
@@ -68,6 +69,7 @@ function createComposerRuntime(deps = {}) {
     publishPluginVoiceInputCapability,
     reconcileSubmittedUserMessageTurn,
     recordHomeAiDiagnosticFailure,
+    recordSubmittedEchoDiagnosticLog,
     renderCurrentThread,
     renderQuotaUsage,
     renderThreads,
@@ -79,8 +81,10 @@ function createComposerRuntime(deps = {}) {
     scheduleCurrentDraftSave,
     scheduleCurrentThreadRefresh,
     scheduleLivePollIfNeeded,
+    schedulePostCompletionThreadRefreshes,
     scheduleScrollToBottomButtonUpdate,
     scheduleSubmittedMessageDomProbe,
+    scheduleUsageBackfillRefresh,
     selectedQuotaModel,
     setComposerActionButtonLabel,
     setSteerFeedback,
@@ -326,6 +330,70 @@ function normalizedComposerIntentText(value) {
     .trim();
 }
 
+function isAtLoopCommandText(value) {
+  const text = normalizedComposerIntentText(value);
+  return /^@loop(?:\s|$)/i.test(text)
+    || /^@[a-z0-9][a-z0-9_-]*\s+@loop(?:\s|$)/i.test(text);
+}
+
+function atLoopCommandObjectiveText(value) {
+  const text = normalizedComposerIntentText(value);
+  if (/^@loop(?:\s|$)/i.test(text)) {
+    return text.replace(/^@loop(?:\s+|$)/i, "").trim();
+  }
+  const aliasMatch = text.match(/^@[a-z0-9][a-z0-9_-]*\s+@loop(?:\s+|$)([\s\S]*)$/i);
+  return aliasMatch ? String(aliasMatch[1] || "").trim() : "";
+}
+
+function atLoopPacketSectionLabel(sectionId) {
+  const id = String(sectionId || "").trim();
+  if (id === "requirements_packet") return "需求包";
+  if (id === "design_contract_packet") return "设计契约包";
+  if (id === "implementation_packet") return "实现包";
+  if (id === "validation_packet") return "验证包";
+  if (id === "privacy_packet") return "隐私包";
+  return id;
+}
+
+function atLoopRequestClientOutcome(result) {
+  const loop = result && result.loop && typeof result.loop === "object" ? result.loop : {};
+  const sourceRequirementsStatus = loop.sourceRequirementsStatus && typeof loop.sourceRequirementsStatus === "object"
+    ? loop.sourceRequirementsStatus
+    : {};
+  const loopId = String(loop.loopId || "");
+  const loopStatus = String(loop.status || "");
+  const nextRoute = String(loop.nextRoute || "");
+  const missingSections = Array.isArray(sourceRequirementsStatus.missingSections)
+    ? sourceRequirementsStatus.missingSections.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 6)
+    : [];
+  const waitingSourceRequirements = Boolean(sourceRequirementsStatus.pending)
+    || loopStatus === "waiting_source_requirements"
+    || nextRoute === "source_requirements_pending";
+  if (waitingSourceRequirements) {
+    const missingText = missingSections.map(atLoopPacketSectionLabel).filter(Boolean).join("、");
+    return {
+      loopId,
+      waitingSourceRequirements: true,
+      loopStatus: loopStatus || "waiting_source_requirements",
+      nextRoute: nextRoute || "source_requirements_pending",
+      missingSections,
+      statusText: missingText
+        ? `Loop 等待主线程需求分析：${missingText}`
+        : "Loop 等待主线程需求分析",
+      activityText: "Loop 等待需求分析",
+    };
+  }
+  return {
+    loopId,
+    waitingSourceRequirements: false,
+    loopStatus,
+    nextRoute,
+    missingSections,
+    statusText: loopId ? `Loop 已启动：${loopId.slice(0, 12)}` : "Loop 已启动",
+    activityText: "Loop 已启动",
+  };
+}
+
 function composerIntentOptions() {
   return [
     {
@@ -339,26 +407,6 @@ function composerIntentOptions() {
       submitLabel: "打开目标",
     },
     {
-      kind: "task-card",
-      tag: "@任务卡片",
-      label: "任务卡片",
-      detail: "发给其他线程，目标侧审批后执行",
-      title: "任务卡片",
-      subtitle: "输入要交给其他线程处理的完整需求；提交后会先生成待审批任务卡片。",
-      placeholder: "写清目标线程、任务背景、期望输出和约束。",
-      submitLabel: "创建任务卡片",
-    },
-    {
-      kind: "task-card-auto",
-      tag: "@自由协作",
-      label: "自由协作",
-      detail: "任务卡片自动回传后续结果",
-      title: "自由协作",
-      subtitle: "输入跨线程协作需求；目标线程首次审批后，后续同源回传可自动继续。",
-      placeholder: "写清协作对象、需要对方完成的步骤，以及完成后回传什么。",
-      submitLabel: "创建协作卡片",
-    },
-    {
       kind: "chatgpt-pro",
       tag: "@ChatGPT Pro",
       label: "ChatGPT Pro",
@@ -367,6 +415,16 @@ function composerIntentOptions() {
       subtitle: "输入要交给 ChatGPT Pro 分析的问题；内容不会进入当前工作线程。",
       placeholder: "写清要分析的代码、方案、风险或决策问题。",
       submitLabel: "提交 Pro 分析",
+    },
+    {
+      kind: "loop",
+      tag: "@loop",
+      label: "Loop",
+      detail: "启动当前线程交付循环",
+      title: "Loop",
+      subtitle: "输入要循环推进的目标；提交后会创建第一张角色任务卡片。",
+      placeholder: "写清目标、约束和验收标准。",
+      submitLabel: "启动 Loop",
     },
   ];
 }
@@ -428,10 +486,9 @@ function saveComposerIntentDraft(kind, value) {
 function composerIntentBareTagKind(value) {
   const text = normalizedComposerIntentText(value);
   if (!text || text === "@") return "";
+  if (/^@loop$/i.test(text)) return "loop";
   if (THREAD_GOAL_MENTION_PATTERN.test(text)) return "goal";
   if (/^@(?:ChatGPT\s+Pro|ChatGPTPro|GPT\s+Pro)$/i.test(text)) return "chatgpt-pro";
-  if (THREAD_TASK_CARD_AUTONOMOUS_MENTION_PATTERN.test(text) && !threadTaskCardCommandText(text)) return "task-card-auto";
-  if (THREAD_TASK_CARD_MENTION_PATTERN.test(text) && !threadTaskCardCommandText(text)) return "task-card";
   return "";
 }
 
@@ -496,13 +553,39 @@ function queueComposerIntentMenuUpdate() {
   window.setTimeout(updateComposerIntentMenu, 0);
 }
 
-function selectComposerIntent(kind) {
+function openSelectedComposerIntentDialog(kind, options = {}) {
+  const option = composerIntentOption(kind);
+  if (!option) return false;
+  if (kind === "goal") {
+    if (state.newThreadDraft) {
+      showError(new Error(`${option.label} is only available in an existing thread`));
+      return false;
+    }
+    if (state.pendingAttachments.length) {
+      showError(new Error("Goal commands do not support attachments"));
+      return false;
+    }
+    const targetThreadId = currentComposerThreadId();
+    if (!targetThreadId || typeof openThreadGoalDialog !== "function") {
+      showError(new Error("No thread is selected"));
+      return false;
+    }
+    setComposerText("");
+    scheduleCurrentDraftSave();
+    openThreadGoalDialog(targetThreadId);
+    return true;
+  }
+  return openComposerIntentDialog(kind, options);
+}
+
+function selectComposerIntent(kind, options = {}) {
   const option = composerIntentOption(kind);
   if (!option) return;
   setComposerText(option.tag);
   closeComposerIntentMenu();
   updateComposerControls();
   scheduleCurrentDraftSave();
+  if (options.openDialog === true && openSelectedComposerIntentDialog(kind, options)) return;
   const input = $("messageInput");
   if (input) input.focus();
 }
@@ -579,14 +662,22 @@ async function submitComposerIntentDialog(event) {
   setComposerIntentDialogStatus("提交中…");
   updateComposerControls();
   try {
+    let intentResult = null;
     if (kind === "chatgpt-pro") {
       await submitChatGptProRequest(`${option.tag} ${body}`, { rethrow: true });
+    } else if (kind === "loop") {
+      intentResult = await submitAtLoopRequest(`${option.tag} ${body}`, { rethrow: true });
     } else if (kind === "task-card" || kind === "task-card-auto") {
       await sendThreadTaskCardCommand(`${option.tag} ${body}`, { rethrow: true });
     }
     saveComposerIntentDraft(kind, "");
     setComposerText("");
     scheduleCurrentDraftSave();
+    if (kind === "loop" && intentResult && intentResult.waitingSourceRequirements) {
+      if (input) input.value = "";
+      setComposerIntentDialogStatus(intentResult.statusText);
+      return;
+    }
     closeComposerIntentDialog();
   } catch (err) {
     setComposerIntentDialogStatus(normalizeClientErrorMessage(err && err.message ? err.message : String(err), err), true);
@@ -1110,6 +1201,7 @@ function closeQuotaDetails() {
   const quota = $("quotaUsage");
   if (quota) quota.setAttribute("aria-expanded", "false");
   document.removeEventListener("pointerdown", onQuotaOutsidePointer);
+  return true;
 }
 
 function onQuotaOutsidePointer(event) {
@@ -1132,6 +1224,7 @@ function toggleQuotaDetails(anchor) {
   } else {
     document.removeEventListener("pointerdown", onQuotaOutsidePointer);
   }
+  return Boolean(panel);
 }
 
 function composerPlaceholderText() {
@@ -1139,7 +1232,7 @@ function composerPlaceholderText() {
   const targetThread = composerTargetThread();
   return threadTileStatePolicy.composerTargetPlaceholderPlan({
     newThreadDraft: state.newThreadDraft,
-    tileContext: isThreadTileComposerContext(),
+    tileContext: false,
     targetThreadId,
     hasTargetThread: Boolean(targetThread),
     targetTitle: targetThread ? threadDisplayName(targetThread) : "",
@@ -1153,10 +1246,60 @@ function composerShowsTargetPlaceholder() {
   const targetThread = composerTargetThread();
   return threadTileStatePolicy.composerTargetPlaceholderPlan({
     newThreadDraft: state.newThreadDraft,
-    tileContext: isThreadTileComposerContext(),
+    tileContext: false,
     targetThreadId,
     hasTargetThread: Boolean(targetThread),
   }).showTargetPlaceholder === true;
+}
+
+function applyThreadIdentityColorVariables(el, cssVariables = {}) {
+  if (!el || !el.style) return;
+  const names = Array.isArray(threadTileStatePolicy.THREAD_IDENTITY_CSS_VARIABLE_NAMES)
+    ? threadTileStatePolicy.THREAD_IDENTITY_CSS_VARIABLE_NAMES
+    : [];
+  for (const name of names) {
+    if (Object.prototype.hasOwnProperty.call(cssVariables, name)) {
+      el.style.setProperty(name, cssVariables[name]);
+    } else {
+      el.style.removeProperty(name);
+    }
+  }
+}
+
+function renderComposerTargetIndicator() {
+  const composer = $("composer");
+  const indicator = $("composerTargetIndicator");
+  const labelEl = $("composerTargetLabel");
+  const titleEl = $("composerTargetTitle");
+  if (!indicator || !labelEl || !titleEl) {
+    if (composer) composer.classList.remove("has-target-indicator");
+    applyThreadIdentityColorVariables(composer, {});
+    return;
+  }
+  const targetThreadId = currentComposerThreadId();
+  const targetThread = composerTargetThread();
+  const plan = threadTileStatePolicy.composerTargetIndicatorPlan({
+    newThreadDraft: state.newThreadDraft,
+    tileContext: isThreadTileComposerContext(),
+    targetThreadId,
+    hasTargetThread: Boolean(targetThread),
+    targetTitle: targetThread ? threadDisplayName(targetThread) : "",
+    visibleIds: state.threadTileActiveIds,
+  });
+  const visible = plan.showTargetIndicator === true;
+  indicator.hidden = !visible;
+  indicator.classList.toggle("visible", visible);
+  if (composer) composer.classList.toggle("has-target-indicator", visible);
+  applyThreadIdentityColorVariables(composer, visible ? plan.cssVariables : {});
+  labelEl.textContent = plan.label || "发送到";
+  titleEl.textContent = plan.text || "";
+  if (visible) {
+    indicator.title = plan.title || "";
+    indicator.setAttribute("aria-label", plan.ariaLabel || plan.title || "");
+  } else {
+    indicator.removeAttribute("title");
+    indicator.removeAttribute("aria-label");
+  }
 }
 
 function applyComposerActionControlPlan(sendButton, plan) {
@@ -1251,6 +1394,7 @@ function updateComposerControls() {
     messageInput.dataset.placeholder = composerPlaceholderText();
     messageInput.classList.toggle("has-target-placeholder", composerShowsTargetPlaceholder());
   }
+  renderComposerTargetIndicator();
   setMessageInputDisabled(disabled);
   $("fileInput").disabled = disabled;
   attachButton.disabled = disabled;
@@ -1581,6 +1725,91 @@ async function sendThreadTaskCardCommand(commandText, options = {}) {
   }
 }
 
+async function submitAtLoopRequest(commandText, options = {}) {
+  const text = String(commandText || "").trim();
+  const objective = atLoopCommandObjectiveText(text);
+  const targetThreadId = currentComposerThreadId();
+  const targetThread = composerTargetThread();
+  if (!text) return false;
+  if (!isAtLoopCommandText(text) || !objective) {
+    const err = new Error("Loop objective is required");
+    showError(err);
+    if (options.rethrow) throw err;
+    return false;
+  }
+  if (state.newThreadDraft || !targetThreadId) {
+    const err = new Error("Loop is only available in an existing thread");
+    showError(err);
+    if (options.rethrow) throw err;
+    return false;
+  }
+  if (state.pendingAttachments.length) {
+    const err = new Error("@loop does not support attachments in this entry point");
+    showError(err);
+    if (options.rethrow) throw err;
+    return false;
+  }
+
+  state.composerBusy = true;
+  state.sendButtonHint = "";
+  $("connectionState").classList.remove("error");
+  $("connectionState").textContent = "正在启动 Loop";
+  markActivity("Loop");
+  updateComposerControls();
+  try {
+    postClientEvent("at_loop_request_start", { threadId: targetThreadId });
+    const result = await api("/api/at-loop/triggers", {
+      method: "POST",
+      body: JSON.stringify({
+        sourceThreadId: targetThreadId,
+        sourceThreadTitle: targetThread ? threadDisplayName(targetThread) : "",
+        cwd: targetThread && targetThread.cwd || "",
+        text,
+      }),
+      timeoutMs: 60000,
+    });
+    if (result && result.ok === false) {
+      throw new Error(result.error || "at_loop_start_failed");
+    }
+    const outcome = atLoopRequestClientOutcome(result);
+    const loopId = outcome.loopId;
+    setComposerText("");
+    clearPendingAttachments();
+    scheduleCurrentDraftSave();
+    $("connectionState").classList.remove("error");
+    $("connectionState").textContent = outcome.statusText;
+    markActivity(outcome.activityText);
+    postClientEvent("at_loop_request_success", {
+      threadId: targetThreadId,
+      loopId: loopId ? loopId.slice(0, 24) : "",
+      duplicateSuppressed: Boolean(result && result.duplicateSuppressed),
+      waitingSourceRequirements: outcome.waitingSourceRequirements,
+      loopStatus: outcome.loopStatus,
+      nextRoute: outcome.nextRoute,
+      missingSections: outcome.missingSections,
+    });
+    scheduleComposerTargetRefresh(targetThreadId, 700, "at-loop-submit");
+    scheduleLivePollIfNeeded(1200);
+    loadThreads({ silent: true }).catch(showError);
+    return outcome;
+  } catch (err) {
+    const message = normalizeClientErrorMessage(err && err.message ? err.message : String(err), err)
+      || "Loop 启动失败";
+    $("connectionState").classList.add("error");
+    $("connectionState").textContent = message;
+    postClientEvent("at_loop_request_failure", {
+      threadId: targetThreadId,
+      message,
+    });
+    showError(new Error(message));
+    if (options.rethrow) throw new Error(message);
+    return false;
+  } finally {
+    state.composerBusy = false;
+    updateComposerControls();
+  }
+}
+
 async function sendMessage(event) {
   if (event && typeof event.preventDefault === "function") event.preventDefault();
   if (state.composerBusy) return;
@@ -1621,6 +1850,10 @@ async function sendMessage(event) {
     await submitChatGptProRequest(text);
     return;
   }
+  if (isAtLoopCommandText(text)) {
+    await submitAtLoopRequest(text);
+    return;
+  }
   if (state.newThreadDraft) {
     await sendNewThreadMessage(text, hasContent, input);
     return;
@@ -1646,6 +1879,18 @@ async function sendMessage(event) {
   const clientSubmissionId = createSubmissionId();
   const submittedAttachments = state.pendingAttachments.slice();
   const previousThreadStatus = snapshotThreadStatus(targetThreadId);
+  if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+    recordSubmittedEchoDiagnosticLog("submit-start", {
+      threadId: targetThreadId,
+      clientSubmissionId,
+      activeTurnHash: diagnosticTurnHash(targetActiveTurnId),
+      steering,
+      hasText: Boolean(outboundText),
+      textLength: String(outboundText || "").length,
+      attachmentCount: submittedAttachments.length,
+      composerBusyBeforeSet: state.composerBusy,
+    });
+  }
   state.composerBusy = true;
   state.sendButtonHint = "";
   startSendProgressWatchdog(targetThreadId);
@@ -1673,11 +1918,29 @@ async function sendMessage(event) {
     const insertedLocalMessage = insertLocalSubmittedUserMessage(targetThreadId, outboundText, submittedAttachments, clientSubmissionId, {
       turnId: steering ? steerTurnId : "",
     });
+    if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+      recordSubmittedEchoDiagnosticLog("local-insert-result", {
+        threadId: targetThreadId,
+        clientSubmissionId,
+        insertedLocalMessage,
+        steering,
+      });
+    }
     if (!steering) {
       markThreadOptimisticallyActive(targetThreadId);
       renderThreads();
     }
-    if (insertedLocalMessage) renderCurrentThread({ stickToBottom: true });
+    if (insertedLocalMessage) {
+      renderCurrentThread({ stickToBottom: true });
+      if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+        recordSubmittedEchoDiagnosticLog("local-rendered", {
+          threadId: targetThreadId,
+          clientSubmissionId,
+          insertedLocalMessage,
+          steering,
+        });
+      }
+    }
     scheduleSubmittedMessageDomProbe(targetThreadId, clientSubmissionId, steering ? "message-steer" : "message-submit");
     followSubmittedMessageToBottom(targetThreadId, clientSubmissionId);
     const result = await api(`/api/threads/${encodeURIComponent(targetThreadId)}/messages`, {
@@ -1686,8 +1949,37 @@ async function sendMessage(event) {
       timeoutMs: 180000,
     });
     const serverTurnId = startedTurnId(result);
-    if (!steering && serverTurnId && reconcileSubmittedUserMessageTurn(targetThreadId, clientSubmissionId, serverTurnId)) {
+    if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+      recordSubmittedEchoDiagnosticLog("post-response", {
+        threadId: targetThreadId,
+        clientSubmissionId,
+        serverTurnHash: diagnosticTurnHash(serverTurnId),
+        steering,
+        resultKeys: result && typeof result === "object" ? Object.keys(result).sort().slice(0, 20) : [],
+        steeringQueued: Boolean(result && result.steeringQueued),
+      });
+    }
+    const reconciledSubmittedUserMessage = serverTurnId
+      && reconcileSubmittedUserMessageTurn(targetThreadId, clientSubmissionId, serverTurnId);
+    if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+      recordSubmittedEchoDiagnosticLog("post-reconcile-result", {
+        threadId: targetThreadId,
+        clientSubmissionId,
+        serverTurnHash: diagnosticTurnHash(serverTurnId),
+        steering,
+        reconciled: Boolean(reconciledSubmittedUserMessage),
+      });
+    }
+    if (reconciledSubmittedUserMessage) {
       renderCurrentThread({ stickToBottom: true });
+      if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+        recordSubmittedEchoDiagnosticLog("post-reconcile-rendered", {
+          threadId: targetThreadId,
+          clientSubmissionId,
+          serverTurnHash: diagnosticTurnHash(serverTurnId),
+          steering,
+        });
+      }
     }
     commitPluginVoiceInputSessionsAfterSend(submittedDraftKey, text, {
       threadId: targetThreadId,
@@ -1702,12 +1994,21 @@ async function sendMessage(event) {
     }
     input.blur();
     $("connectionState").classList.remove("error");
-    if (steering) setSteerFeedback("delivered", { threadId: targetThreadId, turnId: steerTurnId, clientSubmissionId });
+    if (steering) {
+      const steerStatus = result && result.steeringQueued ? "queued" : "delivered";
+      setSteerFeedback(steerStatus, { threadId: targetThreadId, turnId: steerTurnId, clientSubmissionId });
+    }
     else {
       $("connectionState").textContent = "Sent";
       markActivity("已发送");
     }
-    scheduleComposerTargetRefresh(targetThreadId, 600, "message-submit");
+    scheduleComposerTargetRefresh(targetThreadId, 250, "message-submit");
+    if (typeof schedulePostCompletionThreadRefreshes === "function") {
+      schedulePostCompletionThreadRefreshes(targetThreadId, [350, 750, 1200, 2400, 5200]);
+    }
+    if (typeof scheduleUsageBackfillRefresh === "function" && state.currentThreadId === targetThreadId) {
+      scheduleUsageBackfillRefresh(750, { force: true });
+    }
     scheduleLivePollIfNeeded(1200);
     loadThreads({ silent: true }).catch(showError);
   } catch (err) {
@@ -1730,10 +2031,27 @@ async function sendMessage(event) {
       message,
       steering,
     });
+    if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+      recordSubmittedEchoDiagnosticLog("send-error", {
+        threadId: targetThreadId,
+        clientSubmissionId,
+        steering,
+        errorCode: diagnosticErrorCode(err, "send_failed"),
+        statusCode: diagnosticErrorStatus(err),
+      });
+    }
   } finally {
     finishSendProgressWatchdog();
     state.composerBusy = false;
     updateComposerControls();
+    if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+      recordSubmittedEchoDiagnosticLog("send-finally", {
+        threadId: targetThreadId,
+        clientSubmissionId,
+        steering,
+        composerBusy: state.composerBusy,
+      });
+    }
   }
 }
 
@@ -1867,13 +2185,16 @@ function requestComposerSubmitFromButton(event) {
   state.lastSendButtonSubmitAt = now;
   const button = $("sendMessage");
   if (!button || button.disabled || state.composerBusy) return;
-  const composerForm = $("composer");
   try {
-    if (composerForm && typeof composerForm.requestSubmit === "function") {
-      composerForm.requestSubmit();
-    } else {
-      sendMessage(event);
-    }
+    sendMessage(event).catch((err) => {
+      postClientEvent("send_button_submit_exception", {
+        activeElement: document.activeElement ? document.activeElement.id || document.activeElement.tagName || "" : "",
+        hasContent: composerHasContent(),
+        buttonDisabled: button.disabled,
+        error: String(err && err.message || ""),
+      });
+      showError(err);
+    });
   } catch (err) {
     postClientEvent("send_button_submit_exception", {
       activeElement: document.activeElement ? document.activeElement.id || document.activeElement.tagName || "" : "",
@@ -1956,6 +2277,7 @@ async function interruptActiveTurn(threadId = currentComposerThreadId(), activeT
     loadComposerIntentDraft,
     saveComposerIntentDraft,
     composerIntentBareTagKind,
+    atLoopRequestClientOutcome,
     shouldShowComposerIntentMenu,
     closeComposerIntentMenu,
     onComposerIntentOutsidePointer,
@@ -2028,6 +2350,7 @@ async function interruptActiveTurn(threadId = currentComposerThreadId(), activeT
     requestGoalDialogSubmitFromButton,
     requestGoalDialogSubmit,
     sendThreadTaskCardCommand,
+    submitAtLoopRequest,
     sendMessage,
     sendNewThreadMessage,
     requestComposerSubmitFromButton,

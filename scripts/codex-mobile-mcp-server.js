@@ -9,6 +9,12 @@ const {
   normalizeSecretRefsFromInput,
   publicSensitiveContext,
 } = require("../services/runtime/home-ai-secret-ref-service");
+const {
+  createRemoteManagedWorkspaceControlBootstrapService,
+  createRemoteManagedWorkspaceControlClientService,
+  defaultControlCredentialFile,
+  defaultControlStateFile,
+} = require("../services/remote-managed-workspaces/remote-managed-workspace-control-client-service");
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "codex_mobile";
@@ -17,12 +23,23 @@ function parseArgs(argv = process.argv.slice(2)) {
   const out = {
     server: process.env.CODEX_MOBILE_BASE_URL || "http://127.0.0.1:8787",
     keyFile: process.env.CODEX_MOBILE_KEY_FILE || path.join(os.homedir(), ".codex-mobile-web", "access_key"),
+    rmwControlUrl: process.env.CODEX_MOBILE_RMW_CONTROL_URL || process.env.HOME_AI_RMW_CONTROL_URL || "http://127.0.0.1:8797",
+    rmwControlTokenFile: process.env.CODEX_MOBILE_RMW_CONTROL_CREDENTIAL_FILE
+      || process.env.CODEX_MOBILE_RMW_CONTROL_TOKEN_FILE
+      || process.env.HOME_AI_RMW_CONTROL_TOKEN_FILE
+      || defaultControlCredentialFile(),
+    rmwControlStateFile: process.env.CODEX_MOBILE_RMW_CONTROL_STATE_FILE || defaultControlStateFile(),
+    rmwControlToken: process.env.CODEX_MOBILE_RMW_CONTROL_TOKEN || process.env.HOME_AI_RMW_CONTROL_TOKEN || "",
     selfTestToolsList: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--server") out.server = argv[++index] || "";
     else if (arg === "--key-file") out.keyFile = argv[++index] || "";
+    else if (arg === "--rmw-control-url") out.rmwControlUrl = argv[++index] || "";
+    else if (arg === "--rmw-control-token-file") out.rmwControlTokenFile = argv[++index] || "";
+    else if (arg === "--rmw-control-credential-file") out.rmwControlTokenFile = argv[++index] || "";
+    else if (arg === "--rmw-control-state-file") out.rmwControlStateFile = argv[++index] || "";
     else if (arg === "--self-test-tools-list" || arg === "--list-tools") out.selfTestToolsList = true;
     else if (arg === "--help" || arg === "-h") {
       printHelp();
@@ -41,6 +58,13 @@ function printHelp() {
     "Options:",
     "  --server <url>             Codex Mobile server. Default: http://127.0.0.1:8787",
     "  --key-file <path>          Access key file. Default: $HOME/.codex-mobile-web/access_key",
+    "  --rmw-control-url <url>    Home AI RMW control base URL. Default: http://127.0.0.1:8797",
+    "  --rmw-control-credential-file <path>",
+    "                             Scoped RMW control credential file. Token is never printed.",
+    "  --rmw-control-token-file <path>",
+    "                             Backward-compatible alias for --rmw-control-credential-file.",
+    "  --rmw-control-state-file <path>",
+    "                             Non-secret RMW control client pairing state file.",
     "  --self-test-tools-list     Print bounded tool names and exit.",
   ].join("\n") + "\n");
 }
@@ -63,10 +87,28 @@ function readAccessKey(file) {
   return key;
 }
 
+function readOptionalSecret(file) {
+  const target = String(file || "").trim();
+  if (!target) return "";
+  try {
+    return fs.readFileSync(target, "utf8").trim();
+  } catch (_) {
+    return "";
+  }
+}
+
 function createContext(args = {}) {
   return {
     server: normalizeBaseUrl(args.server),
     key: readAccessKey(args.keyFile),
+    rmwControlUrl: args.rmwControlUrl ? normalizeBaseUrl(args.rmwControlUrl) : "",
+    rmwControlToken: String(args.rmwControlToken || readOptionalSecret(args.rmwControlTokenFile) || "").trim(),
+    rmwControlBootstrap: createRemoteManagedWorkspaceControlBootstrapService({
+      centralUrl: args.rmwControlUrl,
+      credentialFile: args.rmwControlTokenFile,
+      stateFile: args.rmwControlStateFile,
+    }),
+    rmwControlClient: createRemoteManagedWorkspaceControlClientService(),
   };
 }
 
@@ -105,6 +147,8 @@ function toolsList() {
         required: ["sourceThreadId", "title", "bodyMarkdown"],
         properties: {
           sourceThreadId: { type: "string", minLength: 1, maxLength: 120 },
+          sourceWorkspaceId: { type: "string", maxLength: 1000 },
+          sourceWorkspace: { type: "string", maxLength: 1000 },
           targetThreadId: { type: "string", maxLength: 220 },
           targetThreadIds: {
             type: "array",
@@ -150,15 +194,84 @@ function toolsList() {
       { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false },
     ),
     tool(
+      "start_loop",
+      "Start a bounded Codex Mobile @loop runtime and dispatch the first role task card through the existing task-card channel.",
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["sourceThreadId", "objective"],
+        properties: {
+          sourceThreadId: { type: "string", minLength: 1, maxLength: 120 },
+          objective: { type: "string", minLength: 1, maxLength: 2000 },
+          targetThreadId: { type: "string", maxLength: 220 },
+          implementationWorkspaceCwd: { type: "string", maxLength: 1000 },
+          targetAlias: { type: "string", maxLength: 120 },
+          deployReadbackRequired: { type: "boolean" },
+          maxIterations: { type: "integer", minimum: 1, maximum: 10 },
+          auditPacket: { type: "object", additionalProperties: true },
+          loopPlan: { type: "object", additionalProperties: true },
+        },
+      },
+      { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+    ),
+    tool(
+      "loop_status",
+      "Read bounded Codex Mobile @loop status for Home AI projection. Returns ids, role state, verdicts, and routing metadata only.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          loopId: { type: "string", maxLength: 120 },
+        },
+      },
+      { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    ),
+    tool(
+      "thread_lifecycle",
+      "List, resolve, ensure/create, refresh, or mark complete Codex Mobile Loop/Worker role lanes by role, workspace, and deliverability metadata.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          action: { type: "string", enum: ["list", "resolve", "ensure", "create", "refresh", "achieve", "mark_role_complete", "retire", "disable", "archive", "mark_available", "mark_idle", "mark_completed", "status", "heartbeat"] },
+          loopId: { type: "string", maxLength: 120 },
+          role: { type: "string", maxLength: 80 },
+          pluginId: { type: "string", maxLength: 120 },
+          purpose: { type: "string", maxLength: 120 },
+          workerPurpose: { type: "string", maxLength: 120 },
+          sourceThreadId: { type: "string", maxLength: 220 },
+          workerLaneId: { type: "string", maxLength: 120 },
+          taskCardId: { type: "string", maxLength: 120 },
+          status: { type: "string", maxLength: 80 },
+          summary: { type: "string", maxLength: 300 },
+          requestId: { type: "string", maxLength: 180 },
+          idempotencyKey: { type: "string", maxLength: 180 },
+          threadId: { type: "string", maxLength: 220 },
+          targetThreadId: { type: "string", maxLength: 220 },
+          cwd: { type: "string", maxLength: 1000 },
+          workspaceCwd: { type: "string", maxLength: 1000 },
+          iteration: { type: "integer", minimum: 1, maximum: 20 },
+          limit: { type: "integer", minimum: 1, maximum: 80 },
+          includeIneligible: { type: "boolean" },
+          excludedTargetThreadIds: {
+            type: "array",
+            maxItems: 20,
+            items: { type: "string", maxLength: 220 },
+          },
+        },
+      },
+      { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+    ),
+    tool(
       "return_to_source",
       "Return a received Codex Mobile task card to its source thread. Use this when target work is completed, blocked, redirected, rejected, or partially completed; a local final answer is not a return card.",
       {
         type: "object",
         additionalProperties: false,
-        required: ["taskCardId", "threadId", "title", "bodyMarkdown"],
+        required: ["taskCardId", "title", "bodyMarkdown"],
         properties: {
           taskCardId: { type: "string", minLength: 1, maxLength: 120 },
-          threadId: { type: "string", minLength: 1, maxLength: 120 },
+          threadId: { type: "string", maxLength: 120, description: "Optional current target thread id. When omitted, the server recovers the expected actor from taskCardId metadata." },
           status: { type: "string", enum: ["completed", "blocked", "redirected", "rejected", "partially_completed"] },
           title: { type: "string", minLength: 1, maxLength: 120 },
           summary: { type: "string", maxLength: 300 },
@@ -168,6 +281,90 @@ function toolsList() {
         },
       },
       { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+    ),
+    tool(
+      "task_card_heartbeat",
+      "Report bounded progress for an active received Codex Mobile task card so the watchdog does not resume a thread that is still working.",
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["taskCardId", "threadId"],
+        properties: {
+          taskCardId: { type: "string", minLength: 1, maxLength: 120 },
+          cardId: { type: "string", maxLength: 120 },
+          threadId: { type: "string", minLength: 1, maxLength: 120 },
+          actorThreadId: { type: "string", maxLength: 120 },
+          status: { type: "string", maxLength: 80 },
+          source: { type: "string", maxLength: 120 },
+          turnId: { type: "string", maxLength: 180 },
+          message: { type: "string", maxLength: 240 },
+        },
+      },
+      { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+    ),
+    tool(
+      "rmw_list_workspaces",
+      "List bounded Remote Managed Workspaces through the Home AI scoped control API. Returns metadata only and never raw credentials or task bodies.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          centralUrl: { type: "string", maxLength: 1000 },
+        },
+      },
+      { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    ),
+    tool(
+      "rmw_dispatch_task_card",
+      "Dispatch one bounded task card to a Remote Managed Workspace through the Home AI scoped control API.",
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["workspaceId", "title", "bodyMarkdown", "idempotencyKey"],
+        properties: {
+          centralUrl: { type: "string", maxLength: 1000 },
+          workspaceId: { type: "string", minLength: 1, maxLength: 180 },
+          title: { type: "string", minLength: 1, maxLength: 180 },
+          summary: { type: "string", maxLength: 500 },
+          bodyMarkdown: { type: "string", minLength: 1, maxLength: 4000 },
+          idempotencyKey: { type: "string", minLength: 1, maxLength: 180 },
+          retryOfTaskCardId: { type: "string", maxLength: 180 },
+          reasoningEffort: { type: "string", enum: ["low", "medium", "high", "xhigh"] },
+          executionRequirements: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              requiresCommandExecution: { type: "boolean" },
+              minimumCompletedCommandCount: { type: "integer", minimum: 1, maximum: 20 },
+              requiredCommandClasses: {
+                type: "array",
+                maxItems: 8,
+                items: {
+                  type: "string",
+                  enum: ["workspace_read", "workspace_test", "workspace_build", "localhost_health_probe"],
+                },
+              },
+              toolSurfaceRequired: { type: "boolean" },
+            },
+          },
+        },
+      },
+      { readOnlyHint: false, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+    ),
+    tool(
+      "rmw_read_task_card",
+      "Read bounded lifecycle status for a Remote Managed Workspace task card. Returns terminal status and summary only, not raw return bodies or logs.",
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["workspaceId", "taskCardId"],
+        properties: {
+          centralUrl: { type: "string", maxLength: 1000 },
+          workspaceId: { type: "string", minLength: 1, maxLength: 180 },
+          taskCardId: { type: "string", minLength: 1, maxLength: 180 },
+        },
+      },
+      { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     ),
   ];
 }
@@ -263,6 +460,7 @@ async function delegateToThread(context, args = {}) {
   });
   const payload = {
     sourceThreadId,
+    sourceWorkspaceId: boundedString(args.sourceWorkspaceId || args.sourceWorkspace || args.sourceCwd || args.source_cwd, "source_workspace_id", 1000, false),
     title,
     summary: boundedString(args.summary, "summary", 300, false),
     body: bodyMarkdown,
@@ -314,7 +512,7 @@ async function delegateToThread(context, args = {}) {
 
 async function returnToSource(context, args = {}) {
   const taskCardId = boundedString(args.taskCardId || args.cardId, "task_card_id", 120, true);
-  const threadId = boundedString(args.threadId || args.actorThreadId, "thread_id", 120, true);
+  const threadId = boundedString(args.threadId || args.actorThreadId, "thread_id", 120, false);
   const title = boundedString(args.title, "title", 120, true);
   const bodyMarkdown = boundedString(args.bodyMarkdown || args.body, "body_markdown", 50_000, true);
   const status = normalizedReturnStatus(args.status);
@@ -344,7 +542,7 @@ async function returnToSource(context, args = {}) {
   return {
     ok: result.ok !== false,
     taskCardId,
-    threadId,
+    threadId: String(result.returnResolution && result.returnResolution.resolvedActorThreadId || threadId),
     status: String(result.card && result.card.status || ""),
     requestedActorThreadId: String(result.returnResolution && result.returnResolution.requestedActorThreadId || threadId),
     resolvedActorThreadId: String(result.returnResolution && result.returnResolution.resolvedActorThreadId || threadId),
@@ -369,6 +567,196 @@ async function returnToSource(context, args = {}) {
   };
 }
 
+async function taskCardHeartbeat(context, args = {}) {
+  const taskCardId = boundedString(args.taskCardId || args.cardId, "task_card_id", 120, true);
+  const threadId = boundedString(args.threadId || args.actorThreadId, "thread_id", 120, true);
+  const payload = {
+    threadId,
+    actorThreadId: threadId,
+    status: boundedString(args.status || "working", "status", 80, false) || "working",
+    source: boundedString(args.source || "codex-mobile-mcp", "source", 120, false) || "codex-mobile-mcp",
+    turnId: boundedString(args.turnId || args.turn_id, "turn_id", 180, false),
+    message: boundedString(args.message, "message", 240, false),
+  };
+  const result = await requestJson(context, "POST", `/api/thread-task-cards/${encodeURIComponent(taskCardId)}/execution/heartbeat`, payload);
+  const lease = result.executionLease || result.lease || {};
+  return {
+    ok: result.ok !== false,
+    taskCardId: String(result.taskCardId || taskCardId),
+    threadId,
+    status: String(result.status || payload.status || ""),
+    source: String(result.source || payload.source || ""),
+    heartbeatCount: Number(result.heartbeatCount || lease.heartbeatCount || 0),
+    lastHeartbeatAt: String(result.lastHeartbeatAt || lease.lastHeartbeatAt || ""),
+    executionState: String(result.executionState || lease.executionState || ""),
+    resumeRequired: Boolean(result.resumeRequired || lease.resumeRequired),
+  };
+}
+
+async function startLoop(context, args = {}) {
+  const sourceThreadId = boundedString(args.sourceThreadId || args.threadId, "source_thread_id", 120, true);
+  const objective = boundedString(args.objective, "objective", 2000, true);
+  const targetAlias = boundedString(args.targetAlias || args.target_alias, "target_alias", 120, false);
+  const targetThreadId = boundedString(args.targetThreadId || args.target_thread_id, "target_thread_id", 220, false);
+  const implementationWorkspaceCwd = boundedString(
+    args.implementationWorkspaceCwd
+      || args.implementation_workspace_cwd
+      || args.implementationWorkspace
+      || args.implementation_workspace
+      || args.implementationCwd
+      || args.implementation_cwd,
+    "implementation_workspace_cwd",
+    1000,
+    false,
+  );
+  const body = {
+    sourceThreadId,
+    text: `${targetAlias ? `@${targetAlias} ` : ""}@loop ${objective}`,
+    targetThreadId,
+    implementationWorkspaceCwd,
+    deployReadbackRequired: Boolean(args.deployReadbackRequired || args.deploy_readback_required),
+    maxIterations: Number(args.maxIterations || args.max_iterations || 0) || undefined,
+  };
+  if (args.auditPacket && typeof args.auditPacket === "object") body.auditPacket = args.auditPacket;
+  if (args.loopPlan && typeof args.loopPlan === "object") body.loopPlan = args.loopPlan;
+  const result = await requestJson(context, "POST", "/api/at-loop/triggers", body);
+  const loop = result.loop || {};
+  return {
+    ok: result.ok !== false,
+    duplicateSuppressed: Boolean(result.duplicateSuppressed),
+    loop: {
+      loopId: String(loop.loopId || ""),
+      status: String(loop.status || ""),
+      currentRole: String(loop.currentRole || ""),
+      nextRoute: String(loop.nextRoute || ""),
+      implementationWorkspaceCwd: String(loop.implementationWorkspaceCwd || ""),
+      waitingReturnCount: Number(loop.waitingReturnCount || 0),
+      duplicateSuppressedCount: Number(loop.duplicateSuppressedCount || 0),
+      objectiveSummary: String(loop.objectiveSummary || ""),
+    },
+  };
+}
+
+async function loopStatus(context, args = {}) {
+  const loopId = boundedString(args.loopId || args.loop_id, "loop_id", 120, false);
+  const path = loopId ? `/api/at-loop/status/${encodeURIComponent(loopId)}` : "/api/at-loop/status";
+  const result = await requestJson(context, "GET", path);
+  return {
+    ok: result.ok !== false,
+    loopCount: Number(result.loopCount || 0),
+    loops: (Array.isArray(result.loops) ? result.loops : []).map((loop) => ({
+      loopId: String(loop.loopId || ""),
+      status: String(loop.status || ""),
+      currentRole: String(loop.currentRole || ""),
+      iteration: Number(loop.iteration || 0),
+      maxIterations: Number(loop.maxIterations || 0),
+      nextRoute: String(loop.nextRoute || ""),
+      implementationWorkspaceCwd: String(loop.implementationWorkspaceCwd || ""),
+      lastAuditVerdict: String(loop.lastAuditVerdict || ""),
+      waitingReturnCount: Number(loop.waitingReturnCount || 0),
+      duplicateSuppressedCount: Number(loop.duplicateSuppressedCount || 0),
+      roleSlices: (Array.isArray(loop.roleSlices) ? loop.roleSlices : []).map((slice) => ({
+        roleSliceId: String(slice.roleSliceId || ""),
+        role: String(slice.role || ""),
+        status: String(slice.status || ""),
+        targetThreadId: String(slice.targetThreadId || ""),
+        targetPurpose: String(slice.targetPurpose || ""),
+        taskCardId: String(slice.taskCardId || ""),
+        stale: Boolean(slice.stale),
+      })),
+    })),
+  };
+}
+
+async function threadLifecycle(context, args = {}) {
+  const body = {
+    action: boundedString(args.action || "list", "action", 80, false) || "list",
+    loopId: boundedString(args.loopId || args.loop_id, "loop_id", 120, false),
+    role: boundedString(args.role || args.threadRole || args.thread_role, "role", 80, false),
+    pluginId: boundedString(args.pluginId || args.plugin_id || args.plugin || args.targetPlugin || args.target_plugin, "plugin_id", 120, false),
+    purpose: boundedString(args.purpose || args.targetPurpose || args.target_purpose, "purpose", 120, false),
+    workerPurpose: boundedString(args.workerPurpose || args.worker_purpose, "worker_purpose", 120, false),
+    sourceThreadId: boundedString(args.sourceThreadId || args.source_thread_id, "source_thread_id", 220, false),
+    workerLaneId: boundedString(args.workerLaneId || args.worker_lane_id, "worker_lane_id", 120, false),
+    taskCardId: boundedString(args.taskCardId || args.task_card_id || args.cardId || args.card_id, "task_card_id", 120, false),
+    status: boundedString(args.status || args.heartbeatStatus || args.heartbeat_status, "status", 80, false),
+    summary: boundedString(args.summary || args.message, "summary", 300, false),
+    requestId: boundedString(args.requestId || args.request_id, "request_id", 180, false),
+    idempotencyKey: boundedString(args.idempotencyKey || args.idempotency_key, "idempotency_key", 180, false),
+    threadId: boundedString(args.threadId || args.thread_id, "thread_id", 220, false),
+    targetThreadId: boundedString(args.targetThreadId || args.target_thread_id, "target_thread_id", 220, false),
+    cwd: boundedString(args.cwd, "cwd", 1000, false),
+    workspaceCwd: boundedString(args.workspaceCwd || args.workspace_cwd, "workspace_cwd", 1000, false),
+    iteration: Number(args.iteration || 0) || undefined,
+    limit: Number(args.limit || 0) || undefined,
+    includeIneligible: args.includeIneligible === true || args.include_ineligible === true,
+  };
+  if (Array.isArray(args.excludedTargetThreadIds || args.excluded_target_thread_ids)) {
+    body.excludedTargetThreadIds = (args.excludedTargetThreadIds || args.excluded_target_thread_ids)
+      .map((value) => boundedString(value, "excluded_target_thread_id", 220, false))
+      .filter(Boolean)
+      .slice(0, 20);
+  }
+  const result = await requestJson(context, "POST", "/api/at-loop/thread-lifecycle", body);
+  return {
+    ok: result.ok !== false,
+    action: String(result.action || body.action),
+    error: String(result.error || ""),
+    count: Number(result.count || 0),
+    refreshed: Number(result.refreshed || 0),
+    thread: result.thread || null,
+    threads: Array.isArray(result.threads) ? result.threads.slice(0, 80) : [],
+    slice: result.slice || null,
+    loop: result.loop ? {
+      loopId: String(result.loop.loopId || ""),
+      status: String(result.loop.status || ""),
+      currentRole: String(result.loop.currentRole || ""),
+      nextRoute: String(result.loop.nextRoute || ""),
+      implementationThreadId: String(result.loop.implementationThreadId || ""),
+      auditThreadId: String(result.loop.auditThreadId || ""),
+    } : null,
+  };
+}
+
+async function rmwControlConfig(context, args = {}) {
+  const centralUrl = boundedString(args.centralUrl || context.rmwControlUrl, "central_url", 1000, true);
+  const inlineToken = boundedString(context.rmwControlToken, "rmw_control_credential", 4096, false);
+  if (inlineToken) return { ok: true, centralUrl, controlToken: inlineToken };
+  if (!context.rmwControlBootstrap || typeof context.rmwControlBootstrap.ensureControlCredential !== "function") {
+    return {
+      ok: false,
+      status: {
+        ok: false,
+        skipped: "control_pairing_bootstrap_unavailable",
+        centralUrlConfigured: Boolean(centralUrl),
+        scopedControlCredentialConfigured: false,
+        issueCodes: ["rmw_control_pairing_bootstrap_unavailable"],
+      },
+    };
+  }
+  const ensured = await context.rmwControlBootstrap.ensureControlCredential({ centralUrl });
+  if (!ensured.ok) return { ok: false, status: ensured.status };
+  return { ok: true, centralUrl: ensured.centralUrl, controlToken: ensured.controlToken };
+}
+
+async function rmwListWorkspaces(context, args = {}) {
+  const config = await rmwControlConfig(context, args);
+  if (!config.ok) return config.status;
+  return context.rmwControlClient.listWorkspaces(config);
+}
+
+async function rmwDispatchTaskCard(context, args = {}) {
+  const config = await rmwControlConfig(context, args);
+  if (!config.ok) return config.status;
+  return context.rmwControlClient.dispatchTaskCard(config, args);
+}
+
+async function rmwReadTaskCard(context, args = {}) {
+  const config = await rmwControlConfig(context, args);
+  if (!config.ok) return config.status;
+  return context.rmwControlClient.readTaskCard(config, args);
+}
+
 async function handleMessage(context, message = {}) {
   const method = String(message.method || "");
   if (method === "initialize") {
@@ -377,8 +765,15 @@ async function handleMessage(context, message = {}) {
       capabilities: { tools: {} },
       serverInfo: { name: SERVER_NAME, version: packageVersion() },
       instructions: [
+        "When surfaced through Codex deferred tool discovery, these tools appear under the `mcp__codex_mobile` namespace, for example `mcp__codex_mobile.delegate_to_thread`.",
+        "Use the `mcp__codex_mobile` tools exactly; if that MCP tool surface is unavailable, fall back to the local task-card scripts.",
+        "Only MCP-prefixed Codex Mobile tool names are valid in model context; non-MCP namespace variants are unsupported and must not be called.",
         "Use delegate_to_thread when a user request requires code, files, commands, tests, deployment, or other mutation in another Codex thread/workspace.",
         "Use return_to_source when a received task card is completed, blocked, redirected, rejected, or partially completed; a target-thread final answer is not a source-thread return card.",
+        "Use task_card_heartbeat to report bounded progress while actively handling a received task card; this does not complete the card.",
+        "Use start_loop only for explicit @loop requests; use loop_status for bounded loop status projection.",
+        "Use thread_lifecycle to list, resolve, ensure/create, refresh, or mark complete Loop/Worker role lanes by metadata instead of title heuristics.",
+        "Use rmw_list_workspaces, rmw_dispatch_task_card, and rmw_read_task_card only for Remote Managed Workspace scoped-control flows; these tools return bounded metadata and never raw tokens, task bodies, return bodies, or logs.",
         "Do not use multi_agent_v1 tools as a substitute for Codex Mobile cross-thread task cards.",
       ].join("\n"),
     };
@@ -391,7 +786,14 @@ async function handleMessage(context, message = {}) {
     const args = params.arguments && typeof params.arguments === "object" ? params.arguments : {};
     if (name === "list_threads") return textContent(await listThreads(context, args));
     if (name === "delegate_to_thread") return textContent(await delegateToThread(context, args));
+    if (name === "start_loop") return textContent(await startLoop(context, args));
+    if (name === "loop_status") return textContent(await loopStatus(context, args));
+    if (name === "thread_lifecycle") return textContent(await threadLifecycle(context, args));
     if (name === "return_to_source") return textContent(await returnToSource(context, args));
+    if (name === "task_card_heartbeat") return textContent(await taskCardHeartbeat(context, args));
+    if (name === "rmw_list_workspaces") return textContent(await rmwListWorkspaces(context, args));
+    if (name === "rmw_dispatch_task_card") return textContent(await rmwDispatchTaskCard(context, args));
+    if (name === "rmw_read_task_card") return textContent(await rmwReadTaskCard(context, args));
     throw new Error("codex_mobile_mcp_unknown_tool");
   }
   if (method === "ping") return {};
@@ -490,7 +892,14 @@ module.exports = {
   encodeMessage,
   handleMessage,
   listThreads,
+  loopStatus,
   parseArgs,
   returnToSource,
+  rmwDispatchTaskCard,
+  rmwListWorkspaces,
+  rmwReadTaskCard,
+  startLoop,
+  taskCardHeartbeat,
+  threadLifecycle,
   toolsList,
 };

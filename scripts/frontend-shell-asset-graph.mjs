@@ -13,6 +13,7 @@ export const SHELL_MANIFEST_SCHEMA_VERSION = 1;
 export const VITE_SHELL_BUILD_CONTRACT_SCHEMA_VERSION = 1;
 export const VITE_SHELL_ENTRY_SOURCE = "frontend/vite-shell-entry.mjs";
 export const VITE_DEFERRED_ENTRY_SOURCE = "frontend/vite-deferred-entry-topology.mjs";
+export const VITE_SHELL_BUILD_MANIFEST_SOURCE = "virtual:codex-mobile-shell-build-manifest";
 export const VITE_ENTRY_GROUP_SOURCE_PREFIX = "virtual:codex-mobile-shell-entry-group/";
 export const VITE_ENTRY_GROUP_LOADER_SOURCE = "virtual:codex-mobile-shell-entry-group-loader";
 export const VITE_ESM_COMPATIBILITY_SOURCE = "virtual:codex-mobile-esm-compatibility";
@@ -34,6 +35,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "build-refresh-policy",
     source: "public/build-refresh-policy.js",
+    nativeSource: "frontend/native/build-refresh-policy.mjs",
     globalName: "CodexBuildRefreshPolicy",
     expectedFunctions: [
       "shellSequenceFromBuildId",
@@ -44,6 +46,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "runtime-settings",
     source: "public/runtime-settings.js",
+    nativeSource: "frontend/native/runtime-settings.mjs",
     globalName: "CodexRuntimeSettings",
     expectedFunctions: [
       "normalizeOptionList",
@@ -61,6 +64,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "viewport-metrics",
     source: "public/viewport-metrics.js",
+    nativeSource: "frontend/native/viewport-metrics.mjs",
     globalName: "CodexViewportMetrics",
     expectedFunctions: [
       "cssPixel",
@@ -72,6 +76,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "conversation-scroll",
     source: "public/conversation-scroll.js",
+    nativeSource: "frontend/native/conversation-scroll.mjs",
     globalName: "CodexConversationScroll",
     expectedFunctions: [
       "createSubmittedMessageFollow",
@@ -95,6 +100,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-performance-metrics",
     source: "public/thread-performance-metrics.js",
+    nativeSource: "frontend/native/thread-performance-metrics.mjs",
     globalName: "CodexThreadPerformanceMetrics",
     expectedFunctions: [
       "boundedTiming",
@@ -123,6 +129,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-detail-state",
     source: "public/thread-detail-state.js",
+    nativeSource: "frontend/native/thread-detail-state.mjs",
     globalName: "CodexThreadDetailState",
     expectedFunctions: [
       "buildThreadDetailRenderEvidence",
@@ -149,6 +156,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-detail-render-plan",
     source: "public/thread-detail-render-plan.js",
+    nativeSource: "frontend/native/thread-detail-render-plan.mjs",
     globalName: "CodexThreadDetailRenderPlan",
     expectedFunctions: [
       "emptyThreadDetailRefreshPatchAttempt",
@@ -223,6 +231,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-detail-dom-patch",
     source: "public/thread-detail-dom-patch.js",
+    nativeSource: "frontend/native/thread-detail-dom-patch.mjs",
     globalName: "CodexThreadDetailDomPatch",
     expectedFunctions: [
       "applyLiveTextItemDomPatch",
@@ -263,6 +272,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "draft-store",
     source: "public/draft-store.js",
+    nativeSource: "frontend/native/draft-store.mjs",
     globalName: "CodexDraftStore",
     expectedFunctions: [
       "defaultNormalizeFsPath",
@@ -276,6 +286,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "image-compressor",
     source: "public/image-compressor.js",
+    nativeSource: "frontend/native/image-compressor.mjs",
     globalName: "CodexImageCompressor",
     expectedFunctions: [
       "compressedImageName",
@@ -288,6 +299,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "plugin-voice-input",
     source: "public/plugin-voice-input.js",
+    nativeSource: "frontend/native/plugin-voice-input.mjs",
     globalName: "CodexPluginVoiceInput",
     expectedFunctions: [
       "actionFromMessageType",
@@ -303,6 +315,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "api-client",
     source: "public/api-client.js",
+    nativeSource: "frontend/native/api-client.mjs",
     globalName: "CodexApiClient",
     expectedFunctions: [
       "createApiClient",
@@ -312,6 +325,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "markdown-renderer",
     source: "public/markdown-renderer.js",
+    nativeSource: "frontend/native/markdown-renderer.mjs",
     globalName: "CodexMarkdownRenderer",
     expectedFunctions: [
       "escapeHtml",
@@ -327,6 +341,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "plugin-embed",
     source: "public/plugin-embed.js",
+    nativeSource: "frontend/native/plugin-embed.mjs",
     globalName: "CodexPluginEmbed",
     expectedFunctions: [
       "detect",
@@ -341,6 +356,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "frontend-runtime-health",
     source: "public/frontend-runtime-health.js",
+    nativeSource: "frontend/native/frontend-runtime-health.mjs",
     globalName: "CodexFrontendRuntimeHealth",
     expectedFunctions: [
       "compactToken",
@@ -355,6 +371,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "home-ai-diagnostic-reporting",
     source: "public/home-ai-diagnostic-reporting.js",
+    nativeSource: "frontend/native/home-ai-diagnostic-reporting.mjs",
     globalName: "CodexHomeAiDiagnosticReporting",
     expectedFunctions: [
       "boundedToken",
@@ -369,6 +386,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-diagnostic-events",
     source: "public/thread-diagnostic-events.js",
+    nativeSource: "frontend/native/thread-diagnostic-events.mjs",
     globalName: "CodexThreadDiagnosticEvents",
     expectedFunctions: [
       "boundedCount",
@@ -384,6 +402,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-tile-layout",
     source: "public/thread-tile-layout.js",
+    nativeSource: "frontend/native/thread-tile-layout.mjs",
     globalName: "CodexThreadTileLayout",
     expectedFunctions: [
       "layoutForViewport",
@@ -396,6 +415,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-tile-actions",
     source: "public/thread-tile-actions.js",
+    nativeSource: "frontend/native/thread-tile-actions.mjs",
     globalName: "CodexThreadTileActions",
     expectedFunctions: [
       "closestWithin",
@@ -412,6 +432,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-tile-state",
     source: "public/thread-tile-state.js",
+    nativeSource: "frontend/native/thread-tile-state.mjs",
     globalName: "CodexThreadTileState",
     expectedFunctions: [
       "activePaneSyncPlan",
@@ -482,6 +503,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-tile-runtime",
     source: "public/thread-tile-runtime.js",
+    nativeSource: "frontend/native/thread-tile-runtime.mjs",
     globalName: "CodexThreadTileRuntime",
     expectedFunctions: [
       "createThreadTileRuntime",
@@ -490,6 +512,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "app-update-runtime",
     source: "public/app-update-runtime.js",
+    nativeSource: "frontend/native/app-update-runtime.mjs",
     globalName: "CodexAppUpdateRuntime",
     expectedFunctions: [
       "createAppUpdateRuntime",
@@ -498,6 +521,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "settings-runtime",
     source: "public/settings-runtime.js",
+    nativeSource: "frontend/native/settings-runtime.mjs",
     globalName: "CodexSettingsRuntime",
     expectedFunctions: [
       "createSettingsRuntime",
@@ -506,6 +530,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "modal-runtime",
     source: "public/modal-runtime.js",
+    nativeSource: "frontend/native/modal-runtime.mjs",
     globalName: "CodexModalRuntime",
     expectedFunctions: [
       "createModalRuntime",
@@ -514,6 +539,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "navigation-runtime",
     source: "public/navigation-runtime.js",
+    nativeSource: "frontend/native/navigation-runtime.mjs",
     globalName: "CodexNavigationRuntime",
     expectedFunctions: [
       "createNavigationRuntime",
@@ -522,6 +548,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "runtime-wiring-runtime",
     source: "public/runtime-wiring-runtime.js",
+    nativeSource: "frontend/native/runtime-wiring-runtime.mjs",
     globalName: "CodexRuntimeWiringRuntime",
     expectedFunctions: [
       "createRuntimeWiringRuntime",
@@ -530,6 +557,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "app-shell-runtime",
     source: "public/app-shell-runtime.js",
+    nativeSource: "frontend/native/app-shell-runtime.mjs",
     globalName: "CodexAppShellRuntime",
     expectedFunctions: [
       "createAppShellRuntime",
@@ -538,6 +566,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "pane-layout-runtime",
     source: "public/pane-layout-runtime.js",
+    nativeSource: "frontend/native/pane-layout-runtime.mjs",
     globalName: "CodexPaneLayoutRuntime",
     expectedFunctions: [
       "createPaneLayoutRuntime",
@@ -546,6 +575,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "app-entry",
     source: "public/app.js",
+    nativeSource: "frontend/native/app-entry.mjs",
     globalName: "CodexMobileAppEntry",
     expectedFunctions: [
       "createCodexMobileAppEntry",
@@ -555,6 +585,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-list-runtime",
     source: "public/thread-list-runtime.js",
+    nativeSource: "frontend/native/thread-list-runtime.mjs",
     globalName: "CodexThreadListRuntime",
     expectedFunctions: [
       "createThreadListRuntime",
@@ -563,6 +594,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "side-chat-runtime",
     source: "public/side-chat-runtime.js",
+    nativeSource: "frontend/native/side-chat-runtime.mjs",
     globalName: "CodexSideChatRuntime",
     expectedFunctions: [
       "createSideChatRuntime",
@@ -571,6 +603,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "media-preview-runtime",
     source: "public/media-preview-runtime.js",
+    nativeSource: "frontend/native/media-preview-runtime.mjs",
     globalName: "CodexMediaPreviewRuntime",
     expectedFunctions: [
       "createMediaPreviewRuntime",
@@ -579,6 +612,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "composer-runtime",
     source: "public/composer-runtime.js",
+    nativeSource: "frontend/native/composer-runtime.mjs",
     globalName: "CodexComposerRuntime",
     expectedFunctions: [
       "createComposerRuntime",
@@ -587,6 +621,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "composer-bridge-runtime",
     source: "public/composer-bridge-runtime.js",
+    nativeSource: "frontend/native/composer-bridge-runtime.mjs",
     globalName: "CodexComposerBridgeRuntime",
     expectedFunctions: [
       "createComposerBridgeRuntime",
@@ -595,6 +630,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "api-client-runtime",
     source: "public/api-client-runtime.js",
+    nativeSource: "frontend/native/api-client-runtime.mjs",
     globalName: "CodexApiClientRuntime",
     expectedFunctions: [
       "createApiClientRuntime",
@@ -603,6 +639,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-list-load-policy",
     source: "public/thread-list-load-policy.js",
+    nativeSource: "frontend/native/thread-list-load-policy.mjs",
     globalName: "CodexThreadListLoadPolicy",
     expectedFunctions: [
       "planThreadListLoadRequest",
@@ -611,6 +648,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-list-stable-order",
     source: "public/thread-list-stable-order.js",
+    nativeSource: "frontend/native/thread-list-stable-order.mjs",
     globalName: "CodexThreadListStableOrder",
     expectedFunctions: [
       "threadListOrderScopeKey",
@@ -620,6 +658,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-status-hints",
     source: "public/thread-status-hints.js",
+    nativeSource: "frontend/native/thread-status-hints.mjs",
     globalName: "CodexThreadStatusHints",
     expectedFunctions: [
       "isRunningStatus",
@@ -630,6 +669,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-detail-patch-plan",
     source: "public/thread-detail-patch-plan.js",
+    nativeSource: "frontend/native/thread-detail-patch-plan.mjs",
     globalName: "CodexThreadDetailPatchPlan",
     expectedFunctions: [
       "planThreadDetailDomPatchSurface",
@@ -640,6 +680,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-detail-actions",
     source: "public/thread-detail-actions.js",
+    nativeSource: "frontend/native/thread-detail-actions.mjs",
     globalName: "CodexThreadDetailActions",
     expectedFunctions: [
       "closestWithin",
@@ -652,6 +693,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-detail-merge-state",
     source: "public/thread-detail-merge-state.js",
+    nativeSource: "frontend/native/thread-detail-merge-state.mjs",
     globalName: "CodexThreadDetailMergeState",
     expectedFunctions: [
       "createThreadDetailMergePolicy",
@@ -660,6 +702,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-detail-v4-merge-state",
     source: "public/thread-detail-v4-merge-state.js",
+    nativeSource: "frontend/native/thread-detail-v4-merge-state.mjs",
     globalName: "CodexThreadDetailV4MergeState",
     expectedFunctions: [
       "createThreadDetailV4MergePolicy",
@@ -668,6 +711,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "thread-detail-runtime",
     source: "public/thread-detail-runtime.js",
+    nativeSource: "frontend/native/thread-detail-runtime.mjs",
     globalName: "CodexThreadDetailRuntime",
     expectedFunctions: [
       "createThreadDetailRuntime",
@@ -676,6 +720,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "task-card-runtime",
     source: "public/task-card-runtime.js",
+    nativeSource: "frontend/native/task-card-runtime.mjs",
     globalName: "CodexTaskCardRuntime",
     expectedFunctions: [
       "createTaskCardRuntime",
@@ -684,6 +729,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "notification-ui-runtime",
     source: "public/notification-ui-runtime.js",
+    nativeSource: "frontend/native/notification-ui-runtime.mjs",
     globalName: "CodexNotificationUiRuntime",
     expectedFunctions: [
       "createNotificationUiRuntime",
@@ -692,6 +738,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "conversation-render-runtime",
     source: "public/conversation-render-runtime.js",
+    nativeSource: "frontend/native/conversation-render-runtime.mjs",
     globalName: "CodexConversationRenderRuntime",
     expectedFunctions: [
       "createConversationRenderRuntime",
@@ -700,6 +747,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "event-stream-runtime",
     source: "public/event-stream-runtime.js",
+    nativeSource: "frontend/native/event-stream-runtime.mjs",
     globalName: "CodexEventStreamRuntime",
     expectedFunctions: [
       "createEventStreamRuntime",
@@ -708,6 +756,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "client-render-stability-guard",
     source: "public/client-render-stability-guard.js",
+    nativeSource: "frontend/native/client-render-stability-guard.mjs",
     globalName: "CodexClientRenderStabilityGuard",
     expectedFunctions: [
       "firstSubmittedUserMessageClientSubmissionId",
@@ -722,6 +771,7 @@ const VITE_ESM_COMPATIBILITY_MODULE_CANDIDATES = [
   {
     id: "live-operation-dock-state",
     source: "public/live-operation-dock-state.js",
+    nativeSource: "frontend/native/live-operation-dock-state.mjs",
     globalName: "CodexLiveOperationDockState",
     expectedFunctions: [
       "compactBubblePreservation",
@@ -901,28 +951,45 @@ function orderedSubset(orderSource, values) {
   return orderSource.filter((value) => wanted.has(value));
 }
 
-export function collectShellAssetGraph(root = process.cwd()) {
+function buildViteBuildTimeShellManifest(root = process.cwd()) {
+  return buildPublicShellManifest(root, { useExistingViteArtifactCache: false });
+}
+
+function normalizeViteBuildTimeAssetRecord(record) {
+  if (!record || typeof record !== "object") return record;
+  if (record.path !== "/shell-asset-manifest.js" && record.path !== "/shell-asset-manifest.json") return record;
+  return {
+    ...record,
+    bytes: 1,
+    sha256: "0".repeat(64),
+  };
+}
+
+export function collectShellAssetGraph(root = process.cwd(), options = {}) {
   const indexHtml = readText(root, "public/index.html");
   const swSource = readText(root, "public/sw.js");
   const bootstrapSource = readText(root, "public/app-bootstrap.js");
   const serverRuntimeUtilsSource = readText(root, "services/runtime/server-runtime-utils.js");
   const publicManifest = readJson(root, "public/shell-asset-manifest.json");
-  const expectedManifest = buildPublicShellManifest(root);
+  const expectedManifest = options.useExistingViteArtifactCache === false
+    ? buildViteBuildTimeShellManifest(root)
+    : buildPublicShellManifest(root);
+  const effectiveManifest = options.useExistingViteArtifactCache === false ? expectedManifest : publicManifest;
   const indexScriptAssets = extractExternalScriptSrcs(indexHtml);
   const indexLinkAssets = extractLinkHrefs(indexHtml);
   return {
     root,
-    shellCacheName: String(publicManifest.shellCacheName || ""),
-    clientBuildId: String(publicManifest.clientBuildId || ""),
+    shellCacheName: String(effectiveManifest.shellCacheName || ""),
+    clientBuildId: String(effectiveManifest.clientBuildId || ""),
     indexScriptAssets,
     indexLinkAssets,
-    swStaticAssets: Array.isArray(publicManifest.precacheAssets) ? publicManifest.precacheAssets : [],
-    pageShellAssets: Array.isArray(publicManifest.pageShellAssets) ? publicManifest.pageShellAssets : [],
-    serverHashAssets: Array.isArray(publicManifest.hashAssets) ? publicManifest.hashAssets : [],
-    entryGroups: Array.isArray(publicManifest.entryGroups) ? publicManifest.entryGroups : [],
-    classicGlobalExports: Array.isArray(publicManifest.classicGlobalExports) ? publicManifest.classicGlobalExports : [],
-    startupGlobalContracts: startupGlobalContracts(publicManifest),
-    publicManifest,
+    swStaticAssets: Array.isArray(effectiveManifest.precacheAssets) ? effectiveManifest.precacheAssets : [],
+    pageShellAssets: Array.isArray(effectiveManifest.pageShellAssets) ? effectiveManifest.pageShellAssets : [],
+    serverHashAssets: Array.isArray(effectiveManifest.hashAssets) ? effectiveManifest.hashAssets : [],
+    entryGroups: Array.isArray(effectiveManifest.entryGroups) ? effectiveManifest.entryGroups : [],
+    classicGlobalExports: Array.isArray(effectiveManifest.classicGlobalExports) ? effectiveManifest.classicGlobalExports : [],
+    startupGlobalContracts: startupGlobalContracts(effectiveManifest),
+    publicManifest: effectiveManifest,
     expectedManifest,
     swSource,
     bootstrapSource,
@@ -1024,8 +1091,8 @@ export function validateShellAssetGraph(graph) {
   };
 }
 
-export function buildShellAssetManifest(root = process.cwd()) {
-  const graph = collectShellAssetGraph(root);
+export function buildShellAssetManifest(root = process.cwd(), options = {}) {
+  const graph = collectShellAssetGraph(root, options);
   const validation = validateShellAssetGraph(graph);
   const allAssets = uniqueValues([
     ...graph.swStaticAssets,
@@ -1033,7 +1100,7 @@ export function buildShellAssetManifest(root = process.cwd()) {
     ...graph.pageShellAssets,
     ...graph.indexLinkAssets,
   ]);
-  const assetRecords = allAssets.map((assetPath) => {
+  let assetRecords = allAssets.map((assetPath) => {
     const role = graph.indexScriptAssets.includes(assetPath)
       ? "script"
       : assetPath === "/sw.js"
@@ -1041,6 +1108,9 @@ export function buildShellAssetManifest(root = process.cwd()) {
         : "static";
     return assetRecord(root, assetPath, role);
   });
+  if (options.useExistingViteArtifactCache === false) {
+    assetRecords = assetRecords.map(normalizeViteBuildTimeAssetRecord);
+  }
   for (const asset of assetRecords) {
     if (!asset.exists) validation.issues.push({ code: "asset_file_missing", asset: asset.path });
   }
@@ -1053,6 +1123,8 @@ export function buildShellAssetManifest(root = process.cwd()) {
     generatedBy: "vite-codex-mobile-shell-asset-graph",
     shellCacheName: graph.shellCacheName,
     clientBuildId: graph.clientBuildId,
+    classicShellCacheName: String(graph.publicManifest && graph.publicManifest.classicShellCacheName || graph.expectedManifest && graph.expectedManifest.classicShellCacheName || ""),
+    ...(graph.publicManifest && graph.publicManifest.viteArtifactCache ? { viteArtifactCache: graph.publicManifest.viteArtifactCache } : {}),
     counts: {
       indexScripts: graph.indexScriptAssets.length,
       swStaticAssets: graph.swStaticAssets.length,
@@ -1089,7 +1161,7 @@ function esmCompatibilityImportName(id) {
 }
 
 function esmCompatibilityModuleSource(root, moduleRecord) {
-  const sourcePath = String(moduleRecord && moduleRecord.source || "");
+  const sourcePath = String(moduleRecord && (moduleRecord.importSource || moduleRecord.nativeSource || moduleRecord.source) || "");
   return pathToFileURL(path.join(root, sourcePath)).href;
 }
 
@@ -1105,6 +1177,8 @@ function esmCompatibilityModuleDefinitions() {
     .map((moduleRecord) => ({
       ...moduleRecord,
       assetPath: publicAssetPathFromSourcePath(moduleRecord.source),
+      importSource: String(moduleRecord.nativeSource || moduleRecord.source || ""),
+      compatibilityMode: moduleRecord.nativeSource ? "native-esm" : "classic-global-compat",
       classicLoaderExcluded: true,
     }));
 }
@@ -2166,6 +2240,12 @@ function createEsmCompatibilityShardVirtualModuleSource(root, moduleDefinitions)
     "    const version = runtime && typeof runtime.appVersionText === \"function\"",
     "      ? runtime.appVersionText({ version: \"0.1.11\" })",
     "      : \"\";",
+    "    const fullVersion = runtime && typeof runtime.fullClientBuildVersionText === \"function\"",
+    "      ? runtime.fullClientBuildVersionText({",
+    "        clientBuildId: \"0.1.11|codex-mobile-shell-v625-a5a3d596240d\",",
+    "        shellCacheName: \"codex-mobile-shell-v625-a5a3d596240d\",",
+    "      })",
+    "      : \"\";",
     "    const updateLine = runtime && typeof runtime.updateStatusLine === \"function\"",
     "      ? runtime.updateStatusLine({ updateAvailable: true, canFastForward: true, remoteShort: \"abc123\" })",
     "      : \"\";",
@@ -2179,11 +2259,13 @@ function createEsmCompatibilityShardVirtualModuleSource(root, moduleDefinitions)
     "      ok: runtime && typeof runtime.refreshPageForNewBuild === \"function\"",
     "        && client === \"客户端 v625\"",
     "        && version === \"v0.1.11 · 客户端 v625\"",
+    "        && fullVersion === \"clientBuildId 0.1.11|codex-mobile-shell-v625-a5a3d596240d · shellCacheName codex-mobile-shell-v625-a5a3d596240d\"",
     "        && updateLine === \"Update available: abc123\"",
     "        && publicLine === \"Public latest: def456\"",
     "        && serverBuild === \"client-a\",",
     "      client,",
     "      version,",
+    "      fullVersion,",
     "      updateLine,",
     "      publicLine,",
     "      serverBuild,",
@@ -2638,6 +2720,8 @@ function createEsmCompatibilityShardVirtualModuleSource(root, moduleDefinitions)
     "        && typeof runtime.replyTaskCard === \"function\"",
     "        && typeof runtime.queueThreadTaskCardDraftCreation === \"function\"",
     "        && typeof runtime.createThreadTaskCardDraft === \"function\"",
+    "        && typeof runtime.closeQuotaDetails === \"function\"",
+    "        && typeof runtime.toggleQuotaDetails === \"function\"",
     "        && typeof globalThis.sendMessage === \"function\"",
     "        && typeof globalThis.answerApproval === \"function\"",
     "        && typeof globalThis.mutateThreadTaskCard === \"function\"",
@@ -2649,6 +2733,8 @@ function createEsmCompatibilityShardVirtualModuleSource(root, moduleDefinitions)
     "      mutateType: typeof (runtime && runtime.mutateThreadTaskCard),",
     "      replyType: typeof (runtime && runtime.replyTaskCard),",
     "      draftType: typeof (runtime && runtime.createThreadTaskCardDraft),",
+    "      closeQuotaType: typeof (runtime && runtime.closeQuotaDetails),",
+    "      toggleQuotaType: typeof (runtime && runtime.toggleQuotaDetails),",
     "      globalSendType: typeof globalThis.sendMessage,",
     "      globalApprovalType: typeof globalThis.answerApproval,",
     "      globalMutateType: typeof globalThis.mutateThreadTaskCard,",
@@ -2748,11 +2834,11 @@ function createEsmCompatibilityShardVirtualModuleSource(root, moduleDefinitions)
     "      ? api.shouldExpireRunningThreadHint({",
     "        threadId: \"target-thread\",",
     "        isRunningHinted: true,",
-    "        status: \"idle\",",
+    "        status: { type: \"completed\", mobileStaleActiveTurn: true },",
     "        runningHintedAtMs: 0,",
     "        runningHintStaleMs: 1000,",
     "        nowMs: 5000,",
-    "        thread: {},",
+    "        thread: { mobileStaleActiveTurn: true },",
     "      })",
     "      : false;",
     "    return {",
@@ -3215,6 +3301,9 @@ function createEsmCompatibilityShardVirtualModuleSource(root, moduleDefinitions)
     "      id: definition.id,",
     "      source: definition.source,",
     "      assetPath: definition.assetPath,",
+    "      nativeSource: definition.nativeSource || \"\",",
+    "      importSource: definition.importSource || definition.source,",
+    "      compatibilityMode: definition.compatibilityMode || \"classic-global-compat\",",
     "      globalName: definition.globalName,",
     "      classicLoaderExcluded: definition.classicLoaderExcluded === true,",
     "      expectedFunctions: expectedFunctions.slice(),",
@@ -3230,6 +3319,8 @@ function createEsmCompatibilityShardVirtualModuleSource(root, moduleDefinitions)
     "    schemaVersion: 1,",
     "    owner: \"vite-shell-entry\",",
     "    moduleCount: modules.length,",
+    "    nativeEsmModuleCount: modules.filter((entry) => entry.compatibilityMode === \"native-esm\").length,",
+    "    classicGlobalCompatibilityModuleCount: modules.filter((entry) => entry.compatibilityMode !== \"native-esm\").length,",
     "    readyCount: modules.filter((entry) => entry.ready === true).length,",
     "    modules,",
     "  };",
@@ -3301,6 +3392,8 @@ function createEsmCompatibilityVirtualModuleSource(root) {
     "          shardCount: shardSummaries.length,",
     "          shards: shardSummaries,",
     "          moduleCount: modules.length,",
+    "          nativeEsmModuleCount: modules.filter((entry) => entry && entry.compatibilityMode === \"native-esm\").length,",
+    "          classicGlobalCompatibilityModuleCount: modules.filter((entry) => entry && entry.compatibilityMode !== \"native-esm\").length,",
     "          readyCount: modules.filter((entry) => entry && entry.ready === true).length,",
     "          modules,",
     "        };",
@@ -3370,7 +3463,7 @@ function viteEntryGroupSourceId(groupId) {
 }
 
 export function buildViteEntryGroupInputs(root = process.cwd()) {
-  const manifest = buildPublicShellManifest(root);
+  const manifest = buildViteBuildTimeShellManifest(root);
   const inputs = {};
   for (const group of Array.isArray(manifest.entryGroups) ? manifest.entryGroups : []) {
     const groupId = sanitizeEntryGroupId(group && group.id);
@@ -3378,6 +3471,63 @@ export function buildViteEntryGroupInputs(root = process.cwd()) {
     inputs[`vite-entry-group-${groupId}`] = viteEntryGroupSourceId(groupId);
   }
   return inputs;
+}
+
+export function refreshViteShellBuildClassicContracts(manifest, viteBuild = {}, root = process.cwd()) {
+  const entryGroupChunks = (Array.isArray(viteBuild.viteEntryGroupChunks) ? viteBuild.viteEntryGroupChunks : [])
+    .map((chunk) => {
+      const groupId = sanitizeEntryGroupId(chunk && chunk.groupId);
+      const group = (Array.isArray(manifest.entryGroups) ? manifest.entryGroups : [])
+        .find((entryGroup) => sanitizeEntryGroupId(entryGroup && entryGroup.id) === groupId) || {};
+      const assets = Array.isArray(group.assets) ? group.assets.slice() : [];
+      const classicGlobalExports = classicGlobalExportsForAssets(manifest, assets);
+      const classicAssetRecords = classicAssetRecordsForAssets(manifest, assets);
+      const groupStartupGlobalContracts = startupGlobalContracts(manifest)
+        .filter((entry) => assets.includes(entry.asset));
+      return {
+        ...chunk,
+        groupId,
+        phase: String(group.phase || ""),
+        startupCritical: Boolean(group.startupCritical),
+        chunkTarget: String(group.chunkTarget || ""),
+        assets,
+        assetCount: assets.length,
+        classicAssetRecords,
+        classicAssetHashCount: classicAssetRecords.filter((entry) => entry.sha256).length,
+        classicAssetBytes: classicAssetRecords.reduce((total, entry) => total + (Number(entry.bytes) || 0), 0),
+        classicGlobalExports,
+        classicGlobalExportAssetCount: classicGlobalExports.length,
+        classicGlobalExportCount: classicGlobalExports.reduce((total, entry) => (
+          total + (Array.isArray(entry && entry.globals) ? entry.globals.length : 0)
+        ), 0),
+        startupGlobalContracts: groupStartupGlobalContracts,
+      };
+    })
+    .sort((a, b) => a.groupId.localeCompare(b.groupId));
+  const classicShellAssets = assetOutputRecords(manifest);
+  const outputFiles = [
+    ...(Array.isArray(viteBuild.outputFiles) ? viteBuild.outputFiles : []),
+    ...classicShellAssets.map((asset) => asset.fileName),
+    "codex-mobile-shell-manifest.json",
+  ];
+  return {
+    ...viteBuild,
+    classicFallback: {
+      ...(viteBuild.classicFallback || {}),
+      indexHtmlAsset: "/index.html",
+      outputRoot: "shell-assets",
+      indexScriptAssets: manifest.indexScriptAssets,
+      entryGroups: manifest.entryGroups,
+      classicGlobalExports: manifest.classicGlobalExports,
+      startupGlobalContracts: manifest.startupGlobalContracts,
+      scriptBlock: classicShellScriptBlockContract(manifest),
+    },
+    startupCompatibility: startupCompatibilityContract(manifest),
+    appPreviewClassicLoaderPlan: appPreviewClassicLoaderPlanContract(manifest),
+    viteEntryGroupChunks: entryGroupChunks,
+    classicShellAssets,
+    outputFiles: [...new Set(outputFiles)].sort(),
+  };
 }
 
 function bundleValues(bundle) {
@@ -3616,6 +3766,9 @@ function esmCompatibilityContract(root = process.cwd()) {
       id: String(moduleRecord && moduleRecord.id || ""),
       source: sourcePath,
       assetPath: String(moduleRecord && moduleRecord.assetPath || ""),
+      nativeSource: String(moduleRecord && moduleRecord.nativeSource || ""),
+      importSource: String(moduleRecord && moduleRecord.importSource || moduleRecord.source || ""),
+      compatibilityMode: String(moduleRecord && moduleRecord.compatibilityMode || "classic-global-compat"),
       globalName: String(moduleRecord && moduleRecord.globalName || ""),
       classicLoaderExcluded: moduleRecord && moduleRecord.classicLoaderExcluded === true,
       expectedFunctions,
@@ -3634,6 +3787,8 @@ function esmCompatibilityContract(root = process.cwd()) {
     shardCount: shards.length,
     shards,
     moduleCount: modules.length,
+    nativeEsmModuleCount: modules.filter((entry) => entry.compatibilityMode === "native-esm").length,
+    classicGlobalCompatibilityModuleCount: modules.filter((entry) => entry.compatibilityMode !== "native-esm").length,
     expectedFunctionCount: modules.reduce((total, entry) => total + entry.expectedFunctionCount, 0),
     hashCount: modules.filter((entry) => entry.hashPresent).length,
     byteCount: modules.reduce((total, entry) => total + (Number(entry.bytes) || 0), 0),
@@ -3662,8 +3817,8 @@ function validateViteShellBuildContract(contract, manifest) {
     .filter(Boolean);
   const entryChunkIds = new Set(entryGroupChunks.map((chunk) => sanitizeEntryGroupId(chunk.groupId)));
 
-  if (contract.productionExecution !== "classic-script-fallback") {
-    issues.push({ code: "vite_build_contract_not_classic_fallback" });
+  if (contract.productionExecution !== "vite-app-preview-native-esm") {
+    issues.push({ code: "vite_build_contract_not_native_esm" });
   }
   if (contract.entryGroupImportOwner !== "vite-shell-entry") {
     issues.push({ code: "vite_entry_group_import_owner_mismatch" });
@@ -3827,6 +3982,9 @@ function validateViteShellBuildContract(contract, manifest) {
       const actual = modules[index] || {};
       if (actual.source !== expected.source
         || actual.assetPath !== publicAssetPathFromSourcePath(expected.source)
+        || String(actual.nativeSource || "") !== String(expected.nativeSource || "")
+        || String(actual.importSource || "") !== String(expected.importSource || expected.source || "")
+        || String(actual.compatibilityMode || "") !== String(expected.compatibilityMode || "classic-global-compat")
         || actual.globalName !== expected.globalName
         || actual.classicLoaderExcluded !== true
         || JSON.stringify(actual.expectedFunctions || []) !== JSON.stringify(expected.expectedFunctions || [])) {
@@ -3964,7 +4122,7 @@ export function buildViteShellBuildContract(manifest, bundle = {}, root = proces
   const contract = {
     schemaVersion: VITE_SHELL_BUILD_CONTRACT_SCHEMA_VERSION,
     stage: "vite-shell-artifact-contract-v1",
-    productionExecution: "classic-script-fallback",
+    productionExecution: "vite-app-preview-native-esm",
     entryGroupImportOwner: "vite-shell-entry",
     entryDynamicImportGraph,
     entrySource: VITE_SHELL_ENTRY_SOURCE,
@@ -3999,7 +4157,7 @@ export function createShellAssetGraphPlugin(options = {}) {
   return {
     name: "codex-mobile-shell-asset-graph",
     generateBundle(_outputOptions, bundle) {
-      const manifest = buildShellAssetManifest(root);
+      const manifest = buildShellAssetManifest(root, { useExistingViteArtifactCache: false });
       if (!manifest.validation.ok) {
         const codes = manifest.validation.issues.map((issue) => issue.code).join(", ");
         throw new Error(`codex_mobile_shell_asset_graph_invalid: ${codes}`);
@@ -4039,6 +4197,9 @@ export function createShellEntryGroupVirtualModulePlugin(options = {}) {
       if (String(id || "") === VITE_ESM_COMPATIBILITY_SOURCE) {
         return `\0${VITE_ESM_COMPATIBILITY_SOURCE}`;
       }
+      if (String(id || "") === VITE_SHELL_BUILD_MANIFEST_SOURCE) {
+        return `\0${VITE_SHELL_BUILD_MANIFEST_SOURCE}`;
+      }
       if (String(id || "").startsWith(VITE_ESM_COMPATIBILITY_SHARD_SOURCE_PREFIX)) {
         return `\0${id}`;
       }
@@ -4052,6 +4213,10 @@ export function createShellEntryGroupVirtualModulePlugin(options = {}) {
     },
     load(id) {
       const value = String(id || "");
+      if (value === `\0${VITE_SHELL_BUILD_MANIFEST_SOURCE}`) {
+        const manifest = buildViteBuildTimeShellManifest(root);
+        return `export default ${JSON.stringify(manifest, null, 2)};\n`;
+      }
       if (value === `\0${VITE_ESM_COMPATIBILITY_SOURCE}`) {
         return createEsmCompatibilityVirtualModuleSource(root);
       }
@@ -4066,7 +4231,7 @@ export function createShellEntryGroupVirtualModulePlugin(options = {}) {
         return createEsmCompatibilityShardVirtualModuleSource(root, shard.moduleDefinitions);
       }
       if (value === `\0${VITE_ENTRY_GROUP_LOADER_SOURCE}`) {
-        const manifest = buildPublicShellManifest(root);
+        const manifest = buildViteBuildTimeShellManifest(root);
         const groups = (Array.isArray(manifest.entryGroups) ? manifest.entryGroups : [])
           .map((group) => sanitizeEntryGroupId(group && group.id))
           .filter(Boolean);
@@ -4107,7 +4272,7 @@ export function createShellEntryGroupVirtualModulePlugin(options = {}) {
       const prefix = `\0${VITE_ENTRY_GROUP_SOURCE_PREFIX}`;
       if (!value.startsWith(prefix)) return null;
       const groupId = sanitizeEntryGroupId(value.slice(prefix.length));
-      const manifest = buildPublicShellManifest(root);
+      const manifest = buildViteBuildTimeShellManifest(root);
       const group = (Array.isArray(manifest.entryGroups) ? manifest.entryGroups : [])
         .find((entry) => sanitizeEntryGroupId(entry && entry.id) === groupId);
       if (!group) {
@@ -4115,7 +4280,7 @@ export function createShellEntryGroupVirtualModulePlugin(options = {}) {
       }
       const assets = Array.isArray(group.assets) ? group.assets.slice() : [];
       const classicGlobalExports = classicGlobalExportsForAssets(manifest, assets);
-      const fullManifest = buildShellAssetManifest(root);
+      const fullManifest = buildShellAssetManifest(root, { useExistingViteArtifactCache: false });
       const classicAssetRecords = classicAssetRecordsForAssets(fullManifest, assets);
       const payload = {
         id: group.id,

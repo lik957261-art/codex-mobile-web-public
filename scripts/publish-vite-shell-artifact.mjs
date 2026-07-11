@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  refreshViteShellBuildClassicContracts,
+} from "./frontend-shell-asset-graph.mjs";
+import { generatedManifestFiles } from "./generate-frontend-shell-manifest.mjs";
 
 export const VITE_SHELL_PUBLIC_ARTIFACT_STAGE = "vite-shell-preview-html-v1";
 export const VITE_SHELL_PUBLIC_ARTIFACT_ROOT = "public/vite-shell";
@@ -60,6 +64,175 @@ function bufferRecord(relativePath, body) {
     bytes: buffer.length,
     sha256: sha256Hex(buffer),
   };
+}
+
+function manifestJsonSource(manifest) {
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
+function manifestJsSource(manifest) {
+  return [
+    "\"use strict\";",
+    "",
+    "(function (root) {",
+    `  var manifest = ${JSON.stringify(manifest, null, 2).replace(/\n/g, "\n  ")};`,
+    "  root.CODEX_MOBILE_SHELL_MANIFEST = manifest;",
+    "}(typeof globalThis !== \"undefined\" ? globalThis : this));",
+    "",
+  ].join("\n");
+}
+
+function shellCacheBaseName(shellCacheName) {
+  const text = String(shellCacheName || "").trim();
+  const match = text.match(/^(.*)-[a-f0-9]{12}$/);
+  return match ? match[1] : text || "codex-mobile-shell";
+}
+
+function appVersionFromClientBuildId(clientBuildId) {
+  const text = String(clientBuildId || "").trim();
+  const index = text.indexOf("|");
+  return index > 0 ? text.slice(0, index) : "0.0.0";
+}
+
+function viteArtifactCacheRecords(readback = {}) {
+  return (Array.isArray(readback.publishedFiles) ? readback.publishedFiles : [])
+    .map((entry) => ({
+      fileName: normalizeRelativeFileName(entry && entry.fileName),
+      bytes: Number.isFinite(Number(entry && entry.bytes)) ? Number(entry.bytes) : 0,
+      sha256: String(entry && entry.sha256 || ""),
+    }))
+    .filter((entry) => entry.fileName.startsWith("assets/") && entry.sha256)
+    .sort((left, right) => left.fileName.localeCompare(right.fileName));
+}
+
+export function buildViteArtifactCacheIdentity(readback = {}) {
+  const baseShellCacheName = String(
+    readback.classicShellCacheName
+      || readback.viteArtifactCache && readback.viteArtifactCache.baseShellCacheName
+      || readback.shellCacheName
+      || ""
+  ).trim();
+  const appVersion = appVersionFromClientBuildId(readback.clientBuildId);
+  const records = viteArtifactCacheRecords(readback);
+  if (!baseShellCacheName || !records.length) return null;
+  const artifactHash = crypto.createHash("sha256");
+  artifactHash.update("schema=codex-mobile-vite-artifact-cache-v1\n");
+  artifactHash.update(`stage=${String(readback.stage || "")}\n`);
+  artifactHash.update(`sourceBuildStage=${String(readback.sourceBuildStage || "")}\n`);
+  artifactHash.update(`baseShellCacheName=${baseShellCacheName}\n`);
+  for (const record of records) {
+    artifactHash.update(`file=${record.fileName}:${record.bytes}:${record.sha256}\n`);
+  }
+  const fingerprint = artifactHash.digest("hex");
+  const shellHash = crypto.createHash("sha256")
+    .update(`base=${baseShellCacheName}\nvite=${fingerprint}\n`)
+    .digest("hex")
+    .slice(0, 12);
+  const shellCacheName = `${shellCacheBaseName(baseShellCacheName)}-${shellHash}`;
+  return {
+    shellCacheName,
+    clientBuildId: `${appVersion}|${shellCacheName}`,
+    viteArtifactCache: {
+      schemaVersion: 1,
+      source: "vite-shell-public-artifact",
+      baseShellCacheName,
+      fingerprint,
+      fileCount: records.length,
+      byteCount: records.reduce((total, record) => total + record.bytes, 0),
+      files: records,
+    },
+  };
+}
+
+function applyCacheIdentityToBuildManifest(buildRoot, identity) {
+  if (!identity) return;
+  const manifestPath = path.join(buildRoot, "codex-mobile-shell-manifest.json");
+  const manifest = readJson(manifestPath);
+  manifest.shellCacheName = identity.shellCacheName;
+  manifest.clientBuildId = identity.clientBuildId;
+  manifest.viteArtifactCache = identity.viteArtifactCache;
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+function refreshClassicAssetRecords(root, manifest) {
+  return (Array.isArray(manifest && manifest.assets) ? manifest.assets : [])
+    .map((entry) => {
+      const sourcePath = String(entry && entry.sourcePath || "");
+      if (!sourcePath) return entry;
+      try {
+        const buffer = fs.readFileSync(path.join(root, sourcePath));
+        return {
+          ...entry,
+          exists: true,
+          bytes: buffer.length,
+          sha256: sha256Hex(buffer),
+        };
+      } catch (_) {
+        return {
+          ...entry,
+          exists: false,
+          bytes: 0,
+          sha256: "",
+        };
+      }
+    });
+}
+
+function writePublicShellCacheIdentity(root, buildRoot, identity) {
+  if (!identity) return;
+  const publicRoot = path.join(root, "public");
+  const publicManifestPath = path.join(publicRoot, "shell-asset-manifest.json");
+  const publicManifestJsPath = path.join(publicRoot, "shell-asset-manifest.js");
+  try {
+    const generated = generatedManifestFiles(root, { cacheIdentity: identity });
+    for (const file of generated.files) {
+      fs.writeFileSync(file.path, file.source);
+    }
+    return;
+  } catch (_) {
+    // Partial artifact-publisher fixtures do not carry the full classic shell tree.
+  }
+  const buildManifestPath = path.join(buildRoot, "codex-mobile-shell-manifest.json");
+  const sourceManifest = fs.existsSync(publicManifestPath)
+    ? readJson(publicManifestPath)
+    : readJson(buildManifestPath);
+  const manifest = {
+    ...sourceManifest,
+    shellCacheName: identity.shellCacheName,
+    clientBuildId: identity.clientBuildId,
+    classicShellCacheName: identity.viteArtifactCache.baseShellCacheName,
+    viteArtifactCache: identity.viteArtifactCache,
+  };
+  fs.mkdirSync(publicRoot, { recursive: true });
+  fs.writeFileSync(publicManifestPath, manifestJsonSource(manifest));
+  fs.writeFileSync(publicManifestJsPath, manifestJsSource(manifest));
+}
+
+function refreshBuildManifestClassicMetadata(root, buildRoot, identity) {
+  const manifestPath = path.join(buildRoot, "codex-mobile-shell-manifest.json");
+  const previous = readJson(manifestPath);
+  const currentShellManifest = {
+    ...previous,
+    shellCacheName: identity.shellCacheName,
+    clientBuildId: identity.clientBuildId,
+    classicShellCacheName: identity.viteArtifactCache.baseShellCacheName,
+    viteArtifactCache: identity.viteArtifactCache,
+    assets: refreshClassicAssetRecords(root, previous),
+  };
+  const refreshedViteBuild = refreshViteShellBuildClassicContracts(
+    currentShellManifest,
+    previous.viteBuild || {},
+    root
+  );
+  const manifest = {
+    ...currentShellManifest,
+    shellCacheName: identity.shellCacheName,
+    clientBuildId: identity.clientBuildId,
+    classicShellCacheName: identity.viteArtifactCache.baseShellCacheName,
+    viteArtifactCache: identity.viteArtifactCache,
+    viteBuild: refreshedViteBuild,
+  };
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 function escapeHtml(value) {
@@ -253,6 +426,9 @@ function normalizeEsmCompatibilityContract(contract) {
       id: String(entry && entry.id || ""),
       source: String(entry && entry.source || ""),
       assetPath: String(entry && entry.assetPath || ""),
+      nativeSource: String(entry && entry.nativeSource || ""),
+      importSource: String(entry && entry.importSource || entry && entry.source || ""),
+      compatibilityMode: String(entry && entry.compatibilityMode || "classic-global-compat"),
       globalName: String(entry && entry.globalName || ""),
       classicLoaderExcluded: Boolean(entry && entry.classicLoaderExcluded),
       expectedFunctions: Array.isArray(entry && entry.expectedFunctions)
@@ -275,6 +451,12 @@ function normalizeEsmCompatibilityContract(contract) {
     shardCount: Number.isFinite(Number(contract.shardCount)) ? Number(contract.shardCount) : shards.length,
     shards,
     moduleCount: Number.isFinite(Number(contract.moduleCount)) ? Number(contract.moduleCount) : modules.length,
+    nativeEsmModuleCount: Number.isFinite(Number(contract.nativeEsmModuleCount))
+      ? Number(contract.nativeEsmModuleCount)
+      : modules.filter((entry) => entry.compatibilityMode === "native-esm").length,
+    classicGlobalCompatibilityModuleCount: Number.isFinite(Number(contract.classicGlobalCompatibilityModuleCount))
+      ? Number(contract.classicGlobalCompatibilityModuleCount)
+      : modules.filter((entry) => entry.compatibilityMode !== "native-esm").length,
     expectedFunctionCount: Number.isFinite(Number(contract.expectedFunctionCount))
       ? Number(contract.expectedFunctionCount)
       : modules.reduce((total, entry) => total + entry.expectedFunctions.length, 0),
@@ -306,8 +488,8 @@ export function buildViteShellPublicReadback(options = {}) {
   if (!viteBuild.validation || !viteBuild.validation.ok) {
     issues.push({ code: "vite_build_contract_invalid" });
   }
-  if (viteBuild.productionExecution !== "classic-script-fallback") {
-    issues.push({ code: "vite_build_execution_not_classic_fallback" });
+  if (viteBuild.productionExecution !== "vite-app-preview-native-esm") {
+    issues.push({ code: "vite_build_execution_not_native_esm" });
   }
   if (!viteBuild.viteEntry || viteBuild.viteEntry.source !== "frontend/vite-shell-entry.mjs") {
     issues.push({ code: "vite_shell_entry_missing" });
@@ -440,6 +622,8 @@ export function buildViteShellPublicReadback(options = {}) {
       issues.push({ code: "vite_esm_compatibility_owner_mismatch" });
     }
     if (Number(esmCompatibility.moduleCount) !== esmCompatibility.modules.length
+      || Number(esmCompatibility.nativeEsmModuleCount) !== esmCompatibility.modules.filter((entry) => entry.compatibilityMode === "native-esm").length
+      || Number(esmCompatibility.classicGlobalCompatibilityModuleCount) !== esmCompatibility.modules.filter((entry) => entry.compatibilityMode !== "native-esm").length
       || Number(esmCompatibility.hashCount) !== esmCompatibility.modules.length
       || Number(esmCompatibility.expectedFunctionCount) !== esmCompatibility.modules.reduce((total, entry) => (
         total + entry.expectedFunctions.length
@@ -467,6 +651,8 @@ export function buildViteShellPublicReadback(options = {}) {
     entryDynamicImportGraph: viteBuild.entryDynamicImportGraph || null,
     shellCacheName: String(manifest.shellCacheName || ""),
     clientBuildId: String(manifest.clientBuildId || ""),
+    classicShellCacheName: String(manifest.classicShellCacheName || ""),
+    viteArtifactCache: manifest.viteArtifactCache || null,
     entry: viteBuild.viteEntry ? {
       source: viteBuild.viteEntry.source || "",
       fileName: normalizeRelativeFileName(viteBuild.viteEntry.fileName),
@@ -503,6 +689,8 @@ export function buildViteShellPublicReadback(options = {}) {
     entryDynamicImportGraph: viteBuild.entryDynamicImportGraph || null,
     shellCacheName: String(manifest.shellCacheName || ""),
     clientBuildId: String(manifest.clientBuildId || ""),
+    classicShellCacheName: String(manifest.classicShellCacheName || ""),
+    viteArtifactCache: manifest.viteArtifactCache || null,
     entry: viteBuild.viteEntry ? {
       source: viteBuild.viteEntry.source || "",
       fileName: normalizeRelativeFileName(viteBuild.viteEntry.fileName),
@@ -537,6 +725,8 @@ export function buildViteShellPublicReadback(options = {}) {
       appPreviewClassicLoaderExcludedEsmScripts: appPreviewClassicLoaderPlan ? appPreviewClassicLoaderPlan.excludedEsmScriptCount : 0,
       appPreviewClassicLoaderExcludedViteOwnedScripts: appPreviewClassicLoaderPlan ? appPreviewClassicLoaderPlan.excludedViteOwnedScriptCount : 0,
       esmCompatibilityModules: esmCompatibility ? esmCompatibility.moduleCount : 0,
+      esmCompatibilityNativeModules: esmCompatibility ? esmCompatibility.nativeEsmModuleCount : 0,
+      esmCompatibilityClassicGlobalModules: esmCompatibility ? esmCompatibility.classicGlobalCompatibilityModuleCount : 0,
       esmCompatibilityHashes: esmCompatibility ? esmCompatibility.hashCount : 0,
       esmCompatibilityExpectedFunctions: esmCompatibility ? esmCompatibility.expectedFunctionCount : 0,
       startupGlobalContracts: startupContracts.length,
@@ -638,6 +828,8 @@ export function renderViteShellAppPreviewHtml(readback = {}, root = process.cwd(
   const targetEntryScript = readback.preview && readback.preview.targetEntryScript
     ? String(readback.preview.targetEntryScript)
     : publicArtifactUrl(entryFileName);
+  const targetEntryFileName = targetEntryScript.split("/").filter(Boolean).pop() || "entry";
+  const entryScriptUrl = `${entryScript}${entryScript.includes("?") ? "&" : "?"}targetEntry=${encodeURIComponent(targetEntryFileName)}`;
   const indexPath = path.join(path.resolve(root), "public", "index.html");
   let source = fs.readFileSync(indexPath, "utf8");
   source = source.replace(
@@ -668,7 +860,8 @@ export function renderViteShellAppPreviewHtml(readback = {}, root = process.cwd(
     "  <script id=\"codex-vite-app-preview-loader-plan\" type=\"application/json\" data-codex-vite-app-preview-loader-plan=\"true\">",
     jsonScriptBody(readback.appPreviewClassicLoaderPlan),
     "  </script>",
-    `  <script type="module" src="${escapeHtml(entryScript)}" data-codex-vite-app-preview-entry="true"></script>`,
+    "  <script src=\"/shell-asset-manifest.js\" data-codex-vite-current-shell-manifest=\"true\"></script>",
+    `  <script type="module" src="${escapeHtml(entryScriptUrl)}" data-codex-vite-app-preview-entry="true"></script>`,
     VITE_APP_PREVIEW_SCRIPT_BLOCK_END,
   ].join("\n");
   const start = source.indexOf(CLASSIC_SHELL_SCRIPT_BLOCK_START);
@@ -686,14 +879,32 @@ export function renderViteShellStableEntry(readback = {}) {
   if (!targetEntryScript || !targetEntryScript.startsWith("/")) {
     throw new Error("codex_mobile_vite_stable_entry_target_missing");
   }
+  const targetEntryImportSpecifier = targetEntryScript.startsWith("/vite-shell/assets/")
+    ? `./assets/${targetEntryScript.slice("/vite-shell/assets/".length)}`
+    : targetEntryScript;
   return [
-    `import "${targetEntryScript}";`,
+    `const targetEntryImportSpecifier = ${JSON.stringify(targetEntryImportSpecifier)};`,
+    "const targetEntryImportUrl = new URL(targetEntryImportSpecifier, import.meta.url);",
+    "try {",
+    "  const sourceUrl = new URL(import.meta.url);",
+    "  sourceUrl.searchParams.forEach((value, key) => {",
+    "    if (!targetEntryImportUrl.searchParams.has(key)) targetEntryImportUrl.searchParams.set(key, value);",
+    "  });",
+    "} catch (_) {}",
+    "const targetEntryImportPromise = import(targetEntryImportUrl.href);",
     "",
     "globalThis.__CODEX_MOBILE_VITE_STABLE_ENTRY__ = {",
     "  source: \"vite-shell-app-preview-stable-entry\",",
     `  targetEntryScript: ${JSON.stringify(targetEntryScript)},`,
+    "  targetEntryImportSpecifier,",
+    "  targetEntryImportUrl: targetEntryImportUrl.href,",
+    "  targetEntryImportPromise,",
     "  loadedAt: Date.now(),",
     "};",
+    "targetEntryImportPromise.catch((err) => {",
+    "  globalThis.__CODEX_MOBILE_VITE_STABLE_ENTRY__.error = err && err.message ? err.message : String(err);",
+    "  throw err;",
+    "});",
     "",
   ].join("\n");
 }
@@ -747,6 +958,18 @@ export function publishViteShellPublicArtifact(options = {}) {
   const root = path.resolve(options.root || process.cwd());
   const buildRoot = path.resolve(options.buildRoot || path.join(root, "dist", "frontend-shell"));
   const publicArtifactRoot = path.resolve(options.publicArtifactRoot || path.join(root, VITE_SHELL_PUBLIC_ARTIFACT_ROOT));
+  const initialReadback = buildViteShellPublicReadback({ root, buildRoot });
+  if (!initialReadback.validation.ok) {
+    const codes = initialReadback.validation.issues.map((issue) => issue.code).join(", ");
+    throw new Error(`codex_mobile_vite_shell_public_artifact_invalid: ${codes}`);
+  }
+  const cacheIdentity = buildViteArtifactCacheIdentity(initialReadback);
+  if (!cacheIdentity) {
+    throw new Error("codex_mobile_vite_shell_public_artifact_cache_identity_missing");
+  }
+  applyCacheIdentityToBuildManifest(buildRoot, cacheIdentity);
+  writePublicShellCacheIdentity(root, buildRoot, cacheIdentity);
+  refreshBuildManifestClassicMetadata(root, buildRoot, cacheIdentity);
   const readback = buildViteShellPublicReadback({ root, buildRoot });
   if (!readback.validation.ok) {
     const codes = readback.validation.issues.map((issue) => issue.code).join(", ");

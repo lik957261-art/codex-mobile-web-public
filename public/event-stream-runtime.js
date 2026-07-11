@@ -4,6 +4,36 @@ function shouldRenderAfterUpsert(turn, item) {
   return !shouldDeferLiveFinalReceipt(turn, item && item.type);
 }
 
+function isTrailingPendingUserEcho(item) {
+  return Boolean(item
+    && item.type === "userMessage"
+    && !item.mobileSendError
+    && isOptimisticUserMessage(item));
+}
+
+function shouldPlaceLiveProgressBeforeTrailingUserEcho(item) {
+  return Boolean(item && (item.type === "agentMessage" || item.type === "plan"));
+}
+
+function insertLiveItem(turn, item) {
+  turn.items = turn.items || [];
+  if (!shouldPlaceLiveProgressBeforeTrailingUserEcho(item)) {
+    turn.items.push(item);
+    return false;
+  }
+  let firstTrailingPendingIndex = turn.items.length;
+  while (firstTrailingPendingIndex > 0 && isTrailingPendingUserEcho(turn.items[firstTrailingPendingIndex - 1])) {
+    firstTrailingPendingIndex -= 1;
+  }
+  const insertIndex = Math.max(1, firstTrailingPendingIndex);
+  if (insertIndex >= turn.items.length) {
+    turn.items.push(item);
+    return false;
+  }
+  turn.items.splice(insertIndex, 0, item);
+  return true;
+}
+
 function upsertItem(turnId, item) {
   const turn = ensureTurn(turnId);
   if (!turn || !item || !item.id) return;
@@ -18,7 +48,7 @@ function upsertItem(turnId, item) {
     const matchingExistingIndex = turn.items.findIndex((existing) => existing
       && existing.id !== item.id
       && existing.type === "userMessage"
-      && userMessagesCanShadow(existing, item));
+      && userMessagesAreSameTurnDuplicateEvent(existing, item));
     if (matchingExistingIndex >= 0) {
       const mergedUserMessage = mergeLikelySameUserMessage(turn.items[matchingExistingIndex], item);
       turn.items[matchingExistingIndex] = mergedUserMessage;
@@ -47,7 +77,7 @@ function upsertItem(turnId, item) {
     turn.items[index] = mergeItemPreservingVisibleFields(turn.items[index], item);
     nextItem = turn.items[index];
   } else {
-    turn.items.push(item);
+    structureChanged = insertLiveItem(turn, item) || structureChanged;
   }
   normalizeThreadVisibleUserMessages(state.currentThread);
   if (shouldRenderAfterUpsert(turn, nextItem)) {
@@ -107,9 +137,10 @@ function appendToItem(turnId, itemId, itemType, field, delta, index = 0, options
   markActivity(activityLabelForItem({ type: itemType }));
   let item = (turn.items || []).find((x) => x.id === itemId);
   let createdItem = false;
+  let insertedBeforeTrailingPendingUser = false;
   if (!item) {
     item = { id: itemId, type: itemType, startedAtMs: Date.now() };
-    turn.items.push(item);
+    insertedBeforeTrailingPendingUser = insertLiveItem(turn, item);
     createdItem = true;
   }
   if (!item.startedAtMs) item.startedAtMs = Date.now();
@@ -129,7 +160,8 @@ function appendToItem(turnId, itemId, itemType, field, delta, index = 0, options
   if (shouldRenderAfterAppend(turn, itemType, field, previousValue, nextValue, options)) {
     if (isOperationalItem(item)) updateLiveOperationDockForLocalPatch();
     else if (createdItem) {
-      if (!insertVisibleItemDom(turn, item)) scheduleRenderCurrentThread();
+      if (insertedBeforeTrailingPendingUser) scheduleRenderCurrentThread();
+      else if (!insertVisibleItemDom(turn, item)) scheduleRenderCurrentThread();
     } else if (!patchLiveTextItemDom(turn, item)) scheduleRenderCurrentThread();
   }
 }
@@ -152,6 +184,53 @@ function scheduleRenderCurrentThread() {
 function scheduleRenderThreads(...args) {
   return threadListRuntime.scheduleRenderThreads(...args);
 }
+
+function boundedTaskCardReturnCount(value) {
+  return Math.max(0, Math.trunc(Number(value || 0)) || 0);
+}
+
+function applyTaskCardReturnSummaryToThread(thread, params = {}) {
+  if (!thread) return false;
+  thread.returnReceiptTaskCardCount = boundedTaskCardReturnCount(params.returnReceiptTaskCardCount);
+  thread.returnFollowUpTaskCardCount = boundedTaskCardReturnCount(params.returnFollowUpTaskCardCount);
+  thread.returnFollowUpPending = thread.returnFollowUpTaskCardCount > 0;
+  thread.latestReturnReceiptTaskCardId = String(params.latestReturnReceiptTaskCardId || "");
+  thread.latestReturnReceiptAt = String(params.latestReturnReceiptAt || params.returnedAt || "");
+  thread.latestReturnReceiptStatus = String(params.latestReturnReceiptStatus || params.status || "");
+  thread.latestReturnFollowUpTaskCardId = String(params.latestReturnFollowUpTaskCardId || "");
+  thread.latestReturnFollowUpAt = String(params.latestReturnFollowUpAt || "");
+  thread.latestReturnFollowUpStatus = String(params.latestReturnFollowUpStatus || "");
+  return true;
+}
+
+function applyTaskCardReturnSummaryToLocalThreads(threadId, params = {}) {
+  const id = String(threadId || "").trim();
+  if (!id) return false;
+  const seen = new Set();
+  let changed = false;
+  const apply = (thread) => {
+    if (!thread || String(thread.id || "") !== id || seen.has(thread)) return;
+    seen.add(thread);
+    changed = applyTaskCardReturnSummaryToThread(thread, params) || changed;
+  };
+  apply(state.currentThread);
+  apply(state.threadTileDetails && state.threadTileDetails.get(id));
+  for (const thread of state.threads || []) apply(thread);
+  if (!seen.size && boundedTaskCardReturnCount(params.returnReceiptTaskCardCount) > 0) {
+    const returnedAt = String(params.returnedAt || params.latestReturnReceiptAt || "").trim();
+    const summary = {
+      id,
+      title: id,
+      updatedAt: returnedAt || new Date().toISOString(),
+    };
+    applyTaskCardReturnSummaryToThread(summary, params);
+    state.threads = [summary, ...(state.threads || []).filter((thread) => String(thread && thread.id || "") !== id)];
+    changed = true;
+  }
+  if (changed) scheduleRenderThreads();
+  return changed;
+}
+
 function upsertServerRequest(request, fallbackThreadId = "") {
   if (!request || request.id === null || request.id === undefined) return;
   const key = String(request.id);
@@ -272,6 +351,19 @@ function applyNotification(method, params) {
     scheduleRenderThreads();
     return;
   }
+  if (method === "thread/task-card-return/changed") {
+    const threadId = String(params.threadId || params.returnTargetThreadId || params.sourceThreadId || "").trim();
+    if (!threadId) return;
+    applyTaskCardReturnSummaryToLocalThreads(threadId, params);
+    if (state.currentThread && String(state.currentThread.id || "") === threadId) {
+      refreshCurrentThread({ source: "task-card-return", force: true }).catch(showError);
+    } else if (state.threadTileMode && threadTilePaneIsVisible(threadId)) {
+      loadThreadTileDetail(threadId, { force: true, background: true, source: "task-card-return" }).catch(showError);
+    } else {
+      loadThreads({ silent: true, allowDuringDetail: true }).catch(showError);
+    }
+    return;
+  }
   if (method === "thread/status/changed") {
     const replayed = Boolean(params.mobileReplay);
     const runningNotification = isRunningStatus(params.status);
@@ -287,7 +379,7 @@ function applyNotification(method, params) {
       eventAtMs,
       mobileReplay: replayed,
     });
-    updateThreadListStatus(params.threadId, params.status);
+    updateThreadListStatus(params.threadId, params.status, { eventAtMs });
     pruneHiddenThreads();
     if (state.currentThread && state.currentThread.id === params.threadId) {
       markThreadViewed(params.threadId, state.currentThread, eventAtMs);
@@ -354,7 +446,7 @@ function applyNotification(method, params) {
       eventAtMs,
       mobileReplay: replayed,
     });
-    updateThreadListStatus(params.threadId, runningStatus);
+    updateThreadListStatus(params.threadId, runningStatus, { eventAtMs });
     clearRecentCompletedReplyAnchor();
     clearConversationAutoScrollHold();
     clearLiveOperationDockRuntimeState();
@@ -385,7 +477,7 @@ function applyNotification(method, params) {
       eventAtMs,
       mobileReplay: replayed,
     });
-    updateThreadListStatus(params.threadId, completedStatus);
+    updateThreadListStatus(params.threadId, completedStatus, { eventAtMs });
     state.activeTurnId = "";
     clearLiveOperationDockRuntimeState();
     markActivity("完成");
@@ -400,7 +492,7 @@ function applyNotification(method, params) {
       if (state.currentThreadId === params.threadId) loadSideChat(params.threadId, { silent: true }).catch(showError);
     }, 900);
     if (!suppressAutomaticRefresh) {
-      scheduleUsageBackfillRefresh(1400);
+      scheduleUsageBackfillRefresh(120, { force: true });
       scheduleLivePollIfNeeded(1400);
     }
     return;

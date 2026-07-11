@@ -2,8 +2,10 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
+const { createContinuationThreadService } = require("../adapters/continuation-thread-service");
 const { readFrontendSources } = require("./frontend-source-helper");
 
 const serverJs = fs.readFileSync(path.resolve(__dirname, "..", "server.js"), "utf8");
@@ -37,6 +39,7 @@ const threadSummaryReadModelServiceJs = fs.readFileSync(path.resolve(__dirname, 
 const appJs = readFrontendSources(path.resolve(__dirname, ".."));
 const composerRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "composer-runtime.js"), "utf8");
 const indexHtml = fs.readFileSync(path.resolve(__dirname, "..", "public", "index.html"), "utf8");
+const navigationRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "navigation-runtime.js"), "utf8");
 
 function functionBody(source, name) {
   let start = source.indexOf(`function ${name}(`);
@@ -231,7 +234,7 @@ test("new-message route can persist an explicit initial thread title", () => {
 test("server default model falls back to GPT-5.5", () => {
   assert.match(serverRuntimeConfigServiceJs, /const MODEL_OPTIONS = optionListFromEnv\("CODEX_MOBILE_MODEL_OPTIONS", \[\s*"gpt-5\.5"/);
   assert.match(serverRuntimeConfigServiceJs, /const DEFAULT_MODEL = MODEL_OPTIONS\[0\] \|\| "gpt-5\.5";/);
-  assert.match(coreApiRouteServiceJs, /defaultModel: codexConfigDefaults\.model \|\| defaultModel/);
+  assert.match(coreApiRouteServiceJs, /defaultModel: defaultModelForOptions\(runtimeModelOptions\)/);
   assert.match(coreApiRouteServiceJs, /defaultPermissionMode: defaultPermissionModeFromConfigDefaults\(\)/);
   assert.match(runtimePermissionPolicyServiceJs, /function defaultPermissionModeFromConfigDefaults\(\)[\s\S]*dangerFullAccess[\s\S]*return "full"/);
   assert.match(runtimePermissionPolicyServiceJs, /disabled:\s*"dangerFullAccess"/);
@@ -242,10 +245,14 @@ test("server resolves the default Codex executable from macOS install paths", ()
   assert.match(serverRuntimeConfigServiceJs, /CODEX_EXE:\s*resolveDefaultCodexExecutable\(\)/);
   assert.match(serverRuntimeUtilsJs, /function resolveDefaultCodexExecutable\(/);
   assert.match(serverRuntimeUtilsJs, /CODEX_MOBILE_CODEX_EXE/);
+  assert.match(serverRuntimeUtilsJs, /function bundledCodexExecutableCandidates\(/);
+  assert.match(serverRuntimeUtilsJs, /\/Applications\/ChatGPT\.app/);
+  assert.match(serverRuntimeUtilsJs, /Contents", "Resources", "codex"/);
   assert.match(serverRuntimeUtilsJs, /function pathEntriesFromEnvPath\(/);
   assert.match(serverRuntimeUtilsJs, /path\.delimiter/);
   assert.match(serverRuntimeUtilsJs, /\/opt\/homebrew\/bin/);
   assert.match(serverRuntimeUtilsJs, /path\.join\(userHome, "\.local", "bin"\)/);
+  assert.match(serverRuntimeUtilsJs, /findExecutableFile\(bundledCodexExecutableCandidates\(\)\)/);
   assert.match(serverRuntimeUtilsJs, /findExecutableInDirs\("codex", commonCodexExecutableDirs\(\)\)/);
 });
 
@@ -261,12 +268,12 @@ test("server maps quota groups to shared Codex and independent Spark models", ()
 
 test("server hydrates rollout quota snapshots without overwriting live quota", () => {
   assert.match(rateLimitRuntimeServiceJs, /function loadRecentRateLimitsFromRollouts\(/, "server should scan local rollout evidence");
-  assert.match(rateLimitRuntimeServiceJs, /isRateLimitRolloutSourceAccountScoped\(CODEX_HOME\)/, "server should only scan account-scoped rollout quota evidence");
+  assert.match(rateLimitRuntimeServiceJs, /isRateLimitRolloutSourceAccountScoped\(currentCodexHome\(\)\)/, "server should only scan account-scoped rollout quota evidence for the active profile");
   assert.match(rateLimitRuntimeServiceJs, /entry && entry\.payload && entry\.payload\.rate_limits/, "server should read native rollout rate_limits");
   assert.match(rateLimitRuntimeServiceJs, /recordRateLimits\(entry\.rateLimits,\s*\{\s*source:\s*"rollout"\s*\}\)/, "rollout scan should write snapshot quota");
-  assert.match(rateLimitRuntimeServiceJs, /function canExposeRateLimitsForActiveHome\(\)[\s\S]*isRateLimitRolloutSourceAccountScoped\(CODEX_HOME\)/, "server should gate quota exposure to account-scoped homes");
+  assert.match(rateLimitRuntimeServiceJs, /function canExposeRateLimitsForActiveHome\(\)[\s\S]*isRateLimitRolloutSourceAccountScoped\(currentCodexHome\(\)\)/, "server should gate quota exposure to account-scoped homes");
   assert.match(rateLimitRuntimeServiceJs, /function isTrustedLiveRateLimitSource\([\s\S]*managed-child-live[\s\S]*profile-mux-live/, "owned live quota should be exposable for shared profile homes");
-  assert.match(rateLimitRuntimeServiceJs, /function recordRateLimits\([\s\S]*!isRateLimitRolloutSourceAccountScoped\(CODEX_HOME\)[\s\S]*latestLiveRateLimits = null/, "source-less live quota should be ignored for shared profile homes");
+  assert.match(rateLimitRuntimeServiceJs, /function recordRateLimits\([\s\S]*!isRateLimitRolloutSourceAccountScoped\(currentCodexHome\(\)\)[\s\S]*latestLiveRateLimits = null/, "source-less live quota should be ignored for shared profile homes");
   assert.match(rateLimitRuntimeServiceJs, /function recordRateLimitReadResult\([\s\S]*rateLimitsByLimitId[\s\S]*latestLiveRateLimitsSource = source/, "rate-limit read RPC should hydrate model quota snapshots");
   assert.match(codexAppServerClientServiceJs, /await this\.refreshRateLimits\(\);[\s\S]*this\.ready = true/, "initialize should refresh quota before broadcasting ready status");
   assert.match(codexAppServerClientServiceJs, /async refreshRateLimitsIfMissing\(\)[\s\S]*LIVE_RATE_LIMIT_REFRESH_MIN_INTERVAL_MS/, "server should rehydrate missing live quota after app-server startup");
@@ -275,11 +282,15 @@ test("server hydrates rollout quota snapshots without overwriting live quota", (
   assert.match(codexAppServerClientServiceJs, /recordRateLimits\(msg\.params\.rateLimits,\s*\{[\s\S]*source:\s*this\.rateLimitSource\(\)/, "quota notifications should use the same trusted source classifier as quota reads");
   assert.match(serverRuntimeUtilsJs, /function codexAppServerChildEnv\([\s\S]*CODEX_CLI_PATH[\s\S]*CODEX_MUX_/, "managed child app-server env should drop desktop bridge variables");
   assert.match(serverRuntimeUtilsJs, /if \(codexHome\) out\.CODEX_HOME = codexHome;[\s\S]*Object\.assign\(out, extra\);/, "explicit child env should be able to override the active CODEX_HOME for profile preflight");
-  assert.match(codexAppServerClientServiceJs, /spawn\(CODEX_EXE,[\s\S]*\{\s*cwd: APP_ROOT,[\s\S]*env: codexAppServerChildEnv\(\{ CODEX_HOME \}\)/, "managed child app-server should inherit the resolved active CODEX_HOME without desktop bridge env");
-  assert.match(codexAppServerClientServiceJs, /async startOwnedMuxAndConnect\(\)/, "Mobile Web should be able to own a shared mux instead of depending on Desktop");
-  assert.match(codexAppServerClientServiceJs, /CODEX_MUX_STANDALONE:\s*"1"[\s\S]*CODEX_MUX_KEEP_ALIVE:\s*"1"[\s\S]*CODEX_MUX_PUBLISH_ENDPOINT:\s*"1"/, "Mobile-owned mux should stay alive after Desktop exits and publish the active profile endpoint");
+  assert.match(codexAppServerClientServiceJs, /spawn\(CODEX_EXE,[\s\S]*\{\s*cwd: APP_ROOT,[\s\S]*env: codexAppServerChildEnv\(\{ CODEX_HOME: binding\.codexHome \}\)/, "managed child app-server should inherit the runtime active CODEX_HOME without desktop bridge env");
+  assert.match(codexAppServerClientServiceJs, /runtimeBindingMismatch\(\)[\s\S]*active_profile_changed/, "message submit and turn requests should rebind when the active profile changes");
+  assert.match(codexAppServerClientServiceJs, /async startOwnedMuxAndConnect\(binding = runtimeProfileBinding\(\)\)/, "Mobile Web should be able to own a shared mux instead of depending on Desktop");
+  assert.match(codexAppServerClientServiceJs, /CODEX_MUX_STANDALONE:\s*"1"[\s\S]*CODEX_MUX_KEEP_ALIVE:\s*"1"[\s\S]*CODEX_MUX_PUBLISH_ENDPOINT:\s*"auto"/, "Mobile-owned mux should stay alive after Desktop exits and avoid overwriting a live active profile endpoint");
   assert.match(codexAppServerClientServiceJs, /shared endpoint missing; starting Mobile-owned mux/, "required shared mode should start a Mobile-owned mux when the profile endpoint is absent");
-  assert.match(codexAppServerClientServiceJs, /profile mux endpoint unavailable; starting Mobile-owned mux/, "stale profile endpoints should be replaced by a Mobile-owned mux");
+  assert.match(codexAppServerClientServiceJs, /shouldPreserveProfileMuxAfterFailure/, "live profile mux endpoints should be preserved across listener restarts");
+  assert.match(codexAppServerClientServiceJs, /profile mux endpoint unavailable; starting Mobile-owned mux/, "dead profile endpoints should still be replaced by a Mobile-owned mux");
+  assert.match(codexAppServerClientServiceJs, /shouldReplaceProfileMuxForExecutableMismatch[\s\S]*profile mux codex executable changed; starting Mobile-owned mux/, "profile mux endpoints from a stale Codex executable should be replaced by the active Mobile executable");
+  assert.match(codexAppServerClientServiceJs, /if \(endpoint\.codexExe\) resolved\.codexExe = String\(endpoint\.codexExe\)\.slice\(0, 1024\)/, "profile mux endpoint resolver should preserve bounded executable identity for replacement decisions");
   assert.match(serverRuntimeConfigServiceJs, /PERSIST_MOBILE_OWNED_MUX:\s*boolFlag\(env\.CODEX_MOBILE_PERSIST_OWNED_MUX\)/, "server should expose a persistent owned mux mode for Listener restarts");
   assert.match(codexAppServerClientServiceJs, /detached:\s*PERSIST_MOBILE_OWNED_MUX/, "persistent owned mux should detach from the Listener process group");
   assert.match(codexAppServerClientServiceJs, /child\.unref\(\)/, "persistent owned mux should not keep the Listener process alive");
@@ -287,8 +298,9 @@ test("server hydrates rollout quota snapshots without overwriting live quota", (
   assert.match(codexAppServerClientServiceJs, /mobileOwnedMux:\s*this\.muxChild \? \{[\s\S]*pid:[\s\S]*running:/, "status should expose bounded Mobile-owned mux runtime evidence");
   assert.match(serverJs, /if \(!PERSIST_MOBILE_OWNED_MUX && codex\.muxChild && codex\.muxChild\.exitCode === null\) codex\.muxChild\.kill\(\)/, "server shutdown should preserve persistent owned mux children");
   assert.match(rateLimitRuntimeServiceJs, /function activeRateLimits\(\)[\s\S]*latestLiveRateLimits \|\| latestSnapshotRateLimits/, "live quota should win over rollout snapshots");
-  assert.match(coreApiRouteServiceJs, /\/api\/public-config"[\s\S]*scheduleStatusBackgroundRefresh\(\);[\s\S]*rateLimits: activeRateLimits\(\)/, "public config should schedule quota refresh without blocking login");
-  assert.match(coreApiRouteServiceJs, /\/api\/status"[\s\S]*scheduleStatusBackgroundRefresh\(\);[\s\S]*const status = codex\.status\(\);[\s\S]*sendJson\(200, status\)/, "status should schedule quota refresh and return the current snapshot immediately");
+  assert.match(coreApiRouteServiceJs, /function scheduleQuotaHydration\(\)[\s\S]*codex\.refreshRateLimitsIfMissing\(\)[\s\S]*loadRecentRateLimitsFromRollouts\(\)/, "quota hydration should stay in a bounded background helper");
+  assert.match(coreApiRouteServiceJs, /\/api\/public-config"[\s\S]*scheduleQuotaHydration\(\);[\s\S]*rateLimits: activeRateLimits\(\)/, "public config should schedule quota hydration and include the current active quota snapshot");
+  assert.match(coreApiRouteServiceJs, /\/api\/status"[\s\S]*scheduleQuotaHydration\(\);[\s\S]*const status = codex\.status\(\);[\s\S]*sendJson\(200, status\)/, "status should schedule quota hydration without blocking the health read");
 });
 
 test("server runtime inheritance includes model and reasoning effort", () => {
@@ -298,12 +310,12 @@ test("server runtime inheritance includes model and reasoning effort", () => {
   assert.match(settingsBody, /model,\s*reasoningEffort,/, "runtime settings response should expose inherited model and effort");
 
   const startBody = functionBody(taskCardRuntimePolicyServiceJs, "applyStartThreadRuntimeSettings");
-  assert.match(startBody, /attachWorkspaceDelegationRuntimeGuidance\(params\)/, "thread/start should receive workspace delegation dynamic tools and script fallback guidance when enabled");
+  assert.match(startBody, /attachWorkspaceDelegationRuntimeGuidance\(params\)/, "thread/start should receive workspace delegation guidance when enabled");
   assert.match(startBody, /if \(settings\.model\) params\.model = settings\.model;/, "thread/start should inherit model");
   assert.match(startBody, /applyWorkspaceDelegationRuntimeGuard\(params, settings, \{ useSandboxPolicy: false \}\)/, "thread/start should enforce workspace delegation write guard");
 
   const turnBody = functionBody(taskCardRuntimePolicyServiceJs, "applyTurnRuntimeSettings");
-  assert.match(turnBody, /attachWorkspaceDelegationRuntimeGuidance\(params\)/, "turn/start should receive workspace delegation dynamic tools and script fallback guidance when enabled");
+  assert.match(turnBody, /attachWorkspaceDelegationRuntimeGuidance\(params\)/, "turn/start should receive workspace delegation guidance when enabled");
   assert.match(turnBody, /if \(settings\.model\) params\.model = settings\.model;/, "turn/start should inherit model");
   assert.match(turnBody, /if \(settings\.reasoningEffort\) params\.effort = settings\.reasoningEffort;/, "turn/start should inherit reasoning effort");
   assert.match(turnBody, /applyWorkspaceDelegationRuntimeGuard\(params, settings, \{ useSandboxPolicy: true \}\)/, "turn/start should enforce workspace delegation write guard");
@@ -375,9 +387,10 @@ test("server runtime inheritance includes model and reasoning effort", () => {
 
   const guidanceBody = functionBody(taskCardRouteServiceJs, "attachWorkspaceDelegationRuntimeGuidance");
   assert.match(taskCardRouteAdapterJs, /require\("\.\.\/server-routes\/thread-task-card-route-service"\)/, "adapter should remain a compatibility re-export");
-  assert.match(guidanceBody, /attachTaskCardRuntimeDynamicTools\(params, settings\)/, "runtime guidance should preserve dynamic tool injection");
+  assert.doesNotMatch(guidanceBody, /attachWorkspaceDelegationDynamicTools\(params, settings\)/, "ordinary runtime guidance must not send MCP-prefixed tools as app-server dynamicTools");
+  assert.doesNotMatch(guidanceBody, /params\.dynamicTools|DynamicTools\(params/, "ordinary runtime guidance must avoid the reserved MCP dynamicTools namespace");
+  assert.doesNotMatch(guidanceBody, /taskCardReturnScriptFallbackInstruction\(params\)/, "ordinary runtime guidance must not expose return_to_source fallback");
   assert.match(guidanceBody, /appendDeveloperInstructions\(/, "runtime guidance should add model-visible fallback instructions");
-  assert.match(guidanceBody, /taskCardReturnScriptFallbackInstruction\(params\)/, "runtime guidance should include the local return-card script fallback");
   assert.match(guidanceBody, /workspaceDelegationScriptFallbackInstruction\(params\)/, "runtime guidance should include the local task-card script fallback");
 
   const fallbackBody = functionBody(taskCardRouteServiceJs, "workspaceDelegationScriptFallbackInstruction");
@@ -444,6 +457,10 @@ test("embedded plugin continuations carry plugin mode into the bootstrap", () =>
 });
 
 test("continuation can fall back when source thread cannot write a handoff", () => {
+  assert.match(continuationThreadServiceJs, /function truncateSingleLine\(/, "fallback reason formatting should have a local helper");
+  const fallbackReasonBody = functionBody(continuationThreadServiceJs, "continuationFallbackReason");
+  assert.match(fallbackReasonBody, /truncateSingleLine\(/, "fallback reason formatting should use the local single-line truncation helper");
+
   const sourceHandoffBody = functionBody(continuationThreadServiceJs, "createSourceContinuationHandoff");
   assert.match(sourceHandoffBody, /sourceSnapshot/, "source handoff generation should receive the source snapshot for fallback");
   assert.match(sourceHandoffBody, /writeFallbackSourceContinuationHandoff\(/, "source handoff generation should have a server fallback path");
@@ -464,6 +481,41 @@ test("continuation can fall back when source thread cannot write a handoff", () 
   const handoffSectionBody = functionBody(continuationThreadServiceJs, "sourceHandoffSection");
   assert.match(handoffSectionBody, /sourceHandoff\.fallback/, "bootstrap should disclose fallback handoff mode");
   assert.match(handoffSectionBody, /fallbackReason/, "bootstrap should include a bounded fallback reason");
+});
+
+test("continuation fallback handoff formats resume errors without ReferenceError", async (t) => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-continuation-fallback-"));
+  t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+  const progress = [];
+  const service = createContinuationThreadService({
+    codexRequest: async (method) => {
+      if (method === "thread/resume") {
+        const err = new Error("resume failed\nwith multiline whitespace that must be compacted");
+        err.code = "TEST_RESUME";
+        throw err;
+      }
+      throw new Error(`unexpected request ${method}`);
+    },
+  });
+
+  const handoff = await service.createSourceContinuationHandoff({
+    cwd: workspace,
+    sourceThreadId: "thread-fallback-1",
+    sourceThreadTitle: "Fallback Source",
+    sourceSnapshot: {
+      threadId: "thread-fallback-1",
+      title: "Fallback Source",
+      turns: [],
+      readWarnings: [],
+    },
+    onProgress: (step, message, details) => progress.push({ step, message, details }),
+  });
+
+  assert.equal(handoff.fallback, true);
+  assert.match(handoff.fallbackReason, /^resume: resume failed with multiline whitespace/);
+  assert.doesNotMatch(handoff.fallbackReason, /\n/);
+  assert.equal(fs.existsSync(handoff.path), true);
+  assert.ok(progress.some((entry) => entry.step === "handoff-fallback"));
 });
 
 test("continuation titles survive app-server rename gaps", () => {
@@ -534,7 +586,17 @@ test("existing-message route forwards runtime settings on next turn", () => {
 test("existing-thread message send refreshes the sidebar thread list", () => {
   const body = functionBody(composerRuntimeJs, "sendMessage");
 
-  assert.match(body, /scheduleComposerTargetRefresh\(targetThreadId, 600, "message-submit"\);[\s\S]*scheduleLivePollIfNeeded\(1200\);[\s\S]*loadThreads\(\{ silent: true \}\)\.catch\(showError\);/);
+  assert.match(body, /scheduleComposerTargetRefresh\(targetThreadId, 250, "message-submit"\);[\s\S]*schedulePostCompletionThreadRefreshes\(targetThreadId, \[350, 750, 1200, 2400, 5200\]\);[\s\S]*scheduleLivePollIfNeeded\(1200\);[\s\S]*loadThreads\(\{ silent: true \}\)\.catch\(showError\);/);
+});
+
+test("active-turn message send reports queued steering separately from delivered steering", () => {
+  const sendBody = functionBody(composerRuntimeJs, "sendMessage");
+  const labelBody = functionBody(navigationRuntimeJs, "steerFeedbackLabel");
+  const pendingBody = functionBody(navigationRuntimeJs, "isPendingSteerForTurn");
+
+  assert.match(sendBody, /result && result\.steeringQueued \? "queued" : "delivered"/);
+  assert.match(labelBody, /status === "queued"[\s\S]*引导已排队/);
+  assert.match(pendingBody, /feedback\.status === "sending"[\s\S]*feedback\.status === "queued"[\s\S]*feedback\.status === "delivered"/);
 });
 
 test("send auth failures return stable codes and render message receipts", () => {
@@ -614,9 +676,13 @@ test("existing-message route falls back when active turn steering is stale", () 
   const steerIndex = routeBody.indexOf('codex.request("turn/steer"', interruptIndex);
   const pendingEchoIndex = routeBody.indexOf("pendingSteerEchoStore.remember", interruptIndex);
   const forgetEchoIndex = routeBody.indexOf("pendingSteerEchoStore.forget", pendingEchoIndex);
-  const staleLogIndex = routeBody.indexOf('logMessageSubmit("active-turn-stale"');
-  const resumeIndex = routeBody.indexOf('codex.request("thread/resume"', staleLogIndex);
+  const staleLogIndex = routeBody.indexOf('"active-turn-stale"', steerIndex);
+  const resumeHelperIndex = routeBody.indexOf("const resumeThreadBeforeTurnStart", preflightCallIndex);
+  const resumeIndex = routeBody.indexOf('codex.request("thread/resume"', resumeHelperIndex);
   const turnStartIndex = routeBody.indexOf('codex.request("turn/start"', resumeIndex);
+  const replacementHelperIndex = routeBody.indexOf("const startReplacementTurn", turnStartIndex);
+  const staleFallthroughIndex = routeBody.indexOf("return await startReplacementTurn(timings)", staleLogIndex);
+  const queuedFallbackIndex = routeBody.indexOf('logMessageSubmit("steer-background-stale-fallback-done"', staleLogIndex);
   assert.ok(preflightCallIndex > 0, "message route should preflight stale active turns before steering");
   assert.ok(preflightLogIndex > preflightCallIndex, "message route should log stale active-turn preflight");
   assert.ok(interruptIndex > preflightLogIndex, "stale active turn should be interrupted before starting a new turn");
@@ -625,8 +691,12 @@ test("existing-message route falls back when active turn steering is stale", () 
   assert.ok(forgetEchoIndex > steerIndex, "pending steer echo should be forgotten when turn/steer falls through as stale");
   assert.match(routeBody, /if \(body\.activeTurnId && !skipTurnSteer\)/, "stale preflight should skip turn/steer");
   assert.ok(staleLogIndex > 0, "message route should log stale active turn steering");
-  assert.ok(resumeIndex > staleLogIndex, "stale active turn should fall through to thread/resume");
-  assert.ok(turnStartIndex > resumeIndex, "stale active turn should fall through to turn/start");
+  assert.ok(resumeHelperIndex > preflightCallIndex, "message route should own a reusable thread/resume helper");
+  assert.ok(resumeIndex > resumeHelperIndex, "replacement helper should be able to resume threads");
+  assert.ok(turnStartIndex > resumeIndex, "replacement helper should be able to start turns");
+  assert.ok(replacementHelperIndex > turnStartIndex, "message route should own a replacement turn helper");
+  assert.ok(staleFallthroughIndex > staleLogIndex, "foreground stale active turn should fall through to replacement turn start");
+  assert.ok(queuedFallbackIndex > staleLogIndex, "queued stale steering should complete through a background replacement turn");
 });
 
 test("auto-recover route steers live turns before starting a replacement turn", () => {

@@ -328,12 +328,18 @@ function createSubmissionId() {
 }
 
 var RECENT_SUBMITTED_USER_MESSAGE_TTL_MS = 6 * 60 * 60 * 1000;
+var RECENT_SUBMITTED_USER_MESSAGE_ACCEPTED_TTL_MS = 2 * 60 * 1000;
 
 function pruneRecentSubmittedUserMessages(now = Date.now()) {
   const records = state.recentSubmittedUserMessages;
   if (!records || typeof records.entries !== "function") return;
   for (const [key, record] of records.entries()) {
-    if (!record || now - Number(record.createdAtMs || 0) > RECENT_SUBMITTED_USER_MESSAGE_TTL_MS) records.delete(key);
+    const acceptedAtMs = Number(record && record.acceptedAtMs || 0);
+    const ttlMs = acceptedAtMs > 0
+      ? RECENT_SUBMITTED_USER_MESSAGE_ACCEPTED_TTL_MS
+      : RECENT_SUBMITTED_USER_MESSAGE_TTL_MS;
+    const anchorMs = acceptedAtMs || Number(record && record.createdAtMs || 0);
+    if (!record || now - anchorMs > ttlMs) records.delete(key);
   }
 }
 
@@ -346,6 +352,14 @@ function registerSubmittedUserMessage(threadId, text, attachments, clientSubmiss
     item: localUserMessageItem(text, attachments || [], id),
     createdAtMs: Date.now(),
   });
+  if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+    recordSubmittedEchoDiagnosticLog("recent-submission-registered", {
+      threadId,
+      clientSubmissionId: id,
+      attachmentCount: Array.isArray(attachments) ? attachments.length : 0,
+      textLength: String(text || "").length,
+    });
+  }
 }
 
 function localSubmittedTurnId(clientSubmissionId) {
@@ -397,9 +411,27 @@ function syncLocalSubmissionThread(thread) {
 function insertLocalSubmittedUserMessage(threadId, text, attachments, clientSubmissionId, options = null) {
   const id = String(threadId || "").trim();
   const thread = mutableThreadForLocalSubmission(id);
-  if (!id || !thread) return false;
+  if (!id || !thread) {
+    if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+      recordSubmittedEchoDiagnosticLog("local-insert-skipped", {
+        threadId: id,
+        clientSubmissionId,
+        reason: !id ? "missing_thread_id" : "missing_thread",
+      });
+    }
+    return false;
+  }
   const submissionId = String(clientSubmissionId || "").trim();
-  if (submissionId && threadHasClientSubmission(thread, submissionId)) return false;
+  if (submissionId && threadHasClientSubmission(thread, submissionId)) {
+    if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+      recordSubmittedEchoDiagnosticLog("local-insert-skipped", {
+        threadId: id,
+        clientSubmissionId: submissionId,
+        reason: "submission_already_present",
+      });
+    }
+    return false;
+  }
   const opts = options || {};
   const requestedTurnId = String(opts.turnId || "").trim();
   const requestedTurn = requestedTurnId
@@ -426,6 +458,17 @@ function insertLocalSubmittedUserMessage(threadId, text, attachments, clientSubm
   turn.items.push(localUserMessageItem(text, attachments || [], submissionId));
   thread.status = { type: "active" };
   syncLocalSubmissionThread(thread);
+  if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+    recordSubmittedEchoDiagnosticLog("local-insert-applied", {
+      threadId: id,
+      clientSubmissionId: submissionId,
+      requestedTurnHash: diagnosticTurnHash(requestedTurnId),
+      targetTurnHash: diagnosticTurnHash(turnId),
+      createdLocalTurn: !requestedTurnId || requestedTurnId !== turnId,
+      attachmentCount: Array.isArray(attachments) ? attachments.length : 0,
+      textLength: String(text || "").length,
+    });
+  }
   return true;
 }
 
@@ -443,12 +486,103 @@ function mergeSubmittedUserItemIntoTurn(turn, item) {
   return true;
 }
 
+function markRecentSubmittedUserMessageAccepted(threadId, clientSubmissionId, serverTurnId) {
+  const id = String(clientSubmissionId || "").trim();
+  if (!id || !state.recentSubmittedUserMessages || typeof state.recentSubmittedUserMessages.get !== "function") return false;
+  const record = state.recentSubmittedUserMessages.get(id);
+  if (!record) return false;
+  record.threadId = String(threadId || record.threadId || "");
+  record.serverTurnId = String(serverTurnId || record.serverTurnId || "");
+  record.acceptedAtMs = Date.now();
+  state.recentSubmittedUserMessages.set(id, record);
+  return true;
+}
+
+function durableUserMessageMatchesSubmittedRecord(item, record, clientSubmissionId) {
+  if (!item || item.type !== "userMessage" || isOptimisticUserMessage(item)) return false;
+  const submissionId = String(clientSubmissionId || "").trim();
+  if (submissionId && String(item.clientSubmissionId || "") === submissionId) return true;
+  const recordItem = record && record.item;
+  return Boolean(recordItem && userMessagesCanShadow(item, recordItem));
+}
+
+function threadHasDurableSubmittedUserRecord(thread, record, clientSubmissionId) {
+  for (const turn of Array.isArray(thread && thread.turns) ? thread.turns : []) {
+    for (const item of Array.isArray(turn && turn.items) ? turn.items : []) {
+      if (durableUserMessageMatchesSubmittedRecord(item, record, clientSubmissionId)) return true;
+    }
+  }
+  return false;
+}
+
+function optimisticUserMessageMatchesSubmittedRecord(item, record, clientSubmissionId) {
+  if (!item || item.type !== "userMessage" || !isOptimisticUserMessage(item)) return false;
+  const submissionId = String(clientSubmissionId || "").trim();
+  if (submissionId && String(item.clientSubmissionId || "") === submissionId) return true;
+  const recordItem = record && record.item;
+  return Boolean(recordItem && userMessagesCanShadow(item, recordItem));
+}
+
+function removeOptimisticSubmittedUserRecordEchoes(thread, record, clientSubmissionId) {
+  if (!thread || !Array.isArray(thread.turns)) return false;
+  let changed = false;
+  thread.turns = thread.turns.filter((turn) => {
+    if (!turn || !Array.isArray(turn.items)) return true;
+    const nextItems = turn.items.filter((item) => !optimisticUserMessageMatchesSubmittedRecord(item, record, clientSubmissionId));
+    if (nextItems.length !== turn.items.length) {
+      turn.items = nextItems;
+      changed = true;
+    }
+    return Boolean(turn.items.length || !/^local-turn-/.test(String(turn.id || "")));
+  });
+  return changed;
+}
+
+function settleRecentSubmittedUserMessagesForThread(thread, source = "thread-refresh") {
+  const records = state.recentSubmittedUserMessages;
+  if (!thread || !records || typeof records.entries !== "function") return 0;
+  pruneRecentSubmittedUserMessages();
+  const threadId = String(thread.id || state.currentThreadId || "").trim();
+  let settledCount = 0;
+  let changed = false;
+  for (const [clientSubmissionId, record] of Array.from(records.entries())) {
+    if (!recentSubmittedUserRecordBelongsToThread(record, threadId)) continue;
+    if (!threadHasDurableSubmittedUserRecord(thread, record, clientSubmissionId)) continue;
+    records.delete(clientSubmissionId);
+    settledCount += 1;
+    changed = removeOptimisticSubmittedUserRecordEchoes(thread, record, clientSubmissionId) || changed;
+    if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+      recordSubmittedEchoDiagnosticLog("recent-submission-settled", {
+        threadId,
+        clientSubmissionId,
+        source: String(source || "thread-refresh").slice(0, 80),
+      });
+    }
+  }
+  if (changed) normalizeThreadVisibleUserMessages(thread);
+  return settledCount;
+}
+
 function reconcileSubmittedUserMessageTurn(threadId, clientSubmissionId, serverTurnId) {
   const id = String(threadId || "").trim();
   const submissionId = String(clientSubmissionId || "").trim();
   const turnId = String(serverTurnId || "").trim();
   const thread = mutableThreadForLocalSubmission(id);
-  if (!id || !submissionId || !turnId || !thread || String(thread.id || "") !== id) return false;
+  if (!id || !submissionId || !turnId || !thread || String(thread.id || "") !== id) {
+    if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+      recordSubmittedEchoDiagnosticLog("reconcile-skipped", {
+        threadId: id,
+        clientSubmissionId: submissionId,
+        serverTurnHash: diagnosticTurnHash(turnId),
+        reason: !id ? "missing_thread_id"
+          : !submissionId ? "missing_submission_id"
+          : !turnId ? "missing_server_turn_id"
+          : !thread ? "missing_thread"
+          : "thread_id_mismatch",
+      });
+    }
+    return false;
+  }
   thread.turns = Array.isArray(thread.turns) ? thread.turns : [];
   let sourceTurn = null;
   let sourceItem = null;
@@ -462,7 +596,17 @@ function reconcileSubmittedUserMessageTurn(threadId, clientSubmissionId, serverT
     sourceItem = item;
     break;
   }
-  if (!sourceItem) return false;
+  if (!sourceItem) {
+    if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+      recordSubmittedEchoDiagnosticLog("reconcile-skipped", {
+        threadId: id,
+        clientSubmissionId: submissionId,
+        serverTurnHash: diagnosticTurnHash(turnId),
+        reason: "optimistic_source_item_missing",
+      });
+    }
+    return false;
+  }
   let targetTurn = thread.turns.find((turn) => String(turn && turn.id || "") === turnId);
   if (!targetTurn) {
     targetTurn = {
@@ -478,6 +622,7 @@ function reconcileSubmittedUserMessageTurn(threadId, clientSubmissionId, serverT
   }
   clientRenderStabilityGuard.transferSubmittedTurnIdentity(sourceTurn, targetTurn, submissionId);
   const changed = mergeSubmittedUserItemIntoTurn(targetTurn, sourceItem);
+  markRecentSubmittedUserMessageAccepted(id, submissionId, turnId);
   if (sourceTurn && sourceTurn !== targetTurn) {
     sourceTurn.items = (sourceTurn.items || []).filter((item) => item !== sourceItem);
     if (!sourceTurn.items.length && /^local-turn-/.test(String(sourceTurn.id || ""))) {
@@ -486,6 +631,16 @@ function reconcileSubmittedUserMessageTurn(threadId, clientSubmissionId, serverT
   }
   normalizeThreadVisibleUserMessages(thread);
   syncLocalSubmissionThread(thread);
+  if (typeof recordSubmittedEchoDiagnosticLog === "function") {
+    recordSubmittedEchoDiagnosticLog("reconcile-applied", {
+      threadId: id,
+      clientSubmissionId: submissionId,
+      sourceTurnHash: diagnosticTurnHash(sourceTurn && sourceTurn.id),
+      serverTurnHash: diagnosticTurnHash(turnId),
+      changed,
+      movedTurn: Boolean(sourceTurn && sourceTurn !== targetTurn),
+    });
+  }
   return changed;
 }
 
@@ -1910,10 +2065,21 @@ function rememberCodexProfiles(value) {
 }
 
 function codexProfileAccountLabel(profile) {
+  const displayName = String(profile && (profile.accountName || profile.displayName || profile.accountLabel) || "").trim();
+  if (displayName) return displayName;
   const auth = profile && profile.auth || {};
   if (auth.status === "loggedIn") {
     return auth.email || auth.name || auth.label || auth.accountId || "Logged in";
   }
+  if (auth.status === "error") return "Auth unreadable";
+  return "Not logged in";
+}
+
+function codexProfileStatusLabel(profile) {
+  const explicit = String(profile && profile.authStatusLabel || "").trim();
+  if (explicit) return explicit;
+  const auth = profile && profile.auth || {};
+  if (auth.status === "loggedIn") return "Signed in";
   if (auth.status === "error") return "Auth unreadable";
   return "Not logged in";
 }
@@ -1933,6 +2099,7 @@ function renderCodexProfileSettings() {
     const showingSwitchProgress = state.codexProfileSwitchTargetId === id && Boolean(state.codexProfileSwitchStage);
     const loggedIn = profile.auth && profile.auth.status === "loggedIn";
     const disabled = active || state.codexProfileSwitchBusy || state.codexProfileRestarting || !state.codexProfileSwitchSupported || !loggedIn;
+    const accountLabel = codexProfileAccountLabel(profile);
     const action = switchingThisProfile
       ? (state.codexProfileSwitchStage || "预检中...")
       : active
@@ -1954,8 +2121,8 @@ function renderCodexProfileSettings() {
       : "";
     return `<div class="codex-profile-row${active ? " active" : ""}">`
       + `<div class="codex-profile-main">`
-      + `<strong>${escapeHtml(profile.label || id)}</strong>`
-      + `<span>${escapeHtml(codexProfileAccountLabel(profile))}</span>`
+      + `<strong>${escapeHtml(accountLabel)}</strong>`
+      + `<span>${escapeHtml(codexProfileStatusLabel(profile))}</span>`
       + `<small>${escapeHtml(profile.codexHome || "")}</small>`
       + status
       + `</div>`
@@ -2043,13 +2210,367 @@ async function handleWorkspaceDelegationSettingsClick(event) {
   }
 }
 
+function normalizeRemoteManagedWorkspaceList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  return String(value || "").split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function normalizeRemoteManagedWorkspaceConfig(value) {
+  const input = value && typeof value === "object" ? value : {};
+  return {
+    enabled: Boolean(input.enabled),
+    workspaceKind: String(input.workspaceKind || "remote_managed_workspace"),
+    workspaceId: String(input.workspaceId || ""),
+    nodeName: String(input.nodeName || ""),
+    centralUrl: String(input.centralUrl || ""),
+    projectRoot: String(input.projectRoot || ""),
+    allowedRoot: String(input.allowedRoot || ""),
+    projectType: String(input.projectType || "vite_game"),
+    connectionMode: String(input.connectionMode || "persistent"),
+    effectiveConnectionMode: String(input.effectiveConnectionMode || "http_polling"),
+    persistentSession: String(input.persistentSession || ""),
+    fallbackReason: String(input.fallbackReason || ""),
+    scopedCredentialConfigured: Boolean(input.scopedCredentialConfigured || input.enrollmentTokenConfigured),
+    scopedCredentialRef: String(input.scopedCredentialRef || input.enrollmentTokenRef || ""),
+    scopedCredentialPreview: String(input.scopedCredentialPreview || input.enrollmentTokenPreview || ""),
+    enrollmentTokenConfigured: Boolean(input.enrollmentTokenConfigured),
+    enrollmentTokenRef: String(input.enrollmentTokenRef || ""),
+    enrollmentTokenPreview: String(input.enrollmentTokenPreview || ""),
+    connectionStatus: String(input.connectionStatus || "disconnected"),
+    pairingStatus: String(input.pairingStatus || "unconfigured"),
+    pairingRequestId: String(input.pairingRequestId || ""),
+    pairingRequestedAt: String(input.pairingRequestedAt || ""),
+    pairingApprovedAt: String(input.pairingApprovedAt || ""),
+    pairingRejectedAt: String(input.pairingRejectedAt || ""),
+    pairingRejectionReason: String(input.pairingRejectionReason || ""),
+    lastPairingCheckAt: String(input.lastPairingCheckAt || ""),
+    lastHeartbeatAt: String(input.lastHeartbeatAt || ""),
+    lastPollAt: String(input.lastPollAt || ""),
+    activeTaskCardId: String(input.activeTaskCardId || ""),
+    activeLocalThreadId: String(input.activeLocalThreadId || ""),
+    activeLocalTurnId: String(input.activeLocalTurnId || ""),
+    activeTaskCardStartedAt: String(input.activeTaskCardStartedAt || ""),
+    lastTaskCardId: String(input.lastTaskCardId || ""),
+    lastLocalThreadId: String(input.lastLocalThreadId || ""),
+    lastLocalTurnId: String(input.lastLocalTurnId || ""),
+    lastReturnStatus: String(input.lastReturnStatus || ""),
+    lastExecutionBridgeStatus: String(input.lastExecutionBridgeStatus || ""),
+    lastRegisterAt: String(input.lastRegisterAt || ""),
+    lastConnectionCheckAt: String(input.lastConnectionCheckAt || ""),
+    queuedTerminalReturnCount: Number(input.queuedTerminalReturnCount || 0) || 0,
+    roles: normalizeRemoteManagedWorkspaceList(input.roles),
+    capabilities: normalizeRemoteManagedWorkspaceList(input.capabilities),
+    issueCodes: normalizeRemoteManagedWorkspaceList(input.issueCodes),
+    source: String(input.source || "default"),
+    updatedAt: String(input.updatedAt || ""),
+  };
+}
+
+function rememberRemoteManagedWorkspaceConfig(value) {
+  state.remoteManagedWorkspace = normalizeRemoteManagedWorkspaceConfig(value);
+  renderRemoteManagedWorkspaceSettings();
+}
+
+function remoteManagedWorkspaceStatusLabel(status, config = {}) {
+  switch (String(config && config.pairingStatus || "")) {
+    case "requesting_pairing": return "正在请求配对";
+    case "pending_approval": return "等待 Home AI 审批";
+    case "approved": return "已批准/已配对";
+    case "connected": return "已连接";
+    case "rejected": return "已拒绝";
+    case "auth_failed": return "认证失败";
+    case "offline_retrying": return "离线/重试中";
+    case "unconfigured":
+      if (config && config.enabled && config.centralUrl) return "未配对";
+      if (!(config && config.centralUrl)) return "未配置";
+      break;
+    default:
+      break;
+  }
+  switch (String(status || "")) {
+    case "connected": return "已连接";
+    case "connecting": return "连接中";
+    case "stale": return "stale";
+    case "auth_failed": return "认证失败";
+    case "config_invalid": return "配置无效";
+    case "offline": return "离线/重试中";
+    default: return "未配置";
+  }
+}
+
+function remoteManagedWorkspacePathKey(value) {
+  return String(value || "").replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function remoteManagedWorkspaceBaseName(value) {
+  const text = String(value || "").replace(/[\\/]+$/, "");
+  const parts = text.split(/[\\/]+/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : text;
+}
+
+function remoteManagedWorkspaceFieldHtml(label, name, value, options = {}) {
+  const type = options.type || "text";
+  const placeholder = options.placeholder || "";
+  return `<label class="remote-managed-workspace-field"><span>${escapeHtml(label)}</span>`
+    + `<input type="${escapeHtml(type)}" data-rmw-field="${escapeHtml(name)}" value="${escapeHtml(value || "")}" placeholder="${escapeHtml(placeholder)}" autocomplete="off">`
+    + `</label>`;
+}
+
+function remoteManagedWorkspaceReadonlyField(label, value) {
+  return `<div class="remote-managed-workspace-diagnostic"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "--")}</strong></div>`;
+}
+
+function remoteManagedWorkspaceRowStatus(config, workspace) {
+  const cwd = String(workspace && workspace.cwd || "");
+  if (!cwd) return { label: "Invalid path", className: "invalid" };
+  const active = Boolean(config.enabled && remoteManagedWorkspacePathKey(config.projectRoot) === remoteManagedWorkspacePathKey(cwd));
+  if (!active) return { label: "Local", className: "local" };
+  const status = remoteManagedWorkspaceStatusLabel(config.connectionStatus, config);
+  if (status === "已连接") return { label: "Connected", className: "connected" };
+  if (status === "连接中" || status === "正在请求配对" || status === "等待 Home AI 审批") return { label: status, className: "connecting" };
+  if (status === "离线/重试中") return { label: status, className: "offline" };
+  if (status === "已拒绝" || status === "认证失败") return { label: status, className: "auth" };
+  if (status === "已批准/已配对") return { label: status, className: "remote" };
+  if (status === "stale") return { label: "Remote managed", className: "stale" };
+  if (status === "配置无效") return { label: "Invalid path", className: "invalid" };
+  return { label: status || "Remote managed", className: "remote" };
+}
+
+function remoteManagedWorkspaceRowsHtml(config, busy) {
+  const workspaces = Array.isArray(state.workspaces) ? state.workspaces.slice(0, 24) : [];
+  if (!workspaces.length) {
+    return `<div class="remote-managed-workspace-empty">No local workspaces.</div>`;
+  }
+  return workspaces.map((workspace) => {
+    const cwd = String(workspace && workspace.cwd || "");
+    const label = String(workspace && workspace.label || remoteManagedWorkspaceBaseName(cwd) || "Workspace");
+    const source = String(workspace && workspace.source || "local");
+    const active = Boolean(config.enabled && remoteManagedWorkspacePathKey(config.projectRoot) === remoteManagedWorkspacePathKey(cwd));
+    const status = remoteManagedWorkspaceRowStatus(config, workspace);
+    const mainAction = active ? "disable-workspace" : "enable-workspace";
+    const mainLabel = active ? "Disable" : "远程受控";
+    return `<article class="remote-managed-workspace-item ${escapeHtml(status.className)}${active ? " active" : ""}">`
+      + `<div class="remote-managed-workspace-item-main">`
+      + `<strong>${escapeHtml(label)}</strong>`
+      + `<span>${escapeHtml(cwd)}</span>`
+      + `<small>${escapeHtml(status.label)} · ${escapeHtml(source)}</small>`
+      + `</div>`
+      + `<div class="remote-managed-workspace-item-actions">`
+      + `<button type="button" data-rmw-action="${escapeHtml(mainAction)}" data-rmw-workspace-cwd="${escapeHtml(cwd)}" ${busy || !cwd ? "disabled" : ""}>${escapeHtml(mainLabel)}</button>`
+      + `<button type="button" data-rmw-action="test-connection" data-rmw-workspace-cwd="${escapeHtml(cwd)}" ${busy || !active ? "disabled" : ""}>Test</button>`
+      + `</div>`
+      + `</article>`;
+  }).join("");
+}
+
+function remoteManagedWorkspaceAdvancedHtml(config) {
+  const issueText = config.issueCodes.length ? config.issueCodes.slice(0, 8).join(", ") : "";
+  const credentialText = config.scopedCredentialConfigured ? (config.scopedCredentialRef || config.scopedCredentialPreview || "configured") : "not configured";
+  return `<details class="remote-managed-workspace-advanced">`
+    + `<summary>Advanced / Diagnostics</summary>`
+    + `<div class="remote-managed-workspace-advanced-grid">`
+    + remoteManagedWorkspaceReadonlyField("workspace kind", config.workspaceKind)
+    + remoteManagedWorkspaceReadonlyField("workspace id", config.workspaceId)
+    + remoteManagedWorkspaceReadonlyField("node name", config.nodeName)
+    + remoteManagedWorkspaceReadonlyField("project root", config.projectRoot)
+    + remoteManagedWorkspaceReadonlyField("allowed root", config.allowedRoot)
+    + remoteManagedWorkspaceReadonlyField("project type", config.projectType)
+    + remoteManagedWorkspaceReadonlyField("pairing", config.pairingStatus)
+    + remoteManagedWorkspaceReadonlyField("pairing request", config.pairingRequestId)
+    + remoteManagedWorkspaceReadonlyField("pairing check", config.lastPairingCheckAt)
+    + remoteManagedWorkspaceReadonlyField("connection", `${config.connectionMode} -> ${config.effectiveConnectionMode}`)
+    + remoteManagedWorkspaceReadonlyField("credential", credentialText)
+    + remoteManagedWorkspaceReadonlyField("roles", config.roles.join(", "))
+    + remoteManagedWorkspaceReadonlyField("capabilities", config.capabilities.join(", "))
+    + remoteManagedWorkspaceReadonlyField("heartbeat", config.lastHeartbeatAt)
+    + remoteManagedWorkspaceReadonlyField("poll", config.lastPollAt)
+    + remoteManagedWorkspaceReadonlyField("task", config.lastTaskCardId)
+    + remoteManagedWorkspaceReadonlyField("return", config.lastReturnStatus)
+    + remoteManagedWorkspaceReadonlyField("queued returns", String(config.queuedTerminalReturnCount || 0))
+    + remoteManagedWorkspaceReadonlyField("issues", issueText)
+    + `</div>`
+    + `</details>`;
+}
+
+function refreshRemoteManagedWorkspaceRows() {
+  if (state.remoteManagedWorkspaceWorkspaceLoadInFlight) return;
+  state.remoteManagedWorkspaceWorkspaceLoadInFlight = true;
+  api("/api/workspaces", { timeoutMs: 12000 })
+    .then((workspaceResult) => {
+      if (workspaceResult && Array.isArray(workspaceResult.data)) {
+        state.workspaces = workspaceResult.data;
+        renderRemoteManagedWorkspaceSettings();
+      }
+    })
+    .catch(() => {})
+    .finally(() => {
+      state.remoteManagedWorkspaceWorkspaceLoadInFlight = false;
+      state.remoteManagedWorkspaceWorkspaceLoadAttempted = true;
+    });
+}
+
+function renderRemoteManagedWorkspaceSettings() {
+  const el = $("remoteManagedWorkspaceSettings");
+  if (!el) return;
+  if (!((state.workspaces || []).length) && !state.remoteManagedWorkspaceWorkspaceLoadAttempted) {
+    refreshRemoteManagedWorkspaceRows();
+  }
+  const config = normalizeRemoteManagedWorkspaceConfig(state.remoteManagedWorkspace);
+  const busy = Boolean(state.remoteManagedWorkspaceBusy);
+  const status = remoteManagedWorkspaceStatusLabel(config.connectionStatus, config);
+  const issueText = config.issueCodes.length ? ` · ${config.issueCodes.slice(0, 3).join(", ")}` : "";
+  const registerLabel = config.pairingStatus === "pending_approval"
+    ? "检查审批"
+    : (config.pairingStatus === "rejected"
+      ? "重新请求配对"
+      : (config.scopedCredentialConfigured ? "连接" : "请求配对"));
+  el.innerHTML = `<div class="remote-managed-workspace-row${config.enabled ? " enabled" : ""}">`
+    + `<div class="remote-managed-workspace-main">`
+    + `<strong>${escapeHtml(config.enabled ? "已开启" : "已关闭")} · ${escapeHtml(status)}</strong>`
+    + `<span>${escapeHtml(config.centralUrl || "Central server not set")}</span>`
+    + `<small>${escapeHtml(config.effectiveConnectionMode || "http_polling")} fallback active${escapeHtml(issueText)}</small>`
+    + `</div>`
+    + `<div class="remote-managed-workspace-side">`
+    + `<button type="button" data-rmw-action="poll-once" ${busy || !config.enabled || !config.scopedCredentialConfigured ? "disabled" : ""}>Poll</button>`
+    + `</div>`
+    + `</div>`
+    + `<div class="remote-managed-workspace-simple-form">`
+    + remoteManagedWorkspaceFieldHtml("中央服务器地址", "centralUrl", config.centralUrl, { placeholder: "https://home-ai.example" })
+    + `<div class="remote-managed-workspace-actions">`
+    + `<button type="button" data-rmw-action="save-central" ${busy ? "disabled" : ""}>${busy ? "保存中" : "保存"}</button>`
+    + `<button type="button" data-rmw-action="register" ${busy || !config.enabled ? "disabled" : ""}>${escapeHtml(registerLabel)}</button>`
+    + `</div>`
+    + `</div>`
+    + `<div class="remote-managed-workspace-workspaces">`
+    + `<div class="remote-managed-workspace-list-title"><strong>Workspaces</strong><span>${escapeHtml(String((state.workspaces || []).length || 0))}</span></div>`
+    + remoteManagedWorkspaceRowsHtml(config, busy)
+    + `</div>`
+    + remoteManagedWorkspaceAdvancedHtml(config);
+}
+
+function remoteManagedWorkspaceFormPayload() {
+  const el = $("remoteManagedWorkspaceSettings");
+  if (!el) return {};
+  const payload = {
+    enabled: Boolean(state.remoteManagedWorkspace && state.remoteManagedWorkspace.enabled),
+  };
+  el.querySelectorAll("[data-rmw-field]").forEach((field) => {
+    const name = field.getAttribute("data-rmw-field");
+    if (!name) return;
+    payload[name] = String(field.value || "").trim();
+  });
+  return payload;
+}
+
+function remoteManagedWorkspaceConfigFromResult(result) {
+  return result && (result.remoteManagedWorkspace || result.status || result.remoteManagedWorkspaceStatus) || null;
+}
+
+function remoteManagedWorkspaceComparableCentralUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch (_) {
+    return raw.replace(/\/+$/, "");
+  }
+}
+
+async function loadRemoteManagedWorkspaceSettings() {
+  const result = await api("/api/settings/remote-managed-workspace", { timeoutMs: 12000 });
+  try {
+    const workspaceResult = await api("/api/workspaces", { timeoutMs: 12000 });
+    if (workspaceResult && Array.isArray(workspaceResult.data)) state.workspaces = workspaceResult.data;
+  } catch (_) {}
+  rememberRemoteManagedWorkspaceConfig(remoteManagedWorkspaceConfigFromResult(result));
+  return result;
+}
+
+async function handleRemoteManagedWorkspaceSettingsClick(event) {
+  const button = event.target.closest("[data-rmw-action]");
+  if (!button || button.disabled || state.remoteManagedWorkspaceBusy) return;
+  const action = button.getAttribute("data-rmw-action") || "";
+  const workspaceCwd = button.getAttribute("data-rmw-workspace-cwd") || "";
+  const workspace = workspaceCwd
+    ? (state.workspaces || []).find((item) => remoteManagedWorkspacePathKey(item && item.cwd) === remoteManagedWorkspacePathKey(workspaceCwd)) || { cwd: workspaceCwd }
+    : null;
+  const formPayload = remoteManagedWorkspaceFormPayload();
+  const expectedCentralUrl = remoteManagedWorkspaceComparableCentralUrl(formPayload.centralUrl);
+  if ((action === "save-central" || action === "enable-workspace") && !expectedCentralUrl) {
+    const error = new Error("中央服务器地址不能为空");
+    showError(error);
+    $("connectionState").textContent = error.message;
+    return;
+  }
+  const endpoint = action === "save" || action === "save-central"
+    ? "/api/settings/remote-managed-workspace"
+    : action === "enable-workspace" || action === "disable-workspace"
+      ? "/api/settings/remote-managed-workspace/workspace"
+    : action === "test-connection"
+      ? "/api/settings/remote-managed-workspace/test-connection"
+      : action === "register"
+        ? "/api/settings/remote-managed-workspace/register"
+        : action === "poll-once"
+          ? "/api/settings/remote-managed-workspace/poll-once"
+          : "";
+  if (!endpoint) return;
+  state.remoteManagedWorkspaceBusy = true;
+  renderRemoteManagedWorkspaceSettings();
+  try {
+    let body = "{}";
+    if (action === "save" || action === "save-central") {
+      body = JSON.stringify(formPayload);
+    } else if (action === "enable-workspace" || action === "disable-workspace") {
+      body = JSON.stringify({
+        action: action === "disable-workspace" ? "disable" : "enable",
+        centralUrl: formPayload.centralUrl,
+        workspace,
+      });
+    }
+    const result = await api(endpoint, {
+      method: "POST",
+      body,
+      timeoutMs: 20000,
+    });
+    let config = remoteManagedWorkspaceConfigFromResult(result);
+    rememberRemoteManagedWorkspaceConfig(config);
+    if (action === "save" || action === "save-central" || action === "enable-workspace" || action === "disable-workspace") {
+      const readback = await loadRemoteManagedWorkspaceSettings();
+      config = remoteManagedWorkspaceConfigFromResult(readback) || config;
+    }
+    if (action === "save-central") {
+      const actualCentralUrl = remoteManagedWorkspaceComparableCentralUrl(config && config.centralUrl);
+      if (actualCentralUrl !== expectedCentralUrl) {
+        throw new Error("Remote Managed Workspace 保存读回失败");
+      }
+    }
+    const latestStatus = remoteManagedWorkspaceStatusLabel(config && config.connectionStatus, normalizeRemoteManagedWorkspaceConfig(config));
+    $("connectionState").textContent = action === "register"
+      ? `Remote Managed Workspace ${latestStatus}`
+      : "Remote Managed Workspace 已保存";
+  } catch (err) {
+    showError(err);
+    $("connectionState").textContent = err.message || "Remote Managed Workspace 设置失败";
+    try {
+      await loadRemoteManagedWorkspaceSettings();
+    } catch (_) {
+      renderRemoteManagedWorkspaceSettings();
+    }
+  } finally {
+    state.remoteManagedWorkspaceBusy = false;
+    renderRemoteManagedWorkspaceSettings();
+  }
+}
+
 async function handleCodexProfileSettingsClick(event) {
   const button = event.target.closest("[data-codex-profile-id]");
   if (!button || button.disabled) return;
   const profileId = button.getAttribute("data-codex-profile-id") || "";
   if (!profileId || state.codexProfileSwitchBusy || state.codexProfileRestarting) return;
   const profile = state.codexProfiles.find((item) => String(item.id || "") === profileId);
-  const label = profile ? `${profile.label || profileId} (${codexProfileAccountLabel(profile)})` : profileId;
+  const label = profile ? codexProfileAccountLabel(profile) : profileId;
   const confirmed = await requestCodexProfileSwitchConfirmation(profileId, label);
   if (!confirmed) return;
   await performCodexProfileSwitch(profileId);
@@ -2205,6 +2726,9 @@ function serverBuildIdFromConfig(...args) {
 function shouldPromptForServerBuildChange(...args) {
   return requireAppUpdateRuntime().shouldPromptForServerBuildChange(...args);
 }
+function clearSettledServerBuildPluginRefreshAfterThreadEntry(...args) {
+  return requireAppUpdateRuntime().clearSettledServerBuildPluginRefreshAfterThreadEntry(...args);
+}
 function pageShellAssetUrl(...args) {
   return requireAppUpdateRuntime().pageShellAssetUrl(...args);
 }
@@ -2276,6 +2800,7 @@ function createSettingsRuntime() {
       renderQuotaUsage: typeof renderQuotaUsage === "function" ? renderQuotaUsage : null,
       renderCodexProfileSettings: typeof renderCodexProfileSettings === "function" ? renderCodexProfileSettings : null,
       renderWorkspaceDelegationSettings: typeof renderWorkspaceDelegationSettings === "function" ? renderWorkspaceDelegationSettings : null,
+      renderRemoteManagedWorkspaceSettings: typeof renderRemoteManagedWorkspaceSettings === "function" ? renderRemoteManagedWorkspaceSettings : null,
       rememberRateLimitsFromConfig: typeof rememberRateLimitsFromConfig === "function" ? rememberRateLimitsFromConfig : null,
       rememberCodexProfiles: typeof rememberCodexProfiles === "function" ? rememberCodexProfiles : null,
   };
@@ -2329,6 +2854,12 @@ function createSettingsRuntime() {
     syncLocalSubmissionThread,
     insertLocalSubmittedUserMessage,
     mergeSubmittedUserItemIntoTurn,
+    markRecentSubmittedUserMessageAccepted,
+    durableUserMessageMatchesSubmittedRecord,
+    threadHasDurableSubmittedUserRecord,
+    optimisticUserMessageMatchesSubmittedRecord,
+    removeOptimisticSubmittedUserRecordEchoes,
+    settleRecentSubmittedUserMessagesForThread,
     reconcileSubmittedUserMessageTurn,
     markSubmittedUserMessageFailed,
     recentSubmittedUserRecordBelongsToThread,
@@ -2459,6 +2990,7 @@ function createSettingsRuntime() {
     quotaShortTextFromSnapshot,
     rememberCodexProfiles,
     codexProfileAccountLabel,
+    codexProfileStatusLabel,
     renderCodexProfileSettings,
     loadCodexProfiles,
     normalizeWorkspaceDelegationConfig,
@@ -2466,6 +2998,13 @@ function createSettingsRuntime() {
     workspaceDelegationSourceLabel,
     renderWorkspaceDelegationSettings,
     handleWorkspaceDelegationSettingsClick,
+    normalizeRemoteManagedWorkspaceConfig,
+    rememberRemoteManagedWorkspaceConfig,
+    remoteManagedWorkspaceStatusLabel,
+    renderRemoteManagedWorkspaceSettings,
+    remoteManagedWorkspaceFormPayload,
+    loadRemoteManagedWorkspaceSettings,
+    handleRemoteManagedWorkspaceSettingsClick,
     handleCodexProfileSettingsClick,
     appVersionText,
     clientBuildVersionText,
@@ -2517,6 +3056,7 @@ function createSettingsRuntime() {
     handleSharedRestartClick,
     serverBuildIdFromConfig,
     shouldPromptForServerBuildChange,
+    clearSettledServerBuildPluginRefreshAfterThreadEntry,
     pageShellAssetUrl,
     validatePageShellAsset,
     fetchPageShellAsset,

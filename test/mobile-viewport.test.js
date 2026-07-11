@@ -15,6 +15,7 @@ const stylesCss = fs.readFileSync(path.resolve(__dirname, "..", "public", "style
 const swJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "sw.js"), "utf8");
 const shellManifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, "..", "public", "shell-asset-manifest.json"), "utf8"));
 const threadListRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "thread-list-runtime.js"), "utf8");
+const settingsRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "settings-runtime.js"), "utf8");
 const threadTileRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "thread-tile-runtime.js"), "utf8");
 const threadDetailMergeStateJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "thread-detail-merge-state.js"), "utf8");
 const threadDetailRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "thread-detail-runtime.js"), "utf8");
@@ -292,6 +293,27 @@ test("mobile viewport and early guards disable page zoom", () => {
   assert.match(platformPointer, /development visual check passes/);
 });
 
+test("mobile settings panel scrolls to Remote Managed Workspace controls", () => {
+  assert.match(indexHtml, /id="themeSettingsToggle"[\s\S]*aria-expanded="false"/);
+  assert.match(indexHtml, /id="themeSettingsPanel" class="theme-settings hidden"/);
+  assert.match(indexHtml, /<div class="theme-settings-title">Remote Managed Workspace<\/div>[\s\S]*id="remoteManagedWorkspaceSettings"/);
+  assert.match(stylesCss, /\.theme-settings\s*{[\s\S]*max-height:\s*calc\(var\(--app-height, 100dvh\) - 92px - env\(safe-area-inset-top, 0px\) - env\(safe-area-inset-bottom, 0px\)\);/);
+  assert.match(stylesCss, /\.theme-settings\s*{[\s\S]*overflow-x:\s*hidden;[\s\S]*overflow-y:\s*auto;/);
+  assert.match(stylesCss, /\.theme-settings\s*{[\s\S]*overscroll-behavior:\s*contain;[\s\S]*-webkit-overflow-scrolling:\s*touch;[\s\S]*touch-action:\s*pan-y;/);
+  assert.match(stylesCss, /html\.embed-hermes\.embed-hermes-primary \.sidebar\s*{[\s\S]*overflow:\s*hidden;/);
+  assert.match(stylesCss, /html\.embed-hermes\.embed-hermes-primary \.theme-settings\s*{[\s\S]*flex:\s*1 1 auto;[\s\S]*min-height:\s*0;[\s\S]*max-height:\s*none;/);
+  assert.match(stylesCss, /html\.embed-hermes\.embed-hermes-primary \.theme-settings:not\(\.hidden\) ~ \*\s*{[\s\S]*display:\s*none !important;/);
+  assert.match(stylesCss, /@media \(max-width: 720px\)\s*{[\s\S]*\.remote-managed-workspace-simple-form,[\s\S]*\.remote-managed-workspace-item,[\s\S]*\.remote-managed-workspace-advanced-grid\s*{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\);/);
+  for (const label of ["中央服务器地址", "workspace id", "project root", "allowed root", "pairing", "credential"]) {
+    assert.match(settingsRuntimeJs, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  for (const action of ["save-central", "test-connection", "register", "poll-once"]) {
+    assert.match(settingsRuntimeJs, new RegExp(`data-rmw-action="${action}"`));
+  }
+  assert.match(settingsRuntimeJs, /const mainAction = active \? "disable-workspace" : "enable-workspace";/);
+  assert.match(settingsRuntimeJs, /action === "enable-workspace" \|\| action === "disable-workspace"/);
+});
+
 test("Android composer focused native tap preserves IME focus", () => {
   const prepareBody = composerRuntimeFunctionBody("prepareMessageInputForNativeGesture");
   const recoverBody = composerRuntimeFunctionBody("recoverMessageInputKeyboardFromGesture");
@@ -325,13 +347,16 @@ test("composer sizing avoids one-pixel layout churn while typing and streaming",
 
 test("turn timer preserves elapsed digits on narrow embedded viewports", () => {
   assert.match(stylesCss, /\.turn-timer\s*{[\s\S]*width:\s*auto;/);
-  assert.match(stylesCss, /\.turn-timer\s*{[\s\S]*max-width:\s*min\(58vw, 320px\);/);
+  assert.match(stylesCss, /\.turn-timer\s*{[\s\S]*max-width:\s*min\(44vw, 260px\);/);
+  assert.match(stylesCss, /@media \(max-width: 760px\)[\s\S]*\.turn-timer\s*{[\s\S]*max-width:\s*min\(36vw, 180px\);/);
   assert.match(stylesCss, /\.turn-timer\.visible\s*{[\s\S]*display:\s*inline-flex;/);
   assert.match(stylesCss, /\.turn-timer-time\s*{[\s\S]*flex:\s*0 0 auto;/);
-  assert.match(stylesCss, /\.turn-timer-time\s*{[\s\S]*min-width:\s*12\.75em;/);
+  assert.match(stylesCss, /\.turn-timer-time\s*{[\s\S]*min-width:\s*8ch;/);
   assert.match(stylesCss, /\.turn-timer-time\s*{[\s\S]*overflow:\s*visible;/);
   assert.match(stylesCss, /\.turn-timer-detail\s*{[\s\S]*flex:\s*1 1 auto;/);
   assert.match(stylesCss, /\.turn-timer-detail\s*{[\s\S]*text-overflow:\s*ellipsis;/);
+  assert.doesNotMatch(appJs, /\\u672c\\u8f6e \$\{formatElapsedTime/);
+  assert.doesNotMatch(appJs, /本轮 00:00:00/);
   assert.doesNotMatch(stylesCss, /\.turn-timer-time\s*{[\s\S]*flex:\s*0 0 104px;/);
 });
 
@@ -385,8 +410,8 @@ test("visual harness can replay empty cached detail openings without exposing th
 });
 
 test("public app shell cache advances with static frontend changes", () => {
-  assert.match(shellManifest.clientBuildId, /^0\.1\.12\|codex-mobile-shell-v628-[a-f0-9]{12}$/);
-  assert.match(shellManifest.shellCacheName, /^codex-mobile-shell-v628-[a-f0-9]{12}$/);
+  assert.match(shellManifest.clientBuildId, /^0\.1\.13\|codex-mobile-shell-v629-[a-f0-9]{12}$/);
+  assert.match(shellManifest.shellCacheName, /^codex-mobile-shell-v629-[a-f0-9]{12}$/);
   assert.match(swJs, /shell-asset-manifest\.js/);
   assert.ok(shellManifest.precacheAssets.includes("/home-ai-diagnostic-reporting.js"));
   assert.match(appJs, /"\/home-ai-diagnostic-reporting\.js"/);
@@ -505,14 +530,13 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(appJs, /postStartupStage\("public_config_done"/);
   assert.match(appJs, /postStartupStage\("public_config_failed"/);
   assert.match(appJs, /requestHermesPluginRefresh\("public_config_failed", \{ force: true \}\)/);
-  assert.match(appJs, /function shouldAutoRestoreSavedThreadAtStartup\(savedThreadId, startupThreadId, startupPluginRouteHint\)/);
-  assert.match(appJs, /!isHermesEmbedMode\(\) && typeof isMobileViewport === "function" && isMobileViewport\(\)/);
-  assert.match(appJs, /state\.startupThreadOpenPending = Boolean\(startupThreadId \|\| \(shouldAutoRestoreSavedThread && savedThreadId\) \|\| \(startupPluginRouteHint && startupPluginRouteHint\.threadId\)\);/);
-  assert.match(appJs, /(?:const|var) earlyRestorePromise = shouldAutoRestoreSavedThread[\s\S]*loadThread\(savedThreadId, \{ source: "restore-startup", suppressLoadFailureDiagnostic: true \}\)/);
-  assert.match(appJs, /(?:const|var) statusPromise = api\("\/api\/status"\)\.catch/);
-  assert.match(appJs, /(?:const|var) workspacesPromise = loadWorkspaces\(\)\.then/);
-  assert.match(appJs, /(?:const|var) threadDisplayPromise = loadThreadDisplaySettings\(\{ render: false \}\)/);
-  assert.match(appJs, /await Promise\.all\(\[statusPromise, workspacesPromise, threadDisplayPromise\]\);[\s\S]*await loadThreads\(\{ silent: startupThreadOpenPending, deferFallback: true \}\);/);
+  assert.match(appJs, /(?:const|var) deferStartupRestoreForTileMode = Boolean\([\s\S]*localThreadDisplayMode\(\) === "tile"[\s\S]*\);/);
+  assert.match(appJs, /state\.startupThreadOpenPending = Boolean\([\s\S]*savedThreadId && !deferStartupRestoreForTileMode[\s\S]*startupPluginRouteHint && startupPluginRouteHint\.threadId[\s\S]*\);/);
+  assert.match(appJs, /(?:const|var) earlyRestorePromise = savedThreadId && !startupThreadId && !deferStartupRestoreForTileMode[\s\S]*loadThread\(savedThreadId, \{ source: "restore-startup", suppressLoadFailureDiagnostic: true \}\)/);
+  assert.match(appJs, /postStartupStage\("restore_deferred"[\s\S]*reason: "tile-startup"/);
+  assert.match(appJs, /(?:const|var) status = await api\("\/api\/status"\)\.catch/);
+  assert.match(appJs, /(?:const|var) workspacesStartedAt = nowPerfMs\(\);\s*\n\s*await loadWorkspaces\(\);/);
+  assert.match(appJs, /await loadWorkspaces\(\);[\s\S]*await loadThreads\(\{ silent: startupThreadOpenPending, deferFallback: true \}\);/);
   assert.match(appJs, /postStartupStage\("status_done"/);
   assert.match(appJs, /postStartupStage\("threads_done"/);
   assert.match(appJs, /startupInProgress: false/);
@@ -526,7 +550,7 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(appJs, /Refreshing Codex Mobile plugin launch\.\.\./);
   assert.match(appJs, /Refreshing plugin page from Hermes Mobile\.\.\./);
   assert.match(appJs, /state\.pluginRefreshPendingTimer = window\.setTimeout\(\(\) => \{/);
-  assert.match(appJs, /function clearPluginRefreshPendingNotice\(\)/);
+  assert.match(appJs, /function clearPluginRefreshPendingNotice\(reason = ""\)/);
   assert.match(appJs, /Generating cross-thread task card draft\.\.\./);
   assert.match(stylesCss, /\.plugin-refresh-pending/);
   assert.match(stylesCss, /\.approval-details/);
@@ -1005,9 +1029,7 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(threadListRuntimeJs, /data-workspace-token-usage-toggle>统计<\/button>/);
   assert.match(appJs, /function formatTokenMillion\(value\)/);
   assert.match(appJs, /(?:const|var) THREAD_LIST_PAGE_LIMIT = 200;/);
-  assert.match(appJs, /(?:const|var) THREAD_LIST_MOBILE_PAGE_LIMIT = 40;/);
-  assert.match(threadListRuntimeJs, /const pageLimit = shouldSkipStandaloneMobileThreadRestore\(\) \? THREAD_LIST_MOBILE_PAGE_LIMIT : THREAD_LIST_PAGE_LIMIT;/);
-  assert.match(threadListRuntimeJs, /new URLSearchParams\(\{ limit: String\(pageLimit\), archived: "false" \}\)/);
+  assert.match(threadListRuntimeJs, /new URLSearchParams\(\{ limit: String\(THREAD_LIST_PAGE_LIMIT\), archived: "false" \}\)/);
   assert.match(threadListRuntimeJs, /function hasThreadDetailRequestInFlight\(\)/);
   assert.match(threadListRuntimeJs, /state\.threadLoadController[\s\S]*state\.refreshThreadController[\s\S]*state\.currentThread && state\.currentThread\.mobileLoading/);
   assert.match(threadListRuntimeJs, /const threadDetailOpening = hasThreadDetailRequestInFlight\(\);/);
@@ -1052,24 +1074,81 @@ test("Android back and edge swipe open the mobile navigation menu", () => {
   assert.match(appJs, /frameWidth < hostWidth - 24/);
   assert.match(appJs, /function threadDetailReturnButtonVisible\(\)/);
   assert.match(appJs, /if \(isHermesEmbedMode\(\)\) return hostEmbeddedSplitPaneVisible\(\)/);
+  assert.match(appJs, /sidebarLayoutOverlay: false/);
+  assert.match(appJs, /(?:const|var) SIDEBAR_LAYOUT_TOGGLE_MIN_WIDTH = 900/);
+  assert.match(appJs, /(?:const|var) SIDEBAR_LAYOUT_TOGGLE_MIN_HEIGHT = 600/);
+  assert.match(appJs, /function sidebarLayoutToggleSupported\(\)/);
+  assert.match(appJs, /width >= SIDEBAR_LAYOUT_TOGGLE_MIN_WIDTH[\s\S]*height >= SIDEBAR_LAYOUT_TOGGLE_MIN_HEIGHT/);
+  assert.match(appJs, /function sidebarOverlayModeActive\(\)/);
+  assert.match(appJs, /return Boolean\(state\.sidebarLayoutOverlay && sidebarLayoutToggleSupported\(\)\)/);
+  assert.match(appJs, /function syncSidebarLayoutOverlayState\(\)/);
+  assert.match(appJs, /document\.documentElement\.classList\.toggle\("sidebar-layout-toggle-supported", supported\)/);
+  assert.match(appJs, /document\.documentElement\.classList\.toggle\("sidebar-overlay-mode", active\)/);
+  assert.match(appJs, /function syncSidebarOpenClass\(\)/);
+  assert.match(appJs, /document\.documentElement\.classList\.toggle\("sidebar-open", isSidebarOpen\(\)\)/);
+  assert.match(appJs, /function setSidebarLayoutOverlay\(active, options = \{\}\)/);
+  assert.match(appJs, /state\.sidebarLayoutOverlay = nextActive/);
+  assert.match(appJs, /if \(state\.threadTileMode\) renderCurrentThread\(\);/);
+  assert.match(appJs, /function handleSidebarLayoutToggle\(\)/);
+  assert.match(appJs, /if \(!sidebarOverlayModeActive\(\)\) \{[\s\S]*setSidebarLayoutOverlay\(true\);[\s\S]*return true;/);
   assert.match(appJs, /function syncThreadDetailLayoutState\(\)/);
   assert.match(appJs, /document\.documentElement\.classList\.toggle\("thread-detail-active", detailActive\)/);
-  assert.match(appJs, /(?:const|var) splitReturn = threadDetailReturnButtonVisible\(\)/);
+  assert.match(appJs, /(?:const|var) sidebarToggle = sidebarLayoutToggleSupported\(\)/);
+  assert.match(appJs, /(?:const|var) sidebarOverlay = syncSidebarLayoutOverlayState\(\)/);
+  assert.match(appJs, /(?:const|var) sidebarOpen = isSidebarOpen\(\)/);
+  assert.match(appJs, /(?:const|var) sidebarLayoutButton = \$\("sidebarLayoutToggle"\)/);
+  assert.match(appJs, /sidebarLayoutButton\.hidden = !showSidebarLayoutButton/);
+  assert.match(appJs, /(?:const|var) closeMenuButton = \$\("closeMenu"\)/);
+  assert.match(appJs, /(?:const|var) sidebarOverlayClose = Boolean\(sidebarToggle && sidebarOverlay\)/);
+  assert.match(appJs, /closeMenuButton\.classList\.toggle\("sidebar-layout-close", sidebarOverlayClose\)/);
+  assert.match(appJs, /closeMenuButton\.textContent = sidebarOverlayClose \? "‹" : "×"/);
+  assert.match(appJs, /closeMenuButton\.title = sidebarOverlayClose \? "收起 Session List" : "Close menu"/);
+  assert.match(appJs, /(?:const|var) splitReturn = !sidebarToggle && threadDetailReturnButtonVisible\(\)/);
+  assert.match(appJs, /(?:const|var) sidebarOpenMenu = Boolean\(sidebarToggle && sidebarOverlay && !sidebarOpen\)/);
   assert.match(appJs, /openMenuButton\.classList\.toggle\("split-return-visible", splitReturn\)/);
+  assert.match(appJs, /openMenuButton\.classList\.toggle\("sidebar-toggle-visible", sidebarOpenMenu\)/);
+  assert.match(appJs, /openMenuButton\.textContent = "☰"/);
   assert.match(appJs, /openMenuButton\.textContent = splitReturn \? "←" : "☰"/);
   assert.match(appJs, /function returnToThreadListFromDetail\(\)/);
   assert.match(appJs, /clearCurrentThreadSelection\(\);[\s\S]*renderThreads\(\);[\s\S]*renderCurrentThread\(\);/);
   assert.match(appJs, /function handleOpenMenuClick\(\)/);
+  assert.match(appJs, /if \(handleSidebarLayoutToggle\(\)\) return;/);
   assert.match(appJs, /if \(threadDetailReturnButtonVisible\(\) && returnToThreadListFromDetail\(\)\) return;/);
   assert.match(appJs, /\$\("openMenu"\)\.addEventListener\("click", handleOpenMenuClick\)/);
+  assert.match(appJs, /\$\("sidebarLayoutToggle"\)\.addEventListener\("click", \(event\) => \{[\s\S]*handleSidebarLayoutToggle\(\);/);
+  assert.match(indexHtml, /id="sidebarLayoutToggle"/);
   assert.doesNotMatch(stylesCss, /html\.thread-detail-active #openMenu\.mobile-only\s*{[\s\S]*display:\s*grid;/);
-  assert.match(stylesCss, /#openMenu\.split-return-visible\s*{[\s\S]*display:\s*grid;/);
+  assert.match(stylesCss, /#openMenu\.split-return-visible,\s*\n#openMenu\.sidebar-toggle-visible\s*{[\s\S]*display:\s*grid;/);
+  assert.match(stylesCss, /\.sidebar-layout-toggle,\s*\n\.sidebar-layout-close\s*{[\s\S]*font-size:\s*28px;/);
+  assert.match(stylesCss, /\.sidebar-layout-toggle\[hidden\]\s*{[\s\S]*display:\s*none !important;/);
+  assert.match(stylesCss, /html\.sidebar-layout-toggle-supported \.main\.thread-tile-main \.topbar\s*{[\s\S]*position:\s*absolute;[\s\S]*width:\s*40px;[\s\S]*pointer-events:\s*none;/);
+  assert.match(stylesCss, /html\.sidebar-layout-toggle-supported \.main\.thread-tile-main\s*{[\s\S]*grid-template-rows:\s*minmax\(0, 1fr\) auto;/);
+  assert.match(stylesCss, /html\.sidebar-layout-toggle-supported \.main\.thread-tile-main > \.conversation\s*{[\s\S]*grid-row:\s*1;/);
+  assert.match(stylesCss, /html\.sidebar-layout-toggle-supported \.main\.thread-tile-main > \.composer\s*{[\s\S]*grid-row:\s*2;/);
+  assert.match(stylesCss, /\.main\.thread-tile-main > \.composer\s*{[\s\S]*width:\s*auto;[\s\S]*margin:\s*0 var\(--thread-tile-edge-gap\) var\(--thread-tile-edge-gap\);/);
+  assert.match(stylesCss, /@media \(max-width: 760px\) \{[\s\S]*\.main\.thread-tile-main > \.composer\s*{[\s\S]*width:\s*auto;[\s\S]*padding:\s*7px 12px max\(8px, var\(--host-bottom-safe-area, 0px\)\);/);
+  assert.match(stylesCss, /html\.sidebar-layout-toggle-supported \.main\.thread-tile-main \.topbar \.thread-title-wrap,[\s\S]*#interruptTurn\s*{[\s\S]*display:\s*none !important;/);
+  assert.match(stylesCss, /html\.sidebar-layout-toggle-supported \.main\.thread-tile-main #openMenu\.sidebar-toggle-visible\s*{[\s\S]*pointer-events:\s*auto;[\s\S]*background:\s*transparent;/);
+  assert.match(stylesCss, /html\.sidebar-layout-toggle-supported\.sidebar-open \.main\.thread-tile-main #openMenu\.sidebar-toggle-visible\s*{[\s\S]*display:\s*none;[\s\S]*pointer-events:\s*none;/);
+  assert.doesNotMatch(stylesCss, /thread-tile-board-sidebar-toggle/);
+  assert.match(stylesCss, /html\.sidebar-layout-toggle-supported\.sidebar-overlay-mode:not\(\.sidebar-open\) \.thread-tile-board \.thread-tile-column:first-child \.thread-tile-pane:first-child \.thread-tile-pane-header\s*{[\s\S]*padding-left:\s*48px;/);
+  assert.match(stylesCss, /html:not\(\.embed-hermes\)\.sidebar-overlay-mode \.app\s*{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\);/);
+  assert.match(stylesCss, /html:not\(\.embed-hermes\)\.sidebar-overlay-mode \.sidebar\s*{[\s\S]*position:\s*fixed;[\s\S]*width:\s*min\(420px, 100vw\);[\s\S]*transform:\s*translateX\(-105%\);/);
   assert.match(stylesCss, /html\.embed-hermes #openMenu,[\s\S]*html\.embed-hermes \.main \.version-actions\s*{[\s\S]*display:\s*none !important;/);
   assert.match(stylesCss, /html\.embed-hermes #openMenu\.split-return-visible\s*{[\s\S]*display:\s*grid !important;/);
   assert.doesNotMatch(stylesCss, /html\.embed-hermes\.thread-detail-active #openMenu\.mobile-only/);
   assert.match(appJs, /function isAndroidBrowser\(\)/);
   assert.match(appJs, /function sidebarEdgeSwipeStartLimitPx\(\)/);
   assert.match(appJs, /function pointInComposerGestureZone\(point\)/);
+  assert.match(indexHtml, /id="composerTargetIndicator"/);
+  assert.match(stylesCss, /\.composer-meta-row\s*{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) max-content;/);
+  assert.match(stylesCss, /\.thread-tile-pane,\s*\n\.composer\s*{[\s\S]*--thread-identity-ring:\s*var\(--thread-identity-ring-dark, var\(--composer-target-accent\)\);/);
+  assert.match(stylesCss, /:root\[data-theme="light"\] \.thread-tile-pane,[\s\S]*--thread-identity-ring:\s*var\(--thread-identity-ring-light, var\(--composer-target-accent\)\);/);
+  assert.match(stylesCss, /:root\[data-theme="system"\] \.thread-tile-pane,[\s\S]*--thread-identity-ring:\s*var\(--thread-identity-ring-light, var\(--composer-target-accent\)\);/);
+  assert.match(stylesCss, /\.composer-target-indicator\s*{[\s\S]*background:\s*linear-gradient\(0deg, var\(--thread-identity-tint\), var\(--thread-identity-tint\)\), var\(--control-bg\);[\s\S]*border:\s*1px solid var\(--thread-identity-outline\);/);
+  assert.doesNotMatch(stylesCss, /\.composer-target-indicator\s*{[\s\S]*border-left:\s*3px solid var\(--composer-target-accent\);/);
+  assert.match(stylesCss, /\.thread-tile-pane\.active\s*{[\s\S]*border-color:\s*var\(--thread-identity-ring-strong\);[\s\S]*box-shadow:\s*0 0 0 1px var\(--thread-identity-ring\)/);
+  assert.match(stylesCss, /\.composer\.has-target-indicator\s*{[\s\S]*border-top-color:\s*var\(--thread-identity-ring-strong\);[\s\S]*box-shadow:\s*inset 0 0 0 1px var\(--thread-identity-ring\)/);
   assert.match(appJs, /\.composer-controls/);
   assert.match(appJs, /point\.clientY >= Math\.max\(0, rect\.top - 10\)/);
   assert.match(appJs, /if \(pointInComposerGestureZone\(touch\)\) return;/);
@@ -1107,6 +1186,16 @@ test("workspace creation lives at the bottom of the Workspace menu", () => {
   assert.match(stylesCss, /\.workspace-create-option/);
   assert.match(stylesCss, /\.create-workspace-root-select/);
   assert.doesNotMatch(indexHtml, /newThreadButton[\s\S]{0,240}createWorkspace/i);
+});
+
+test("workspace selector opens from click and keyboard events", () => {
+  assert.match(appShellRuntimeJs, /sidebarWorkspaceSelect\.dataset\.workspaceSelectWired !== "true"/);
+  assert.match(appShellRuntimeJs, /sidebarWorkspaceSelect\.dataset\.workspaceSelectWired = "true"/);
+  assert.match(appShellRuntimeJs, /const toggleSidebarWorkspaceMenu = \(event\) => \{/);
+  assert.match(appShellRuntimeJs, /sidebarWorkspaceSelect\.addEventListener\("click", toggleSidebarWorkspaceMenu\)/);
+  assert.match(appShellRuntimeJs, /sidebarWorkspaceSelect\.addEventListener\("keydown", onSidebarWorkspaceKeydown\)/);
+  assert.match(appShellRuntimeJs, /event\.key !== "Enter" && event\.key !== " "/);
+  assert.doesNotMatch(appShellRuntimeJs, /sidebarWorkspaceSelect\.addEventListener\("pointerdown", toggleSidebarWorkspaceMenu\)/);
 });
 
 test("push notification control stays hidden when the browser cannot enable it", () => {

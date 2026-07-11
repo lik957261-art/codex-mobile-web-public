@@ -1234,6 +1234,18 @@ async function openLocalFilePreview(...args) {
   return requireMediaPreviewRuntime().openLocalFilePreview(...args);
 }
 
+function handleFilePreviewHtmlViewClick(...args) {
+  return requireMediaPreviewRuntime().handleFilePreviewHtmlViewClick(...args);
+}
+
+function handleFilePreviewHtmlFullscreenClick(...args) {
+  return requireMediaPreviewRuntime().handleFilePreviewHtmlFullscreenClick(...args);
+}
+
+function closeFilePreviewHtmlFullscreen(...args) {
+  return requireMediaPreviewRuntime().closeFilePreviewHtmlFullscreen(...args);
+}
+
 function nestedStringValue(value, keys, depth = 0, seen = new Set()) {
   if (!value || typeof value !== "object" || depth > 3 || seen.has(value)) return "";
   seen.add(value);
@@ -1544,8 +1556,20 @@ function renderItemBody(item, turn = null) {
   return escapeHtml(JSON.stringify(item, null, 2));
 }
 
+function userMessageRenderableContent(item) {
+  if (!item || typeof item !== "object") return [];
+  if (Array.isArray(item.content) && item.content.length) return item.content;
+  if (typeof item.content === "string" && item.content.trim()) {
+    return [{ type: "text", text: item.content }];
+  }
+  const text = typeof item.text === "string" && item.text.trim()
+    ? item.text
+    : typeof item.message === "string" && item.message.trim() ? item.message : "";
+  return text ? [{ type: "text", text }] : [];
+}
+
 function renderUserMessageBody(item) {
-  const body = renderInputContent(item && item.content);
+  const body = renderInputContent(userMessageRenderableContent(item));
   const errorMessage = String(item && item.mobileSendError && item.mobileSendError.message || "").trim();
   if (!errorMessage) return body;
   return `${body}<div class="send-error-receipt" role="status">${escapeHtml(`发送失败：${errorMessage}`)}</div>`;
@@ -1843,6 +1867,9 @@ function createConversationRenderRuntime() {
     scheduleVisibleImageFailureScan,
     showFilePreviewLoading,
     localFilePreviewThreadIdFromLink,
+    handleFilePreviewHtmlViewClick,
+    handleFilePreviewHtmlFullscreenClick,
+    closeFilePreviewHtmlFullscreen,
     nestedStringValue,
     collabAgentTaskText,
     collabAgentThreadText,

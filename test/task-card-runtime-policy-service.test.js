@@ -82,6 +82,50 @@ test("task-card runtime policy applies inherited model, effort, guidance, and wo
   fs.rmSync(workspace, { recursive: true, force: true });
 });
 
+test("task-card runtime policy applies a normalized reasoning effort floor", () => {
+  const service = createService();
+
+  assert.deepEqual(service.applyReasoningEffortFloor({ reasoningEffort: "high" }, "xhigh"), {
+    reasoningEffort: "xhigh",
+  });
+  assert.deepEqual(service.applyReasoningEffortFloor({ reasoningEffort: "xhigh" }, "high"), {
+    reasoningEffort: "xhigh",
+  });
+  assert.deepEqual(service.applyReasoningEffortFloor({ model: "gpt-5.5" }, "xhigh"), {
+    model: "gpt-5.5",
+    reasoningEffort: "xhigh",
+  });
+});
+
+test("task-card runtime policy applies reasoning effort to resume and turn params", () => {
+  const service = createService();
+
+  const resumeParams = service.applyResumeRuntimeSettings({}, { reasoningEffort: "xhigh" });
+  const turnParams = service.applyTurnRuntimeSettings({}, { reasoningEffort: "xhigh" });
+
+  assert.equal(resumeParams.effort, "xhigh");
+  assert.equal(turnParams.effort, "xhigh");
+});
+
+test("task-card runtime policy scopes terminal guidance to explicit task-card turns", () => {
+  const service = createService({
+    attachWorkspaceDelegationRuntimeGuidance: (params) => {
+      params.guidance = "delegation";
+    },
+    attachTaskCardRuntimeGuidance: (params) => {
+      params.guidance = "task-card-terminal";
+    },
+  });
+
+  const ordinaryStart = service.applyStartThreadRuntimeSettings({}, {});
+  const ordinaryTurn = service.applyTurnRuntimeSettings({}, {});
+  const taskCardTurn = service.applyTurnRuntimeSettings({}, {}, { taskCardRuntimeGuidance: true });
+
+  assert.equal(ordinaryStart.guidance, "delegation");
+  assert.equal(ordinaryTurn.guidance, "delegation");
+  assert.equal(taskCardTurn.guidance, "task-card-terminal");
+});
+
 test("task-card runtime policy keeps source-thread cwd before command cwd in approval guard", () => {
   const source = tempProjectRoot("source");
   const foreign = tempProjectRoot("foreign");
@@ -122,6 +166,21 @@ test("task-card runtime policy preserves codex-mobile and Home AI maintenance ex
   fs.rmSync(homeAi, { recursive: true, force: true });
 });
 
+test("task-card runtime policy can skip delegation guidance for internal role thread starts", () => {
+  const workspace = tempProjectRoot("target");
+  const service = createService();
+
+  const guided = service.applyStartThreadRuntimeSettings({ cwd: workspace }, {});
+  assert.match(guided.developerInstructions, /workspace delegation guidance/);
+
+  const internal = service.applyStartThreadRuntimeSettings({ cwd: workspace }, {}, {
+    skipWorkspaceDelegationRuntimeGuidance: true,
+  });
+  assert.doesNotMatch(internal.developerInstructions || "", /workspace delegation guidance/);
+
+  fs.rmSync(workspace, { recursive: true, force: true });
+});
+
 test("task-card runtime policy supports explicit full-access compatibility mode", () => {
   const workspace = tempProjectRoot("target");
   const service = createService({
@@ -136,6 +195,28 @@ test("task-card runtime policy supports explicit full-access compatibility mode"
 
   const turnParams = service.applyTurnRuntimeSettings({ cwd: workspace }, {});
   assert.equal(turnParams.approvalPolicy, "on-request");
+  assert.deepEqual(turnParams.sandboxPolicy, { type: "dangerFullAccess" });
+  assert.equal(turnParams.permissionProfile, undefined);
+
+  fs.rmSync(workspace, { recursive: true, force: true });
+});
+
+test("task-card runtime policy preserves explicit no-approval full-access runtime", () => {
+  const workspace = tempProjectRoot("target");
+  const service = createService();
+  const runtimeSettings = {
+    approvalPolicy: "never",
+    sandboxMode: "danger-full-access",
+    sandboxPolicy: { type: "dangerFullAccess" },
+  };
+
+  const resumeParams = service.applyResumeRuntimeSettings({ cwd: workspace }, runtimeSettings);
+  assert.equal(resumeParams.approvalPolicy, "never");
+  assert.equal(resumeParams.sandbox, "danger-full-access");
+  assert.equal(resumeParams.permissionProfile, undefined);
+
+  const turnParams = service.applyTurnRuntimeSettings({ cwd: workspace }, runtimeSettings);
+  assert.equal(turnParams.approvalPolicy, "never");
   assert.deepEqual(turnParams.sandboxPolicy, { type: "dangerFullAccess" });
   assert.equal(turnParams.permissionProfile, undefined);
 

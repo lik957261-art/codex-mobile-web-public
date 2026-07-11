@@ -9,6 +9,7 @@ const {
   deployLaneTitleForPlugin,
   findHomeAiDeployLaneThread,
   hasExplicitThreadTarget,
+  hasExactTargetThreadId,
   isRoutinePluginDeploymentRequest,
   normalizeHomeAiDeployLaneSummary,
   planHomeAiDeployLaneRouting,
@@ -124,6 +125,74 @@ test("plugin_deployment card for codex-mobile-web resolves to Codex Mobile Deplo
   assert.equal(plan.pluginId, "codex-mobile-web");
   assert.equal(plan.expectedDeployLaneTitle, "Codex Mobile Deploy Lane");
   assert.deepEqual(plan.targetThreadIds, ["deploy-codex"]);
+});
+
+test("exact deploy target thread id is honored instead of plugin deploy lane affinity", () => {
+  const homeAiDeployLaneB = normalizeHomeAiDeployLaneSummary(thread("deploy-home-b", "Home AI Deploy Lane B", homeAiCwd, {
+    updatedAt: 100,
+  }));
+  const codexDeployLane = normalizeHomeAiDeployLaneSummary(thread("deploy-codex", "Codex Mobile Deploy Lane", homeAiCwd, {
+    updatedAt: 20,
+  }));
+  const body = {
+    targetThreadId: "deploy-home-b",
+    title: "Approve Gun_Battle RMW pairing",
+    summary: "Owner-gated approval/readback for pending RMW request.",
+    body: "Codex Mobile RMW Gun_Battle approval/readback. This text mentions codex-mobile-web but the exact Home AI Deploy Lane B target owns the credential boundary.",
+  };
+
+  const plan = planHomeAiDeployLaneRouting({
+    body,
+    sourceThread: thread("source-home-ai", "Home AI 07-05", homeAiCwd),
+    targetThreads: [homeAiDeployLaneB],
+    visibleThreads: [homeAiDeployLaneB, codexDeployLane],
+    exactTargetThreadIdRequested: true,
+  });
+
+  assert.equal(hasExactTargetThreadId(body), true);
+  assert.equal(hasExplicitThreadTarget(body), true);
+  assert.equal(plan.action, "allow");
+  assert.equal(plan.reason, "exact_target_thread_honored");
+});
+
+test("plugin_deployment card already in assigned Codex Mobile lane cannot redirect to Home AI Deploy", () => {
+  const homeAiDeployLane = normalizeHomeAiDeployLaneSummary(thread("deploy-home", HOME_AI_DEPLOY_LANE_TITLE, homeAiCwd, {
+    updatedAt: 100,
+  }));
+  const codexDeployLane = normalizeHomeAiDeployLaneSummary(thread("deploy-codex", "Codex Mobile Deploy Lane", homeAiCwd, {
+    updatedAt: 20,
+  }));
+
+  const plan = planHomeAiDeployLaneRouting({
+    body: {
+      cardKind: "plugin_deployment",
+      pluginId: "codex-mobile-web",
+      title: "Deploy Codex Mobile plugin",
+      body: "Routine production deploy and readback.",
+    },
+    sourceThread: codexDeployLane,
+    targetThreads: [homeAiDeployLane],
+    visibleThreads: [homeAiDeployLane, codexDeployLane],
+  });
+
+  assert.equal(plan.action, "reject");
+  assert.equal(plan.code, "deploy_lane_already_at_expected_lane");
+  assert.equal(plan.reason, "source_thread_is_assigned_deploy_lane");
+  assert.equal(plan.pluginId, "codex-mobile-web");
+  assert.equal(plan.expectedDeployLaneTitle, "Codex Mobile Deploy Lane");
+  assert.equal(plan.deployLane.id, "deploy-codex");
+});
+
+test("plugin_deployment deploy lane matcher de-duplicates target and visible summaries by id", () => {
+  const targetSummary = thread("deploy-codex", "Codex Mobile Deploy Lane", homeAiCwd, { updatedAt: 10 });
+  const visibleSummary = thread("deploy-codex", "Codex Mobile Deploy Lane", homeAiCwd, { updatedAt: 20 });
+
+  const match = findHomeAiDeployLaneThread([targetSummary, visibleSummary], {
+    title: "Codex Mobile Deploy Lane",
+  });
+
+  assert.equal(match.id, "deploy-codex");
+  assert.equal(match.mobileDeployLane, true);
 });
 
 test("plugin_deployment card for movie resolves to Movie Deploy Lane when live", () => {
@@ -252,7 +321,7 @@ test("explicit Music permission repair target is not overridden by deploy lane t
   assert.equal(plan.reason, "explicit_non_deploy_target");
 });
 
-test("structured plugin_deployment still overrides ordinary explicit targets", () => {
+test("structured plugin_deployment honors exact ordinary target ids", () => {
   const codexImplementation = thread("codex-impl", "codex mobile 06-30", pluginCwd, {
     status: { type: "active" },
     updatedAt: 500,
@@ -272,11 +341,37 @@ test("structured plugin_deployment still overrides ordinary explicit targets", (
     sourceThread: thread("source-1", "codex mobile", pluginCwd),
     targetThreads: [codexImplementation],
     visibleThreads: [codexImplementation, codexDeployLane],
+    exactTargetThreadIdRequested: true,
   });
 
-  assert.equal(plan.action, "retarget");
-  assert.equal(plan.reason, "routine_plugin_deployment_uses_deploy_lane");
-  assert.deepEqual(plan.targetThreadIds, ["deploy-codex"]);
+  assert.equal(plan.action, "allow");
+  assert.equal(plan.reason, "exact_target_thread_honored");
+});
+
+test("structured plugin_deployment exact deploy lane id is still honored", () => {
+  const homeAiDeployLaneB = normalizeHomeAiDeployLaneSummary(thread("deploy-home-b", "Home AI Deploy Lane B", homeAiCwd, {
+    updatedAt: 100,
+  }));
+  const codexDeployLane = normalizeHomeAiDeployLaneSummary(thread("deploy-codex", "Codex Mobile Deploy Lane", homeAiCwd, {
+    updatedAt: 20,
+  }));
+
+  const plan = planHomeAiDeployLaneRouting({
+    body: {
+      cardKind: "plugin_deployment",
+      pluginId: "codex-mobile-web",
+      targetThreadId: "deploy-home-b",
+      title: "Owner-gated deploy-lane operation",
+      body: "This is intentionally pinned to Home AI Deploy Lane B.",
+    },
+    sourceThread: thread("source-home-ai", "Home AI 07-05", homeAiCwd),
+    targetThreads: [homeAiDeployLaneB],
+    visibleThreads: [homeAiDeployLaneB, codexDeployLane],
+    exactTargetThreadIdRequested: true,
+  });
+
+  assert.equal(plan.action, "allow");
+  assert.equal(plan.reason, "exact_target_thread_honored");
 });
 
 test("routine plugin deploy card fails closed when Home AI Deploy lane is absent", () => {

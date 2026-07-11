@@ -22,6 +22,14 @@ const viteEsmCompatibilityMissing = {
   esmCompatibilityModuleCount: 0,
   esmCompatibilityReadyCount: 0,
   esmCompatibilityExpectedCount: 8,
+  esmCompatibilityNotReadyModuleIds: ["thread-status-hints"],
+  esmCompatibilityNotReadyModules: [{
+    id: "thread-status-hints",
+    expectedFunctionCount: 3,
+    exportedFunctionCount: 3,
+    globalPublished: true,
+    sample: { ok: false, running: true, unread: true, expire: false },
+  }],
 };
 
 test("browser runtime self-check adapter re-exports canonical runtime service", () => {
@@ -74,10 +82,55 @@ test("browser runtime self-check parses Vite app-preview Hermes embed option", (
   assert.equal(options.json, true);
 });
 
+test("browser runtime version probes use window settings functions when namespace is factory-only", () => {
+  const startupProbe = script.startupProbeExpression({
+    clientBuildId: "0.1.11|codex-mobile-shell-v625-current",
+    shellCacheName: "codex-mobile-shell-v625-current",
+  });
+  const appPreviewProbe = script.viteAppPreviewProbeExpression({
+    clientBuildId: "0.1.11|codex-mobile-shell-v625-current",
+    shellCacheName: "codex-mobile-shell-v625-current",
+  });
+
+  assert.equal(startupProbe.includes('typeof window.refreshAppUpdateStatus === "function"'), true);
+  assert.equal(startupProbe.includes("renderUpdatePanel: window.renderUpdatePanel"), true);
+  assert.equal(startupProbe.includes('fetch("/api/app-update/status?force=1"'), true);
+  assert.equal(appPreviewProbe.includes('typeof window.refreshAppUpdateStatus === "function"'), true);
+  assert.equal(appPreviewProbe.includes("renderUpdatePanel: window.renderUpdatePanel"), true);
+  assert.equal(appPreviewProbe.includes('fetch("/api/app-update/status?force=1"'), true);
+});
+
+test("browser runtime RMW probe refreshes live workspace row nodes after async rerender", () => {
+  const startupProbe = script.startupProbeExpression({});
+  assert.equal(startupProbe.includes("currentRmwWorkspaceRows"), true);
+  assert.equal(startupProbe.includes("node.isConnected !== false"), true);
+  assert.equal(startupProbe.includes("settingsRmwWorkspaceRowCount = Math.max"), true);
+  assert.equal(startupProbe.includes("settingsRmwVisibleWorkspaceRowCount >= 1"), true);
+});
+
 test("browser runtime self-check parses Vite app-preview launch session option", () => {
   const options = script.parseArgs(["--server", "http://127.0.0.1:8787", "--vite-app-preview-only", "--vite-app-preview-launch-session", "--json"]);
   assert.equal(options.viteAppPreviewOnly, true);
   assert.equal(options.viteAppPreviewLaunchSession, true);
+  assert.equal(options.json, true);
+});
+
+test("browser runtime self-check parses repeated submit diagnostics", () => {
+  const options = script.parseArgs([
+    "--server",
+    "http://127.0.0.1:8787",
+    "--exercise-submit",
+    "--submit-repeat",
+    "2",
+    "--submit-interval-ms",
+    "75",
+    "--diagnostic-samples",
+    "--json",
+  ]);
+  assert.equal(options.exerciseSubmit, true);
+  assert.equal(options.submitRepeat, 2);
+  assert.equal(options.submitIntervalMs, 75);
+  assert.equal(options.diagnosticSamples, true);
   assert.equal(options.json, true);
 });
 
@@ -98,6 +151,194 @@ test("browser runtime self-check gates current-thread refresh status hints", () 
   assert.match(scriptSource, /browser_thread_refresh_status_hint_dropped/);
   assert.match(scriptSource, /threadRefreshStatusHint: null/);
   assert.match(scriptSource, /applyThreadRefreshStatusHintGateIssue\(report\)/);
+});
+
+test("browser runtime self-check blocks unreachable mobile RMW settings panel", () => {
+  assert.match(scriptSource, /settingsRmwPanelReachableOnMobile/);
+  assert.match(scriptSource, /Remote Managed Workspace/i);
+  assert.match(scriptSource, /settingsPanelOverflowScrollable/);
+  assert.match(scriptSource, /settingsPanelTouchScrollReady/);
+  assert.match(scriptSource, /settingsPanelVisualReadyOnMobile/);
+  assert.match(scriptSource, /settingsPanelVisualProbeWaitMs/);
+  assert.match(scriptSource, /visibleWidthForRect/);
+  assert.match(scriptSource, /ensureSettingsPanelProbeOpen/);
+  assert.match(scriptSource, /await wait\(40\)/);
+  assert.match(scriptSource, /settingsPrimarySiblingVisibleCount/);
+  assert.match(scriptSource, /settingsRmwWorkspaceRowCount/);
+  assert.match(scriptSource, /settingsRmwReachableWorkspaceRowCount/);
+
+  const report = service.analyzeBrowserRuntimeSamples({
+    samples: [{
+      label: "startup",
+      probeKind: "startup",
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      settingsMobileViewportExpected: true,
+      settingsPanelPresent: true,
+      settingsPanelOverflowScrollable: false,
+      settingsPanelTouchScrollReady: false,
+      settingsPanelScrollable: true,
+      settingsPanelScrollMoved: false,
+      settingsRmwSectionPresent: true,
+      settingsRmwFieldCount: 12,
+      settingsRmwActionCount: 4,
+      settingsRmwVisibleFieldCount: 0,
+      settingsRmwVisibleActionCount: 0,
+      settingsRmwReachableFieldCount: 0,
+      settingsRmwReachableActionCount: 0,
+      settingsRmwWorkspaceRowCount: 1,
+      settingsRmwVisibleWorkspaceRowCount: 0,
+      settingsRmwReachableWorkspaceRowCount: 0,
+      settingsRmwPanelReachableOnMobile: false,
+      settingsPanelVisualReadyOnMobile: false,
+      settingsPanelVisibleHeight: 160,
+      settingsPanelVisibleWidth: 120,
+      settingsPanelRectHeight: 160,
+      settingsPanelRectWidth: 320,
+      settingsPanelLeft: -220,
+      settingsPanelRight: 100,
+      settingsPanelVisualProbeWaitMs: 320,
+      settingsInitialVisibleTitleCount: 1,
+      settingsPrimarySiblingVisibleCount: 3,
+      settingsPanelScrollHeight: 1320,
+      settingsPanelClientHeight: 520,
+    }],
+  });
+
+  assert.equal(report.ok, false);
+  const clippingIssue = report.issues.find((entry) => entry.code === "settings_panel_clipped_on_mobile");
+  assert.equal(clippingIssue && clippingIssue.severity, "H2");
+  assert.equal(clippingIssue && clippingIssue.settingsPanelPresent, true);
+  assert.equal(clippingIssue && clippingIssue.settingsPanelVisibleHeight, 160);
+  assert.equal(clippingIssue && clippingIssue.settingsPanelVisibleWidth, 120);
+  assert.equal(clippingIssue && clippingIssue.settingsPanelRectHeight, 160);
+  assert.equal(clippingIssue && clippingIssue.settingsPanelRectWidth, 320);
+  assert.equal(clippingIssue && clippingIssue.settingsPanelLeft, -220);
+  assert.equal(clippingIssue && clippingIssue.settingsPanelRight, 100);
+  assert.equal(clippingIssue && clippingIssue.settingsPanelVisualProbeWaitMs, 320);
+  assert.equal(clippingIssue && clippingIssue.settingsInitialVisibleTitleCount, 1);
+  assert.equal(clippingIssue && clippingIssue.settingsPrimarySiblingVisibleCount, 3);
+  const issue = report.issues.find((entry) => entry.code === "settings_rmw_panel_unreachable_on_mobile");
+  assert.equal(issue && issue.severity, "H2");
+  assert.equal(issue && issue.settingsPanelPresent, true);
+  assert.equal(issue && issue.settingsPanelOverflowScrollable, false);
+  assert.equal(issue && issue.settingsPanelTouchScrollReady, false);
+  assert.equal(issue && issue.settingsRmwSectionPresent, true);
+  assert.equal(issue && issue.settingsRmwFieldCount, 12);
+  assert.equal(issue && issue.settingsRmwActionCount, 4);
+  assert.equal(issue && issue.settingsRmwVisibleFieldCount, 0);
+  assert.equal(issue && issue.settingsRmwVisibleActionCount, 0);
+  assert.equal(issue && issue.settingsRmwReachableFieldCount, 0);
+  assert.equal(issue && issue.settingsRmwReachableActionCount, 0);
+  assert.equal(issue && issue.settingsRmwWorkspaceRowCount, 1);
+  assert.equal(issue && issue.settingsRmwVisibleWorkspaceRowCount, 0);
+  assert.equal(issue && issue.settingsRmwReachableWorkspaceRowCount, 0);
+  assert.equal(issue && issue.settingsPanelScrollHeight, 1320);
+  assert.equal(issue && issue.settingsPanelClientHeight, 520);
+
+  const passing = service.analyzeBrowserRuntimeSamples({
+    samples: [{
+      label: "startup",
+      probeKind: "startup",
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      settingsMobileViewportExpected: true,
+      settingsPanelPresent: true,
+      settingsPanelOverflowScrollable: true,
+      settingsPanelTouchScrollReady: true,
+      settingsPanelScrollable: true,
+      settingsPanelScrollMoved: true,
+      settingsRmwSectionPresent: true,
+      settingsRmwFieldCount: 12,
+      settingsRmwActionCount: 4,
+      settingsRmwVisibleFieldCount: 5,
+      settingsRmwVisibleActionCount: 1,
+      settingsRmwReachableFieldCount: 12,
+      settingsRmwReachableActionCount: 4,
+      settingsRmwPanelReachableOnMobile: true,
+      settingsPanelVisualReadyOnMobile: true,
+      settingsPanelVisibleHeight: 720,
+      settingsPanelVisibleWidth: 360,
+      settingsPanelRectHeight: 720,
+      settingsPanelRectWidth: 360,
+      settingsPanelLeft: 16,
+      settingsPanelRight: 376,
+      settingsInitialVisibleTitleCount: 6,
+      settingsPrimarySiblingVisibleCount: 0,
+      settingsPanelScrollHeight: 1320,
+      settingsPanelClientHeight: 520,
+    }],
+  });
+  assert.equal(passing.issues.some((entry) => entry.code === "settings_panel_clipped_on_mobile"), false);
+  assert.equal(passing.issues.some((entry) => entry.code === "settings_rmw_panel_unreachable_on_mobile"), false);
+
+  const simplifiedPassing = service.analyzeBrowserRuntimeSamples({
+    samples: [{
+      label: "startup",
+      probeKind: "startup",
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      settingsMobileViewportExpected: true,
+      settingsPanelPresent: true,
+      settingsPanelOverflowScrollable: true,
+      settingsPanelTouchScrollReady: true,
+      settingsPanelScrollable: true,
+      settingsPanelScrollMoved: true,
+      settingsRmwSectionPresent: true,
+      settingsRmwFieldCount: 1,
+      settingsRmwActionCount: 4,
+      settingsRmwVisibleFieldCount: 1,
+      settingsRmwVisibleActionCount: 2,
+      settingsRmwReachableFieldCount: 1,
+      settingsRmwReachableActionCount: 4,
+      settingsRmwWorkspaceRowCount: 2,
+      settingsRmwVisibleWorkspaceRowCount: 1,
+      settingsRmwReachableWorkspaceRowCount: 2,
+      settingsRmwPanelReachableOnMobile: true,
+      settingsPanelVisualReadyOnMobile: true,
+      settingsPanelVisibleHeight: 720,
+      settingsPanelVisibleWidth: 360,
+      settingsPanelRectHeight: 720,
+      settingsPanelRectWidth: 360,
+      settingsPanelLeft: 16,
+      settingsPanelRight: 376,
+      settingsInitialVisibleTitleCount: 6,
+      settingsPrimarySiblingVisibleCount: 0,
+      settingsPanelScrollHeight: 1320,
+      settingsPanelClientHeight: 520,
+    }],
+  });
+  assert.equal(simplifiedPassing.issues.some((entry) => entry.code === "settings_rmw_panel_unreachable_on_mobile"), false);
+});
+
+test("browser runtime self-check plan marks stale-active API turn shapes", () => {
+  const shapes = script.turnShapeExpectation({
+    thread: {
+      id: "thread-a",
+      turns: [{
+        id: "turn-a",
+        status: {
+          type: "completed",
+          mobileStaleActiveTurn: true,
+          previousType: "active",
+        },
+        items: [
+          { id: "u1", type: "userMessage", text: "hello", startedAtMs: 1000 },
+          { id: "a1", type: "agentMessage", text: "world", startedAtMs: 2000 },
+          { id: "usage", type: "turnUsageSummary", startedAtMs: 3000 },
+        ],
+      }],
+    },
+  });
+
+  assert.equal(shapes.length, 1);
+  assert.equal(shapes[0].staleActive, true);
 });
 
 test("browser runtime self-check samples active thread rows before recent rows", () => {
@@ -142,6 +383,282 @@ test("browser runtime self-check reports API latest turn when it is not the DOM 
   assert.ok(result.issues.some((issue) => issue.code === "browser_latest_turn_not_at_dom_bottom"));
 });
 
+test("browser runtime self-check reports terminal return cards polluting the thread bottom", () => {
+  assert.match(scriptSource, /bottomThreadTaskCardReturnCount/);
+  assert.match(scriptSource, /\.thread-task-card-stack \.thread-task-card\[data-task-card\]/);
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "settled",
+      threadHash: "thread-a",
+      delayMs: 1000,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      loadingNote: false,
+      turns: 20,
+      items: 80,
+      expectedTurnHashCount: 10,
+      expectedTurnMatchCount: 10,
+      latestTurnMatchesTarget: true,
+      latestTurnHash: "expected-latest",
+      expectedLatestTurnHash: "expected-latest",
+      actualLatestTurnHash: "expected-latest",
+      latestTurnAtDomBottom: true,
+      bottomThreadTaskCardCount: 3,
+      bottomThreadTaskCardReturnCount: 2,
+    }],
+  });
+
+  assert.equal(result.ok, false);
+  const issue = result.issues.find((entry) => entry.code === "task_card_return_cards_pollute_thread_bottom");
+  assert.ok(issue);
+  assert.equal(issue.bottomThreadTaskCardReturnCount, 2);
+});
+
+test("browser runtime self-check reports task-card return ledger delivery and projection failures", () => {
+  assert.match(scriptSource, /returnLedgerDeliveryFailedCount/);
+  assert.match(scriptSource, /returnLedgerProjectionFailedCount/);
+  assert.match(scriptSource, /returnReceiptVisibleCount/);
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "settled",
+      threadHash: "thread-a",
+      delayMs: 1000,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      loadingNote: false,
+      turns: 10,
+      items: 40,
+      returnLedgerCount: 3,
+      returnLedgerVisibleCount: 1,
+      returnLedgerDeliveryFailedCount: 1,
+      returnLedgerProjectionFailedCount: 1,
+      returnLedgerIssueCodes: ["terminal_return_card_missing", "return_projection_missing_from_source_detail"],
+    }],
+  });
+
+  assert.equal(result.ok, false);
+  const delivery = result.issues.find((entry) => entry.code === "task_card_return_delivery_failed");
+  const projection = result.issues.find((entry) => entry.code === "task_card_return_projection_failed");
+  assert.ok(delivery);
+  assert.ok(projection);
+  assert.deepEqual(delivery.returnLedgerIssueCodes, ["terminal_return_card_missing", "return_projection_missing_from_source_detail"]);
+  assert.equal(projection.returnLedgerProjectionFailedCount, 1);
+});
+
+test("browser runtime self-check reports visible ledger without a receipt surface", () => {
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "settled",
+      threadHash: "thread-a",
+      delayMs: 1000,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      loadingNote: false,
+      turns: 10,
+      items: 40,
+      returnLedgerCount: 1,
+      returnLedgerVisibleCount: 1,
+      returnLedgerDeliveryFailedCount: 0,
+      returnLedgerProjectionFailedCount: 0,
+      returnReceiptVisibleCount: 0,
+    }],
+  });
+
+  assert.equal(result.ok, false);
+  const issue = result.issues.find((entry) => entry.code === "task_card_return_receipt_ui_missing");
+  assert.ok(issue);
+  assert.equal(issue.returnLedgerVisibleCount, 1);
+  assert.equal(issue.returnReceiptVisibleCount, 0);
+});
+
+test("browser runtime self-check reports return receipt visible outside conversation turn", () => {
+  assert.match(scriptSource, /returnReceiptTurnVisibleCount/);
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "settled",
+      threadHash: "thread-a",
+      delayMs: 1000,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      loadingNote: false,
+      turns: 10,
+      items: 40,
+      returnLedgerCount: 1,
+      returnLedgerVisibleCount: 1,
+      returnLedgerDeliveryFailedCount: 0,
+      returnLedgerProjectionFailedCount: 0,
+      returnReceiptVisibleCount: 1,
+      returnReceiptTurnVisibleCount: 0,
+    }],
+  });
+
+  assert.equal(result.ok, false);
+  const issue = result.issues.find((entry) => entry.code === "task_card_return_receipt_turn_missing");
+  assert.ok(issue);
+  assert.equal(issue.returnReceiptVisibleCount, 1);
+  assert.equal(issue.returnReceiptTurnVisibleCount, 0);
+});
+
+test("browser runtime self-check accepts source return receipt turn at DOM bottom", () => {
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "settled",
+      threadHash: "thread-a",
+      delayMs: 1000,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      loadingNote: false,
+      turns: 11,
+      items: 40,
+      expectedTurnHashCount: 10,
+      expectedTurnMatchCount: 10,
+      latestTurnMatchesTarget: true,
+      latestTurnAtDomBottom: false,
+      latestTurnHash: "real-latest",
+      actualLatestTurnHash: "return-receipt",
+      returnLedgerCount: 1,
+      returnLedgerVisibleCount: 1,
+      returnLedgerDeliveryFailedCount: 0,
+      returnLedgerProjectionFailedCount: 0,
+      returnReceiptVisibleCount: 1,
+      returnReceiptTurnVisibleCount: 1,
+      returnReceiptTurnAtDomBottom: true,
+    }],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.issues.some((entry) => entry.code === "browser_latest_turn_not_at_dom_bottom"), false);
+  assert.equal(result.issues.some((entry) => entry.code === "task_card_return_receipt_turn_missing"), false);
+});
+
+test("browser runtime self-check reports return follow-up without list badge", () => {
+  assert.match(scriptSource, /returnFollowUpTaskCardCount/);
+  assert.match(scriptSource, /returnFollowUpBadgeVisibleCount/);
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "settled",
+      threadHash: "thread-a",
+      delayMs: 1200,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      loadingNote: false,
+      turns: 10,
+      items: 40,
+      returnLedgerCount: 1,
+      returnLedgerVisibleCount: 1,
+      returnReceiptVisibleCount: 1,
+      returnFollowUpTaskCardCount: 1,
+      returnFollowUpBadgeVisibleCount: 0,
+    }],
+  });
+
+  assert.equal(result.ok, false);
+  const issue = result.issues.find((entry) => entry.code === "task_card_return_followup_badge_missing");
+  assert.ok(issue);
+  assert.equal(issue.returnFollowUpTaskCardCount, 1);
+  assert.equal(issue.returnFollowUpBadgeVisibleCount, 0);
+});
+
+test("browser runtime self-check does not treat return observer event issues as delivery failures", () => {
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "settled",
+      threadHash: "thread-a",
+      delayMs: 1200,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      loadingNote: false,
+      turns: 10,
+      items: 40,
+      returnLedgerCount: 1,
+      returnLedgerVisibleCount: 1,
+      returnLedgerDeliveryFailedCount: 0,
+      returnLedgerProjectionFailedCount: 0,
+      returnLedgerIssueCodes: ["return_observer_event_failed"],
+      returnReceiptVisibleCount: 1,
+      returnReceiptTurnVisibleCount: 1,
+    }],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.issues.some((entry) => entry.code === "task_card_return_delivery_failed"), false);
+  assert.equal(result.issues.some((entry) => entry.code === "task_card_return_projection_failed"), false);
+});
+
+test("browser runtime self-check reports thread-entry refresh banner stuck after settled build", () => {
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "thread-entry-settled",
+      threadHash: "thread-a",
+      delayMs: 1000,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      loadingNote: false,
+      turns: 10,
+      items: 40,
+      expectedTurnHashCount: 6,
+      expectedTurnMatchCount: 6,
+      latestTurnMatchesTarget: true,
+      latestTurnAtDomBottom: true,
+      pluginRefreshBannerSeededForThreadEntry: true,
+      pluginRefreshBannerVisibleAfterThreadEntry: true,
+      connectionStateKind: "refreshing-plugin-page",
+    }],
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((issue) => issue.code === "plugin_refresh_banner_stuck_after_thread_entry"));
+});
+
+test("browser runtime self-check accepts cleared thread-entry refresh banner after settled build", () => {
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "thread-entry-settled",
+      threadHash: "thread-a",
+      delayMs: 1200,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      loadingNote: false,
+      turns: 10,
+      items: 40,
+      expectedTurnHashCount: 6,
+      expectedTurnMatchCount: 6,
+      latestTurnMatchesTarget: true,
+      latestTurnAtDomBottom: true,
+      pluginRefreshBannerSeededForThreadEntry: true,
+      pluginRefreshBannerVisibleAfterThreadEntry: false,
+      connectionStateKind: "connected",
+    }],
+  });
+  assert.equal(result.issues.some((issue) => issue.code === "plugin_refresh_banner_stuck_after_thread_entry"), false);
+});
+
 test("browser runtime self-check reports API latest turn when it is missing from settled DOM", () => {
   const result = service.analyzeBrowserRuntimeSamples({
     minSettledDelayMs: 1000,
@@ -167,6 +684,121 @@ test("browser runtime self-check reports API latest turn when it is missing from
   });
   assert.equal(result.ok, false);
   assert.ok(result.issues.some((issue) => issue.code === "browser_latest_turn_missing_from_dom"));
+});
+
+test("browser runtime self-check blocks completed assistant result missing after thread open without submit", () => {
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "thread-open-settled-no-submit",
+      threadHash: "thread-a",
+      delayMs: 1600,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      dynamicThreadPlan: true,
+      latestTurnMatchesTarget: true,
+      expectedLatestTurnHash: "completed-latest",
+      latestTurnHash: "completed-latest",
+      actualLatestTurnHash: "completed-latest",
+      latestTurnAtDomBottom: true,
+      clientSubmissionCount: 0,
+      expectedLatestItemCount: 5,
+      latestTurnItemCount: 4,
+      expectedLatestUserMessageCount: 1,
+      latestTurnUserMessageCount: 1,
+      expectedLatestAssistantMessageCount: 2,
+      latestTurnAssistantMessageCount: 1,
+      expectedTurnShapes: [{
+        index: 0,
+        turnHash: "completed-latest",
+        completed: true,
+        expectedItemCount: 5,
+        expectedUserMessageCount: 1,
+        expectedAssistantMessageCount: 2,
+        expectedUsageRequired: true,
+      }],
+      domTurnShapes: [{
+        index: 0,
+        turnHash: "completed-latest",
+        itemCount: 4,
+        userMessageCount: 1,
+        assistantMessageCount: 1,
+        usageCount: 1,
+      }],
+      turns: 1,
+      items: 4,
+      renderKeys: 4,
+    }],
+  });
+
+  const issue = result.issues.find((entry) => entry.code === "browser_latest_turn_assistant_below_api_expectation");
+  assert.equal(result.ok, true);
+  assert.equal(issue && issue.severity, "H3");
+  assert.equal(issue && issue.observationCount, 1);
+  assert.equal(result.sampleSummary.maxClientSubmissions, 0);
+});
+
+test("browser runtime self-check fails partial projection re-entry missing completed assistant", () => {
+  const result = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "thread-reentry-partial-projection",
+      threadHash: "thread-a",
+      delayMs: 1600,
+      appVisible: true,
+      loginVisible: false,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      dynamicThreadPlan: true,
+      latestTurnMatchesTarget: true,
+      expectedReadMode: "projection-v4-partial",
+      expectedReadDecision: "projection-stale-partial-hit",
+      expectedPerformancePhase: "warm-projection-partial",
+      expectedLatestTurnHash: "completed-latest",
+      latestTurnHash: "completed-latest",
+      actualLatestTurnHash: "completed-latest",
+      latestTurnAtDomBottom: true,
+      clientSubmissionCount: 0,
+      expectedLatestItemCount: 5,
+      latestTurnItemCount: 4,
+      expectedLatestUserMessageCount: 1,
+      latestTurnUserMessageCount: 1,
+      expectedLatestAssistantMessageCount: 2,
+      latestTurnAssistantMessageCount: 1,
+      expectedTurnShapes: [{
+        index: 0,
+        turnHash: "completed-latest",
+        completed: true,
+        expectedItemCount: 5,
+        expectedUserMessageCount: 1,
+        expectedAssistantMessageCount: 2,
+        expectedUsageRequired: true,
+      }],
+      domTurnShapes: [{
+        index: 0,
+        turnHash: "completed-latest",
+        completed: true,
+        itemCount: 4,
+        userMessageCount: 1,
+        assistantMessageCount: 1,
+        usageCount: 1,
+      }],
+      turns: 1,
+      items: 4,
+      renderKeys: 4,
+    }],
+  });
+
+  const issue = result.issues.find((entry) => entry.code === "thread_detail_reentry_partial_projection_missing_completed_assistant");
+  assert.equal(result.ok, false);
+  assert.equal(issue && issue.severity, "H2");
+  assert.equal(issue && issue.readMode, "projection-v4-partial");
+  assert.equal(issue && issue.readDecision, "projection-stale-partial-hit");
+  assert.equal(issue && issue.performancePhase, "warm-projection-partial");
+  assert.equal(issue && issue.expectedLatestAssistantMessageCount, 2);
+  assert.equal(issue && issue.currentLatestAssistantMessageCount, 1);
 });
 
 test("browser runtime self-check blocks stuck refresh activity after latest turn reaches DOM bottom", () => {
@@ -652,7 +1284,7 @@ test("browser runtime self-check analyzes Vite preview module readiness", () => 
     markerVisible: true,
     stage: "vite-shell-preview-html-v1",
     sourceBuildStage: "vite-shell-artifact-contract-v1",
-    productionExecution: "classic-script-fallback",
+    productionExecution: "vite-app-preview-native-esm",
     clientBuildMatches: true,
     shellCacheMatches: true,
     moduleScriptMatchesPreview: true,
@@ -684,7 +1316,7 @@ test("browser runtime self-check analyzes Vite preview module readiness", () => 
     markerVisible: true,
     stage: "wrong",
     sourceBuildStage: "vite-shell-artifact-contract-v1",
-    productionExecution: "classic-script-fallback",
+    productionExecution: "vite-app-preview-native-esm",
     clientBuildMatches: true,
     shellCacheMatches: true,
     moduleScriptMatchesPreview: false,
@@ -724,7 +1356,10 @@ test("browser runtime self-check analyzes Vite preview module readiness", () => 
   assert.ok(failing.issues.some((issue) => issue.code === "vite_preview_classic_compatibility_missing"));
   assert.ok(failing.issues.some((issue) => issue.code === "vite_preview_classic_startup_globals_missing"));
   assert.ok(failing.issues.some((issue) => issue.code === "vite_preview_classic_startup_global_contract_mismatch"));
-  assert.ok(failing.issues.some((issue) => issue.code === "vite_preview_esm_compatibility_missing"));
+  const vitePreviewEsmIssue = failing.issues.find((issue) => issue.code === "vite_preview_esm_compatibility_missing");
+  assert.ok(vitePreviewEsmIssue);
+  assert.deepEqual(vitePreviewEsmIssue.notReadyModuleIds, ["thread-status-hints"]);
+  assert.equal(vitePreviewEsmIssue.notReadyModules[0].sample.expire, false);
   assert.ok(failing.issues.some((issue) => issue.code === "vite_preview_browser_exception"));
 });
 
@@ -918,7 +1553,10 @@ test("browser runtime self-check analyzes Vite app-preview startup readiness", (
   assert.ok(failing.issues.some((issue) => issue.code === "vite_app_preview_module_entry_missing"));
   assert.ok(failing.issues.some((issue) => issue.code === "vite_app_preview_classic_loader_plan_missing"));
   assert.ok(failing.issues.some((issue) => issue.code === "vite_app_preview_classic_loader_plan_mismatch"));
-  assert.ok(failing.issues.some((issue) => issue.code === "vite_app_preview_esm_compatibility_missing"));
+  const appPreviewEsmIssue = failing.issues.find((issue) => issue.code === "vite_app_preview_esm_compatibility_missing");
+  assert.ok(appPreviewEsmIssue);
+  assert.deepEqual(appPreviewEsmIssue.notReadyModuleIds, ["thread-status-hints"]);
+  assert.equal(appPreviewEsmIssue.notReadyModules[0].sample.expire, false);
   assert.ok(failing.issues.some((issue) => issue.code === "vite_app_preview_loader_failed"));
   assert.ok(failing.issues.some((issue) => issue.code === "vite_app_preview_classic_script_order_mismatch"));
   assert.ok(failing.issues.some((issue) => issue.code === "vite_app_preview_client_build_mismatch"));
@@ -1262,6 +1900,8 @@ test("browser runtime self-check reads client build from shell manifest assets",
   assert.ok(scriptSource.includes("vite_preview_esm_compatibility_missing"));
   assert.ok(scriptSource.includes("vite_app_preview_esm_compatibility_missing"));
   assert.ok(scriptSource.includes("shellRefreshContractReady"));
+  assert.ok(scriptSource.includes("shellCacheMatches"));
+  assert.ok(scriptSource.includes("appStartPending"));
   assert.ok(scriptSource.includes("refreshPageForNewBuild"));
   assert.ok(scriptSource.includes("clearAllShellCaches"));
   assert.ok(scriptSource.includes("resetPageShellServiceWorker"));
@@ -1317,6 +1957,260 @@ test("browser runtime startup gate blocks missing shell refresh contract", () =>
   assert.equal(issue.severity, "H2");
   assert.equal(issue.resetServiceWorkerReady, false);
   assert.equal(issue.serviceWorkerCapable, true);
+});
+
+test("browser runtime deploy gate blocks unconfirmed client version switch", () => {
+  const report = {
+    browserReport: {
+      ok: true,
+      issues: [],
+      issueCount: 0,
+      blockingIssueCount: 0,
+    },
+  };
+  script.applyStartupGateIssues(report, {
+    clientBuildMatches: true,
+    composerRuntimeReady: true,
+    threadListRuntimeReady: true,
+    threadTileRuntimeReady: true,
+    bootRecoveryVisible: false,
+    shellRefreshContractReady: true,
+    updateStatusCurrentClientBuildMatches: true,
+    updateStatusCurrentShellCacheMatches: true,
+    updateFullClientVersionPresent: true,
+    updateFullClientVersionMatches: false,
+    updateFullClientVersionUsesClassicCache: true,
+  }, { ok: true });
+
+  const startupIssue = report.browserReport.issues.find((item) => item.code === "client_version_switch_not_confirmed");
+  assert.ok(startupIssue);
+  assert.equal(startupIssue.severity, "H2");
+  assert.equal(startupIssue.fullVersionMatches, false);
+  assert.equal(startupIssue.fullVersionUsesClassicCache, true);
+
+  const appPreview = script.analyzeViteAppPreviewProbe({
+    markerPresent: true,
+    metaPresent: true,
+    moduleScriptMatchesPreview: true,
+    loaderOk: true,
+    classicScriptCount: 51,
+    expectedClassicScriptCount: 51,
+    classicScriptOrderMatches: true,
+    loaderPlanPresent: true,
+    loaderPlanOwnerOk: true,
+    loaderPlanHashPresent: true,
+    loaderPlanScriptCount: 51,
+    loaderPlanHashCount: 51,
+    loaderPlanMatchesShellScripts: true,
+    loaderPlanMatchesInjectedScripts: true,
+    loaderPlanLoadedMatches: true,
+    ...viteEsmCompatibilityReady,
+    clientBuildMatches: true,
+    shellCacheMatches: true,
+    updateStatusCurrentClientBuildMatches: true,
+    updateStatusCurrentShellCacheMatches: true,
+    updateFullClientVersionPresent: true,
+    updateFullClientVersionMatches: true,
+    updateFullClientVersionUsesClassicCache: false,
+    appVisible: true,
+    bootRecoveryVisible: false,
+    composerRuntimeReady: true,
+    threadListRuntimeReady: true,
+    threadTileRuntimeReady: true,
+    loadThreadReady: true,
+  }, { consoleEvents: [], exceptions: [] });
+  assert.equal(appPreview.issues.some((item) => item.code === "client_version_switch_not_confirmed"), false);
+
+  const appPreviewClassic = script.analyzeViteAppPreviewProbe({
+    markerPresent: true,
+    metaPresent: true,
+    moduleScriptMatchesPreview: true,
+    loaderOk: true,
+    classicScriptCount: 51,
+    expectedClassicScriptCount: 51,
+    classicScriptOrderMatches: true,
+    loaderPlanPresent: true,
+    loaderPlanOwnerOk: true,
+    loaderPlanHashPresent: true,
+    loaderPlanScriptCount: 51,
+    loaderPlanHashCount: 51,
+    loaderPlanMatchesShellScripts: true,
+    loaderPlanMatchesInjectedScripts: true,
+    loaderPlanLoadedMatches: true,
+    ...viteEsmCompatibilityReady,
+    clientBuildMatches: true,
+    shellCacheMatches: true,
+    updateStatusCurrentClientBuildMatches: true,
+    updateStatusCurrentShellCacheMatches: true,
+    updateFullClientVersionPresent: true,
+    updateFullClientVersionMatches: true,
+    updateFullClientVersionUsesClassicCache: true,
+    appVisible: true,
+    bootRecoveryVisible: false,
+    composerRuntimeReady: true,
+    threadListRuntimeReady: true,
+    threadTileRuntimeReady: true,
+    loadThreadReady: true,
+  }, { consoleEvents: [], exceptions: [] });
+  assert.ok(appPreviewClassic.issues.some((item) => item.code === "client_version_switch_not_confirmed"));
+
+  const emptyBuildReport = {
+    browserReport: {
+      ok: true,
+      issues: [],
+      issueCount: 0,
+      blockingIssueCount: 0,
+    },
+  };
+  script.applyStartupGateIssues(emptyBuildReport, {
+    clientBuildMatches: true,
+    composerRuntimeReady: true,
+    threadListRuntimeReady: true,
+    threadTileRuntimeReady: true,
+    bootRecoveryVisible: false,
+    shellRefreshContractReady: true,
+    updateStatusCurrentBuildIdentityPresent: false,
+    updateStatusCurrentBuildIssueCodes: ["app_update_current_build_identity_empty"],
+    updateStatusCurrentClientBuildMatches: false,
+    updateStatusCurrentShellCacheMatches: false,
+    updateFullClientVersionPresent: true,
+    updateFullClientVersionMatches: false,
+    updateFullClientVersionUsesClassicCache: false,
+  }, { ok: true });
+  assert.ok(emptyBuildReport.browserReport.issues.some((item) => item.code === "app_update_current_build_identity_empty"));
+  assert.ok(emptyBuildReport.browserReport.issues.some((item) => item.code === "client_version_switch_not_confirmed"));
+
+  const stuckClassicReport = {
+    browserReport: {
+      ok: true,
+      issues: [],
+      issueCount: 0,
+      blockingIssueCount: 0,
+    },
+  };
+  script.applyStartupGateIssues(stuckClassicReport, {
+    clientBuildMatches: false,
+    runtimeClientBuildUsesClassicCache: true,
+    composerRuntimeReady: true,
+    threadListRuntimeReady: true,
+    threadTileRuntimeReady: true,
+    bootRecoveryVisible: false,
+    shellRefreshContractReady: true,
+    updateStatusCurrentBuildIdentityPresent: true,
+    updateStatusCurrentClientBuildMatches: true,
+    updateStatusCurrentShellCacheMatches: true,
+    updateFullClientVersionPresent: true,
+    updateFullClientVersionMatches: true,
+    updateFullClientVersionUsesClassicCache: false,
+  }, { ok: true });
+  assert.ok(stuckClassicReport.browserReport.issues.some((item) => item.code === "client_runtime_stuck_on_classic_cache_identity"));
+
+  const settledBannerReport = {
+    browserReport: {
+      ok: true,
+      issues: [],
+      issueCount: 0,
+      blockingIssueCount: 0,
+    },
+  };
+  script.applyStartupGateIssues(settledBannerReport, {
+    clientBuildMatches: true,
+    pluginRefreshBannerVisibleAfterBuildSettled: true,
+    composerRuntimeReady: true,
+    threadListRuntimeReady: true,
+    threadTileRuntimeReady: true,
+    bootRecoveryVisible: false,
+    shellRefreshContractReady: true,
+    updateStatusCurrentBuildIdentityPresent: true,
+    updateStatusCurrentClientBuildMatches: true,
+    updateStatusCurrentShellCacheMatches: true,
+    updateFullClientVersionPresent: true,
+    updateFullClientVersionMatches: true,
+    updateFullClientVersionUsesClassicCache: false,
+  }, { ok: true });
+  assert.ok(settledBannerReport.browserReport.issues.some((item) => item.code === "plugin_refresh_banner_stuck_after_build_settled"));
+
+  const deferredStartupReport = script.analyzeViteAppPreviewProbe({
+    markerPresent: true,
+    metaPresent: true,
+    moduleScriptMatchesPreview: true,
+    loaderOk: true,
+    classicScriptCount: 0,
+    expectedClassicScriptCount: 0,
+    classicScriptOrderMatches: true,
+    loaderPlanPresent: true,
+    loaderPlanOwnerOk: true,
+    loaderPlanHashPresent: true,
+    loaderPlanScriptCount: 0,
+    loaderPlanHashCount: 0,
+    loaderPlanSourceScriptCount: 51,
+    shellScriptCount: 51,
+    loaderPlanExcludedEsmScriptCount: 49,
+    loaderPlanExcludedEsmHashCount: 49,
+    loaderPlanExcludedEsmGlobalsReady: true,
+    loaderPlanExcludedViteOwnedScriptCount: 2,
+    loaderPlanExcludedViteOwnedHashCount: 2,
+    loaderPlanExcludedViteOwnedGlobalsReady: true,
+    loaderPlanMatchesShellScripts: true,
+    loaderPlanMatchesInjectedScripts: true,
+    loaderPlanLoadedMatches: true,
+    ...viteEsmCompatibilityReady,
+    clientBuildMatches: true,
+    shellCacheMatches: true,
+    appStartPending: true,
+    updateStatusCurrentBuildIdentityPresent: false,
+    updateStatusCurrentClientBuildMatches: false,
+    updateStatusCurrentShellCacheMatches: false,
+    updateFullClientVersionPresent: false,
+    updateFullClientVersionMatches: false,
+    updateFullClientVersionUsesClassicCache: false,
+    updateFullClientVersionErrorCode: "settings_runtime_unavailable",
+    runtimeClientBuildUsesClassicCache: false,
+    pluginRefreshBannerVisibleAfterBuildSettled: false,
+    appVisible: true,
+    bootRecoveryVisible: false,
+    composerRuntimeReady: true,
+    threadListRuntimeReady: true,
+    threadTileRuntimeReady: true,
+    loadThreadReady: true,
+  }, { consoleEvents: [], exceptions: [] }, { expectRoot: true, expectDefaultRoot: true });
+  assert.equal(deferredStartupReport.issues.some((item) => item.code === "app_update_current_build_identity_empty"), false);
+  assert.equal(deferredStartupReport.issues.some((item) => item.code === "client_version_switch_not_confirmed"), false);
+
+  const appPreviewEmptyBuild = script.analyzeViteAppPreviewProbe({
+    markerPresent: true,
+    metaPresent: true,
+    moduleScriptMatchesPreview: true,
+    loaderOk: true,
+    classicScriptCount: 51,
+    expectedClassicScriptCount: 51,
+    classicScriptOrderMatches: true,
+    loaderPlanPresent: true,
+    loaderPlanOwnerOk: true,
+    loaderPlanHashPresent: true,
+    loaderPlanScriptCount: 51,
+    loaderPlanHashCount: 51,
+    loaderPlanMatchesShellScripts: true,
+    loaderPlanMatchesInjectedScripts: true,
+    loaderPlanLoadedMatches: true,
+    ...viteEsmCompatibilityReady,
+    clientBuildMatches: true,
+    shellCacheMatches: true,
+    updateStatusCurrentBuildIdentityPresent: false,
+    updateStatusCurrentBuildIssueCodes: ["app_update_current_build_identity_empty"],
+    updateStatusCurrentClientBuildMatches: false,
+    updateStatusCurrentShellCacheMatches: false,
+    updateFullClientVersionPresent: true,
+    updateFullClientVersionMatches: false,
+    updateFullClientVersionUsesClassicCache: false,
+    appVisible: true,
+    bootRecoveryVisible: false,
+    composerRuntimeReady: true,
+    threadListRuntimeReady: true,
+    threadTileRuntimeReady: true,
+    loadThreadReady: true,
+  }, { consoleEvents: [], exceptions: [] });
+  assert.ok(appPreviewEmptyBuild.issues.some((item) => item.code === "app_update_current_build_identity_empty"));
 });
 
 test("browser runtime self-check treats startup exceptions as blocking", () => {
@@ -1605,6 +2499,48 @@ test("browser runtime self-check catches per-turn DOM/API structure mismatches",
   assert.equal(issue.turnShape.actualAssistantMessageCount, 0);
 });
 
+test("browser runtime self-check blocks stale-active downgraded API turn shapes", () => {
+  const report = service.analyzeBrowserRuntimeSamples({
+    samples: [{
+      label: "stale-active",
+      threadHash: "thread-hash",
+      appVisible: true,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      expectedTurnShapes: [{
+        index: 0,
+        turnHash: "turn-a",
+        completed: true,
+        staleActive: true,
+        expectedItemCount: 3,
+        expectedUserMessageCount: 1,
+        expectedAssistantMessageCount: 1,
+        expectedUsageRequired: true,
+        expectedTimestampItemCount: 2,
+      }],
+      domTurnShapes: [{
+        index: 0,
+        turnHash: "turn-a",
+        itemCount: 3,
+        userMessageCount: 1,
+        assistantMessageCount: 1,
+        usageCount: 1,
+        timestampExpectedItems: 2,
+        timestampMissingItems: 0,
+      }],
+      turns: 1,
+      items: 3,
+      renderKeys: 3,
+    }],
+  });
+
+  const issue = report.issues.find((entry) => entry.code === "browser_api_stale_active_turn_downgraded");
+
+  assert.equal(report.ok, false);
+  assert.equal(issue && issue.severity, "H2");
+  assert.equal(issue && issue.turnShape.staleActive, true);
+});
+
 test("browser runtime self-check keeps one-off dynamic API plan mismatches advisory", () => {
   const report = service.analyzeBrowserRuntimeSamples({
     samples: [{
@@ -1694,6 +2630,118 @@ test("browser runtime self-check blocks repeated dynamic API plan mismatches", (
   assert.equal(report.ok, false);
   assert.equal(issue && issue.severity, "H2");
   assert.equal(issue && issue.observationCount, 2);
+});
+
+test("browser runtime self-check keeps one-off dynamic latest completed tail catch-up advisory", () => {
+  const report = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "submit-post-1600",
+      threadHash: "thread-hash",
+      appVisible: true,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      delayMs: 1600,
+      dynamicThreadPlan: true,
+      latestTurnMatchesTarget: true,
+      latestTurnHash: "turn-a",
+      expectedLatestItemCount: 4,
+      latestTurnItemCount: 2,
+      expectedLatestUserMessageCount: 1,
+      latestTurnUserMessageCount: 1,
+      expectedLatestAssistantMessageCount: 2,
+      latestTurnAssistantMessageCount: 1,
+      expectedLatestUsageRequired: true,
+      latestTurnUsageCount: 0,
+      expectedTurnShapes: [{
+        index: 0,
+        turnHash: "turn-a",
+        completed: true,
+        expectedItemCount: 4,
+        expectedUserMessageCount: 1,
+        expectedAssistantMessageCount: 2,
+        expectedUsageRequired: true,
+      }],
+      domTurnShapes: [{
+        index: 0,
+        turnHash: "turn-a",
+        itemCount: 2,
+        userMessageCount: 1,
+        assistantMessageCount: 1,
+        usageCount: 0,
+      }],
+      turns: 1,
+      items: 2,
+      renderKeys: 2,
+    }],
+  });
+
+  const itemIssue = report.issues.find((entry) => entry.code === "browser_latest_turn_item_below_api_expectation");
+  const usageIssue = report.issues.find((entry) => entry.code === "browser_latest_turn_usage_missing");
+
+  assert.equal(report.ok, true);
+  assert.equal(itemIssue && itemIssue.severity, "H3");
+  assert.equal(itemIssue && itemIssue.observationCount, 1);
+  assert.equal(usageIssue && usageIssue.severity, "H3");
+  assert.equal(usageIssue && usageIssue.observationCount, 1);
+  assert.equal(usageIssue && usageIssue.turnShape.expectedUsageRequired, true);
+});
+
+test("browser runtime self-check blocks repeated dynamic latest completed tail gaps", () => {
+  const sample = {
+    threadHash: "thread-hash",
+    appVisible: true,
+    targetConfirmed: true,
+    contentConfirmed: true,
+    delayMs: 1600,
+    dynamicThreadPlan: true,
+    latestTurnMatchesTarget: true,
+    latestTurnHash: "turn-a",
+    expectedLatestItemCount: 4,
+    latestTurnItemCount: 2,
+    expectedLatestUserMessageCount: 1,
+    latestTurnUserMessageCount: 1,
+    expectedLatestAssistantMessageCount: 2,
+    latestTurnAssistantMessageCount: 1,
+    expectedLatestUsageRequired: true,
+    latestTurnUsageCount: 0,
+    expectedTurnShapes: [{
+      index: 0,
+      turnHash: "turn-a",
+      completed: true,
+      expectedItemCount: 4,
+      expectedUserMessageCount: 1,
+      expectedAssistantMessageCount: 2,
+      expectedUsageRequired: true,
+    }],
+    domTurnShapes: [{
+      index: 0,
+      turnHash: "turn-a",
+      itemCount: 2,
+      userMessageCount: 1,
+      assistantMessageCount: 1,
+      usageCount: 0,
+    }],
+    turns: 1,
+    items: 2,
+    renderKeys: 2,
+  };
+  const report = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [
+      Object.assign({ label: "submit-post-1600-a" }, sample),
+      Object.assign({ label: "submit-post-1600-b" }, sample),
+    ],
+  });
+
+  const itemIssue = report.issues.find((entry) => entry.code === "browser_latest_turn_item_below_api_expectation");
+  const usageIssue = report.issues.find((entry) => entry.code === "browser_latest_turn_usage_missing");
+
+  assert.equal(report.ok, false);
+  assert.equal(itemIssue && itemIssue.severity, "H2");
+  assert.equal(itemIssue && itemIssue.observationCount, 2);
+  assert.equal(usageIssue && usageIssue.severity, "H2");
+  assert.equal(usageIssue && usageIssue.observationCount, 2);
 });
 
 test("browser runtime self-check counts task-card DOM as visible user input", () => {
@@ -2138,6 +3186,138 @@ test("browser runtime self-check catches cross-turn user event duplicates", () =
   assert.equal(duplicateIssue.severity, "H2");
   assert.equal(duplicateIssue.duplicateCount, 1);
   assert.equal(report.sampleSummary.maxAllUserEventDuplicates, 1);
+});
+
+test("browser runtime self-check catches DOM user message order divergence from API", () => {
+  const report = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "settled-order-diverged",
+      threadHash: "thread-hash",
+      appVisible: true,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      latestTurnMatchesTarget: true,
+      latestTurnHash: "latest-turn-hash",
+      latestTurnItemCount: 4,
+      latestTurnUserMessageCount: 2,
+      latestTurnAssistantMessageCount: 2,
+      turns: 3,
+      items: 12,
+      delayMs: 1600,
+      expectedTurnShapes: [{
+        turnHash: "latest-turn-hash",
+        completed: false,
+        expectedItemCount: 4,
+        expectedUserMessageCount: 2,
+        expectedAssistantMessageCount: 2,
+        expectedUserAfterAssistantLikeCount: 1,
+        expectedItemKindSequence: ["userMessage", "agentMessage", "userMessage", "agentMessage"],
+      }],
+      domTurnShapes: [{
+        turnHash: "latest-turn-hash",
+        itemCount: 4,
+        userMessageCount: 2,
+        assistantMessageCount: 2,
+        userAfterAssistantLikeCount: 0,
+        userAtTail: false,
+        itemKindSequence: ["userMessage", "userMessage", "agentMessage", "agentMessage"],
+      }],
+    }],
+  });
+
+  assert.equal(report.ok, false);
+  const issue = report.issues.find((item) => item.code === "browser_turn_user_message_order_mismatch");
+  assert.ok(issue);
+  assert.equal(issue.severity, "H2");
+  assert.deepEqual(issue.turnShape.expectedItemKindSequence, ["userMessage", "agentMessage", "userMessage", "agentMessage"]);
+  assert.deepEqual(issue.turnShape.actualItemKindSequence, ["userMessage", "userMessage", "agentMessage", "agentMessage"]);
+});
+
+test("browser runtime self-check keeps immediate submit order divergence diagnostic-only", () => {
+  const report = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "submit-after-2",
+      threadHash: "thread-hash",
+      appVisible: true,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      latestTurnMatchesTarget: true,
+      latestTurnHash: "latest-turn-hash",
+      latestTurnItemCount: 3,
+      latestTurnUserMessageCount: 2,
+      latestTurnAssistantMessageCount: 1,
+      turns: 3,
+      items: 12,
+      delayMs: 0,
+      expectedTurnShapes: [{
+        turnHash: "latest-turn-hash",
+        completed: false,
+        expectedItemCount: 3,
+        expectedUserMessageCount: 2,
+        expectedAssistantMessageCount: 1,
+        expectedUserAfterAssistantLikeCount: 1,
+        expectedItemKindSequence: ["userMessage", "agentMessage", "userMessage"],
+      }],
+      domTurnShapes: [{
+        turnHash: "latest-turn-hash",
+        itemCount: 3,
+        userMessageCount: 2,
+        assistantMessageCount: 1,
+        userAfterAssistantLikeCount: 0,
+        userAtTail: false,
+        itemKindSequence: ["userMessage", "userMessage", "agentMessage"],
+      }],
+    }],
+  });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.issues.some((item) => item.code === "browser_turn_user_message_order_mismatch"), false);
+});
+
+test("browser runtime self-check accepts local submitted user tail before API catches up", () => {
+  const report = service.analyzeBrowserRuntimeSamples({
+    minSettledDelayMs: 1000,
+    samples: [{
+      label: "submit-post-350",
+      threadHash: "thread-hash",
+      appVisible: true,
+      targetConfirmed: true,
+      contentConfirmed: true,
+      dynamicThreadPlan: true,
+      latestTurnMatchesTarget: true,
+      latestTurnHash: "latest-turn-hash",
+      latestTurnItemCount: 6,
+      latestTurnUserMessageCount: 3,
+      latestTurnAssistantMessageCount: 3,
+      clientSubmissionCount: 1,
+      turns: 3,
+      items: 14,
+      delayMs: 350,
+      expectedTurnShapes: [{
+        turnHash: "latest-turn-hash",
+        completed: false,
+        expectedItemCount: 5,
+        expectedUserMessageCount: 2,
+        expectedAssistantMessageCount: 3,
+        expectedUserAfterAssistantLikeCount: 1,
+        expectedItemKindSequence: ["userMessage", "agentMessage", "agentMessage", "agentMessage", "userMessage"],
+      }],
+      domTurnShapes: [{
+        turnHash: "latest-turn-hash",
+        itemCount: 6,
+        userMessageCount: 3,
+        assistantMessageCount: 3,
+        userAfterAssistantLikeCount: 2,
+        userAtTail: true,
+        itemKindSequence: ["userMessage", "agentMessage", "agentMessage", "agentMessage", "userMessage", "userMessage"],
+      }],
+    }],
+  });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.issues.some((item) => item.code === "browser_turn_user_message_order_mismatch"), false);
 });
 
 test("browser runtime self-check ignores null samples in summary", () => {
@@ -3078,13 +4258,17 @@ test("browser runtime self-check catches duplicate DOM keys and runtime exceptio
       duplicateRenderKeys: 1,
       duplicateItemIds: 2,
     }],
-    exceptions: [{ code: "uncaught" }],
+    exceptions: [{ code: "uncaught", label: "ReferenceError_test_value_is_not_defined", detailHash: "hash1" }],
   });
 
   assert.equal(report.ok, false);
   assert.ok(report.issues.some((issue) => issue.code === "browser_duplicate_render_keys"));
   assert.ok(report.issues.some((issue) => issue.code === "browser_duplicate_item_ids"));
-  assert.ok(report.issues.some((issue) => issue.code === "browser_runtime_exception"));
+  const exceptionIssue = report.issues.find((issue) => issue.code === "browser_runtime_exception");
+  assert.ok(exceptionIssue);
+  assert.deepEqual(exceptionIssue.exceptionCodes, ["uncaught"]);
+  assert.deepEqual(exceptionIssue.exceptionLabels, ["ReferenceError_test_value_is_not_defined"]);
+  assert.deepEqual(exceptionIssue.exceptionHashes, ["hash1"]);
 });
 
 test("browser runtime self-check helper output is metadata-only", () => {
@@ -3130,9 +4314,14 @@ test("browser runtime self-check script exposes bounded browser snapshot fields"
   assert.match(expression, /expectedLatestItemCount/);
   assert.match(expression, /expectedLatestUserMessageCount/);
   assert.match(expression, /expectedLatestTaskCardUserMessageCount/);
+  assert.match(expression, /expectedReadMode/);
+  assert.match(expression, /expectedReadDecision/);
+  assert.match(expression, /expectedPerformancePhase/);
   assert.match(expression, /expectedTurnShapes/);
   assert.match(expression, /domTurnShapes/);
   assert.match(expression, /userAfterUsageCount/);
+  assert.match(expression, /itemKindSequence/);
+  assert.match(expression, /userAfterAssistantLikeCount/);
   assert.match(expression, /longTaskMaxDurationMs/);
   assert.match(expression, /latestTurnHash/);
   assert.match(expression, /latestTurnUserMessageCount/);
@@ -3150,14 +4339,31 @@ test("browser runtime self-check script exposes bounded browser snapshot fields"
   assert.match(expression, /imageFailureDetails/);
   assert.match(expression, /brokenCompleteImageCount/);
   assert.match(expression, /data-client-submission-hash/);
+  assert.match(expression, /submission-text:/);
+  assert.match(expression, /submissionHash && textHash/);
   assert.match(expression, /visualAnchorKeyHash/);
   assert.match(expression, /visualFrameHash/);
   assert.match(expression, /submittedMessageKeyHash/);
   assert.match(expression, /conversationTopPx/);
   assert.match(expression, /loadingNote/);
   assert.match(expression, /emptyState/);
+  assert.match(expression, /pluginRefreshBannerSeededForThreadEntry/);
+  assert.match(expression, /pluginRefreshBannerVisibleAfterThreadEntry/);
   assert.match(expression, /codexMobileCurrentThreadId/);
   assert.doesNotMatch(expression, /innerText|location\.href|document\.cookie|Authorization|Bearer/);
+});
+
+test("browser runtime self-check seeds settled thread-entry refresh banner probe", () => {
+  const expression = script.openThreadExpression("thread-private-id", {
+    clientBuildId: "0.1.11|codex-mobile-shell-v625-current",
+  });
+
+  assert.match(expression, /pluginRefreshPendingReason = "server_build_changed"/);
+  assert.match(expression, /Refreshing plugin page for a new Mobile Web build/);
+  assert.match(expression, /__codexSelfCheckThreadEntryRefreshBanner/);
+  assert.match(expression, /visibleAfterOpen/);
+  assert.match(script.run.toString(), /openThreadExpression\(entry\.id, report\.publicConfig\)/);
+  assert.doesNotMatch(expression, /document\.cookie|Authorization|Bearer/);
 });
 
 test("browser runtime self-check refreshes API plan before settled delayed samples", () => {
@@ -3171,6 +4377,9 @@ test("browser runtime self-check refreshes API plan before settled delayed sampl
     expectedLatestUserMessageDuplicateCount: 0,
     expectedLatestTaskCardUserMessageCount: 2,
     expectedTurnShapes: [{ turnHash: "turn-a" }],
+    expectedReadMode: "projection-v4-partial",
+    expectedReadDecision: "projection-stale-partial-hit",
+    expectedPerformancePhase: "warm-projection-partial",
   }, {
     label: "sample",
     delayMs: 100,
@@ -3178,6 +4387,9 @@ test("browser runtime self-check refreshes API plan before settled delayed sampl
 
   assert.equal(input.threadId, "private-thread-id");
   assert.equal(input.expectedLatestTaskCardUserMessageCount, 2);
+  assert.equal(input.expectedReadMode, "projection-v4-partial");
+  assert.equal(input.expectedReadDecision, "projection-stale-partial-hit");
+  assert.equal(input.expectedPerformancePhase, "warm-projection-partial");
   assert.deepEqual(input.expectedTurnShapes, [{ turnHash: "turn-a" }]);
   assert.match(
     script.run.toString(),
@@ -3237,7 +4449,7 @@ test("browser runtime self-check route and console classifiers are bounded", () 
   assert.equal(script.routeKind("http://127.0.0.1:8787/api/client-events?key=secret"), "client_events");
   assert.equal(script.routeKind("http://127.0.0.1:8787/private/path?cookie=value"), "other");
   assert.equal(script.safeConsoleText("Failed to load resource: the server responded with a status of 500"), "resource_load_failed");
-  assert.equal(script.safeConsoleText("Uncaught TypeError: private value"), "uncaught");
+  assert.equal(script.safeConsoleText("Uncaught TypeError: private value"), "type_error");
 });
 
 test("browser runtime self-check launches Chrome in a cleanup-owned process group", () => {

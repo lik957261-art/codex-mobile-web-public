@@ -15,7 +15,6 @@ function createThreadListRuntime(deps = {}) {
   const setTimeout = typeof deps.setTimeout === "function" ? deps.setTimeout : root.setTimeout.bind(root);
   const clearTimeout = typeof deps.clearTimeout === "function" ? deps.clearTimeout : root.clearTimeout.bind(root);
   const THREAD_LIST_PAGE_LIMIT = deps.THREAD_LIST_PAGE_LIMIT;
-  const THREAD_LIST_MOBILE_PAGE_LIMIT = Math.max(1, Number(deps.THREAD_LIST_MOBILE_PAGE_LIMIT || 40) || 40);
   const THREAD_LIST_DEFERRED_FALLBACK_DELAY_MS = deps.THREAD_LIST_DEFERRED_FALLBACK_DELAY_MS;
   const THREAD_LIST_DEFERRED_FALLBACK_RETRY_MS = deps.THREAD_LIST_DEFERRED_FALLBACK_RETRY_MS;
   const THREAD_LIST_SLOW_PATH_MS = deps.THREAD_LIST_SLOW_PATH_MS;
@@ -66,6 +65,7 @@ function createThreadListRuntime(deps = {}) {
     basenameForFsPath,
     visibleWorkspaceNames,
     statusText,
+    threadUpdatedAtMs,
     scheduleRenderCurrentThread,
     threadTilePaneIsVisible,
     scheduleRenderThreadTilePane,
@@ -340,30 +340,6 @@ function shouldRenderPrimaryConversationShell() {
   return !hasThreadDetailSelectionIntent() && !state.newThreadDraft;
 }
 
-function shouldSkipStandaloneMobileThreadRestore() {
-  try {
-    return !isHermesEmbedMode() && typeof isMobileViewport === "function" && isMobileViewport();
-  } catch (_) {
-    return false;
-  }
-}
-
-function threadListDisplayTitle(thread) {
-  return String(thread && (thread.name || thread.preview || thread.id) || "").trim();
-}
-
-function isInternalMobileThreadNoise(thread) {
-  const title = threadListDisplayTitle(thread);
-  return title.startsWith("<codex_delegation>")
-    || title.startsWith("The following is the Codex agent history whose request action you are assessing.");
-}
-
-function threadListDisplayThreads() {
-  const threads = Array.isArray(state.threads) ? state.threads : [];
-  if (!shouldSkipStandaloneMobileThreadRestore()) return threads;
-  return threads.filter((thread) => thread && (thread.id === state.currentThreadId || !isInternalMobileThreadNoise(thread)));
-}
-
 function clearThreadListDeferredFallbackTimer() {
   if (!state.threadListDeferredFallbackTimer) return;
   clearTimeout(state.threadListDeferredFallbackTimer);
@@ -421,8 +397,7 @@ async function loadThreads(options = {}) {
   const silent = options.silent === true;
   if (silent && state.threadListLoadController) return null;
   if (options.deferFallback !== true) clearThreadListDeferredFallbackTimer();
-  const pageLimit = shouldSkipStandaloneMobileThreadRestore() ? THREAD_LIST_MOBILE_PAGE_LIMIT : THREAD_LIST_PAGE_LIMIT;
-  const params = new URLSearchParams({ limit: String(pageLimit), archived: "false" });
+  const params = new URLSearchParams({ limit: String(THREAD_LIST_PAGE_LIMIT), archived: "false" });
   if (state.selectedCwd) params.set("cwd", state.selectedCwd);
   const search = $("threadSearch").value.trim();
   if (search) params.set("search", search);
@@ -594,9 +569,7 @@ function isHiddenThread(thread) {
   if (/archived|deleted|removed/.test(status)) return true;
   if (/[/\\](archived|deleted|trash|removed)[_-]?sessions[/\\]/.test(location)) return true;
   if (/\.jsonl\.(bak|backup|old)(?:\b|[-_.])/.test(location)) return true;
-  const cwd = normalizeFsPath(thread.cwd);
   if (state.selectedCwd && !threadMatchesWorkspaceCwd(thread.cwd, state.selectedCwd)) return true;
-  if (cwd && !threadMatchesVisibleWorkspace(thread.cwd)) return true;
   return false;
 }
 
@@ -612,6 +585,56 @@ function applyThreadStatusToThread(thread, status) {
   if (!thread) return false;
   thread.status = status;
   return true;
+}
+
+function updateThreadActivityTimestamp(thread, eventAtMs = 0) {
+  if (!thread) return false;
+  const nextMs = Math.max(0, Math.trunc(Number(eventAtMs) || 0));
+  if (!nextMs) return false;
+  const currentMs = typeof threadUpdatedAtMs === "function" ? threadUpdatedAtMs(thread) : 0;
+  if (currentMs && currentMs >= nextMs) return false;
+  thread.updatedAt = Math.floor(nextMs / 1000);
+  return true;
+}
+
+function syncThreadListStableOrderFromCurrentThreads() {
+  if (!state.threadListStableOrder || typeof state.threadListStableOrder !== "object") return;
+  const updatedAtById = {};
+  const order = [];
+  for (const thread of state.threads || []) {
+    const id = String(thread && thread.id || "");
+    if (!id) continue;
+    order.push(id);
+    const updatedAtMs = typeof threadUpdatedAtMs === "function" ? threadUpdatedAtMs(thread) : 0;
+    if (updatedAtMs > 0) updatedAtById[id] = updatedAtMs;
+  }
+  state.threadListStableOrder = Object.assign({}, state.threadListStableOrder, {
+    order,
+    updatedAtById,
+  });
+}
+
+function sortThreadListByUpdatedAt() {
+  const indexed = (state.threads || []).map((thread, index) => ({
+    thread,
+    index,
+    updatedAtMs: typeof threadUpdatedAtMs === "function" ? threadUpdatedAtMs(thread) : 0,
+  }));
+  indexed.sort((left, right) => (right.updatedAtMs - left.updatedAtMs) || (left.index - right.index));
+  state.threads = indexed.map((entry) => entry.thread);
+  syncThreadListStableOrderFromCurrentThreads();
+}
+
+function promoteThreadListActivity(threadId, eventAtMs = 0) {
+  const id = String(threadId || "");
+  if (!id) return false;
+  const listThread = state.threads.find((entry) => String(entry && entry.id || "") === id);
+  let changed = false;
+  if (updateThreadActivityTimestamp(listThread, eventAtMs)) changed = true;
+  if (updateThreadActivityTimestamp(state.currentThread && String(state.currentThread.id || "") === id ? state.currentThread : null, eventAtMs)) changed = true;
+  if (updateThreadActivityTimestamp(state.threadTileDetails && state.threadTileDetails.get(String(id)) || null, eventAtMs)) changed = true;
+  if (changed && listThread) sortThreadListByUpdatedAt();
+  return changed;
 }
 
 function scheduleThreadStatusDetailRender(threadId = "") {
@@ -635,6 +658,7 @@ function updateThreadListStatus(threadId, status, options = {}) {
   applyThreadStatusToThread(thread, status);
   applyThreadStatusToThread(state.currentThread && String(state.currentThread.id || "") === id ? state.currentThread : null, status);
   applyThreadStatusToThread(state.threadTileDetails && state.threadTileDetails.get(String(id)) || null, status);
+  if (options.promote !== false) promoteThreadListActivity(id, options.eventAtMs || 0);
   if (options.render === true) scheduleThreadStatusDetailRender(id);
 }
 
@@ -729,8 +753,7 @@ function updateThreadGoalState(threadId, goal) {
 function renderThreads(result = null) {
   const list = $("threadList");
   pruneHiddenThreads();
-  const visibleThreads = threadListDisplayThreads();
-  if (!visibleThreads.length) {
+  if (!state.threads.length) {
     if (state.renderedThreadListSignature !== "empty") {
       list.innerHTML = `<div class="empty-state">No threads.</div>`;
       state.renderedThreadListSignature = "empty";
@@ -741,7 +764,7 @@ function renderThreads(result = null) {
     ? `<div class="history-note">Live thread list recovering. Showing cached session index.</div>`
     : "";
   const nowMs = Date.now();
-  const html = warning + visibleThreads.map((thread) => {
+  const html = warning + state.threads.map((thread) => {
     const title = thread.name || thread.preview || thread.id;
     const sizeText = rolloutSizeText(thread);
     const sizeWarn = isRolloutOverThreshold(thread);
@@ -756,9 +779,16 @@ function renderThreads(result = null) {
     const goal = threadGoalForThread(thread);
     const goalBadge = renderThreadGoalBadge(goal);
     const pendingIncomingTaskCards = Math.max(0, Number(thread && thread.pendingIncomingTaskCardCount) || 0);
+    const returnFollowUpTaskCards = Math.max(0, Number(thread && thread.returnFollowUpTaskCardCount) || 0);
+    const returnReceiptTaskCards = Math.max(0, Number(thread && thread.returnReceiptTaskCardCount) || 0);
     const taskCardBadge = pendingIncomingTaskCards
       ? `<div class="thread-card-task-badge" title="Pending incoming task cards">${escapeHtml(`Task ${pendingIncomingTaskCards}`)}</div>`
       : "";
+    const returnTaskCardBadge = returnFollowUpTaskCards
+      ? `<div class="thread-card-task-badge thread-card-return-badge follow-up" title="Return follow-up required">${escapeHtml(`Follow-up ${returnFollowUpTaskCards}`)}</div>`
+      : returnReceiptTaskCards
+        ? `<div class="thread-card-task-badge thread-card-return-badge" title="Recent task-card return receipt">${escapeHtml(`Return ${returnReceiptTaskCards}`)}</div>`
+        : "";
     const sizeBadge = sizeText
       ? `<div class="thread-card-size${sizeWarn ? " warn" : ""}" title="Rollout file size">${escapeHtml(sizeText)}</div>`
       : "";
@@ -776,6 +806,7 @@ function renderThreads(result = null) {
           <div class="thread-card-meta-badges">
             ${goalBadge}
             ${taskCardBadge}
+            ${returnTaskCardBadge}
             ${sizeBadge}
           </div>
         </div>
@@ -786,7 +817,7 @@ function renderThreads(result = null) {
     warning: Boolean(warning),
     currentThreadId: state.currentThreadId,
     timeBucket: Math.floor(nowMs / 60000),
-    threads: visibleThreads.map((thread) => [
+    threads: state.threads.map((thread) => [
       thread.id,
       thread.name || thread.preview || thread.id,
       shortPath(thread.cwd) || "聊天",
@@ -796,6 +827,10 @@ function renderThreads(result = null) {
       threadGoalSignature(thread),
       state.unreadThreadIds.has(thread.id) ? 1 : 0,
       Number(thread.pendingIncomingTaskCardCount || 0),
+      Number(thread.returnReceiptTaskCardCount || 0),
+      Number(thread.returnFollowUpTaskCardCount || 0),
+      String(thread.latestReturnReceiptTaskCardId || ""),
+      String(thread.latestReturnFollowUpTaskCardId || ""),
       rolloutSizeBytes(thread),
       isRolloutOverThreshold(thread),
     ]),
@@ -813,11 +848,6 @@ async function restoreThreadSelection() {
   if (isHermesEmbedMode()) {
     state.startupThreadOpenPending = false;
     showHermesPluginPrimaryPage({ source: "restore-empty" });
-    return;
-  }
-  if (shouldSkipStandaloneMobileThreadRestore()) {
-    state.startupThreadOpenPending = false;
-    if (!restoreNewThreadDraftSelection()) renderCurrentThread();
     return;
   }
   const savedThreadId = localStorage.getItem(STORAGE_THREAD_ID) || "";

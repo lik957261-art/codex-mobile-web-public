@@ -216,6 +216,22 @@ function hasExplicitThreadTarget(input = {}) {
   });
 }
 
+function hasExactTargetThreadId(input = {}) {
+  const scalarTargets = [
+    input.targetThreadId,
+    input.target_thread_id,
+  ];
+  if (scalarTargets.some((value) => String(value || "").trim())) return true;
+  const listTargets = [
+    input.targetThreadIds,
+    input.target_thread_ids,
+  ];
+  return listTargets.some((value) => {
+    if (Array.isArray(value)) return value.some((item) => String(item || "").trim());
+    return String(value || "").trim();
+  });
+}
+
 function isHostPlatformRepairText(text) {
   return /(?:home ai central|host-owned|host owned|deploy-contract|deploy contract|proxy|launchd|gateway|schema|platform repair|home ai source|control-plane|控制平面|部署契约|宿主|平台修复)/i.test(text);
 }
@@ -253,13 +269,22 @@ function isRoutinePluginDeploymentRequest(input = {}, sourceThread = {}, options
 function findHomeAiDeployLaneThread(threads = [], options = {}) {
   const title = String(options.title || "").trim();
   const titleKey = normalizeTitle(title);
+  const byId = new Map();
+  const withoutIds = [];
   const matches = [];
   for (const thread of threads || []) {
     if (!isHomeAiDeployLaneThread(thread, options)) continue;
     if (thread.archived || thread.deleted) continue;
     if (titleKey && normalizeTitle(displayTitle(thread)) !== titleKey) continue;
-    matches.push(normalizeHomeAiDeployLaneSummary(thread, options));
+    const match = normalizeHomeAiDeployLaneSummary(thread, options);
+    const id = String(match && match.id || "").trim();
+    if (id) {
+      if (!byId.has(id)) byId.set(id, match);
+    } else {
+      withoutIds.push(match);
+    }
   }
+  matches.push(...byId.values(), ...withoutIds);
   return matches.length === 1 ? matches[0] : null;
 }
 
@@ -312,12 +337,20 @@ function findDeployLaneForPlugin(threads = [], pluginId = "", options = {}) {
   return { title, deployLane };
 }
 
+function isAssignedDeployLaneForPlugin(thread, pluginId = "", options = {}) {
+  if (!pluginId || !isHomeAiDeployLaneThread(thread, options)) return false;
+  return normalizeTitle(displayTitle(thread)) === normalizeTitle(deployLaneTitleForPlugin(pluginId, options));
+}
+
 function planHomeAiDeployLaneRouting(input = {}) {
   const body = input.body && typeof input.body === "object" ? input.body : {};
   const sourceThread = input.sourceThread && typeof input.sourceThread === "object" ? input.sourceThread : {};
   const targets = Array.isArray(input.targetThreads) ? input.targetThreads.filter(Boolean) : [];
   const visibleThreads = Array.isArray(input.visibleThreads) ? input.visibleThreads.filter(Boolean) : [];
   const options = input.options || {};
+  if (input.exactTargetThreadIdRequested === true && targets.length) {
+    return { action: "allow", reason: "exact_target_thread_honored" };
+  }
   if (!hasStructuredDeployKind(body)
     && hasExplicitThreadTarget(body)
     && targets.some((thread) => thread && !isHomeAiDeployLaneThread(thread, options))) {
@@ -337,6 +370,21 @@ function planHomeAiDeployLaneRouting(input = {}) {
     };
   }
   const pluginId = routinePluginId(body, sourceThread);
+  const expectedDeployLaneTitle = deployLaneTitleForPlugin(pluginId, options);
+  const targetIds = Array.from(new Set(targets.map((thread) => thread && thread.id).filter(Boolean)));
+  const sourceThreadId = String(sourceThread && sourceThread.id || "").trim();
+  if (isAssignedDeployLaneForPlugin(sourceThread, pluginId, options)
+    && targetIds.some((id) => String(id || "").trim() !== sourceThreadId)) {
+    return {
+      action: "reject",
+      code: "deploy_lane_already_at_expected_lane",
+      message: "Routine plugin deployment is already in its assigned deploy lane and must not be redirected to another deploy lane.",
+      reason: "source_thread_is_assigned_deploy_lane",
+      pluginId,
+      expectedDeployLaneTitle,
+      deployLane: normalizeHomeAiDeployLaneSummary(sourceThread, options),
+    };
+  }
   const laneMatch = findDeployLaneForPlugin([...targets, ...visibleThreads], pluginId, options);
   const deployLane = laneMatch.deployLane;
   if (!deployLane) {
@@ -358,7 +406,6 @@ function planHomeAiDeployLaneRouting(input = {}) {
       deployLane,
     };
   }
-  const targetIds = Array.from(new Set(targets.map((thread) => thread && thread.id).filter(Boolean)));
   if (targetIds.length === 1 && String(targetIds[0]) === String(deployLane.id || "")) {
     return {
       action: "allow",
@@ -400,6 +447,7 @@ module.exports = {
   findHomeAiDeployLaneThreads,
   homeAiDeployLaneAssignments,
   homeAiDeployLaneTitles,
+  hasExactTargetThreadId,
   hasExplicitThreadTarget,
   isHomeAiControlPlaneCwd,
   isHomeAiDeployLaneThread,

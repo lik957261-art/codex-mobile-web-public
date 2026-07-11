@@ -14,12 +14,34 @@ async function loadShellManifestGenerator() {
   return import("../scripts/generate-frontend-shell-manifest.mjs");
 }
 
+async function loadViteShellArtifactPublisher() {
+  return import("../scripts/publish-vite-shell-artifact.mjs");
+}
+
+function createMemoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null;
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+    snapshot() {
+      return Object.fromEntries(values.entries());
+    },
+  };
+}
+
 test("Vite shell asset graph covers the current ordered frontend shell", async () => {
   const { buildShellAssetManifest } = await loadAssetGraphModule();
   const manifest = buildShellAssetManifest(path.resolve(__dirname, ".."));
   assert.equal(manifest.validation.ok, true);
-  assert.match(manifest.shellCacheName, /^codex-mobile-shell-v628-[a-f0-9]{12}$/);
-  assert.match(manifest.clientBuildId, /^0\.1\.12\|codex-mobile-shell-v628-[a-f0-9]{12}$/);
+  assert.match(manifest.shellCacheName, /^codex-mobile-shell-v629-[a-f0-9]{12}$/);
+  assert.match(manifest.clientBuildId, /^0\.1\.13\|codex-mobile-shell-v629-[a-f0-9]{12}$/);
   assert.equal(manifest.indexScriptAssets[0], "/shell-asset-manifest.js");
   assert.equal(manifest.indexScriptAssets.at(-1), "/app.js");
   assert.ok(manifest.indexScriptAssets.includes("/app-bootstrap.js"));
@@ -147,10 +169,1487 @@ test("classic shell cache name changes when static shell asset contents change",
   fs.writeFileSync(path.join(root, "public", "a.js"), "\"use strict\";\nwindow.A = 2;\n");
   const second = buildPublicShellManifest(root);
 
-  assert.match(first.shellCacheName, /^codex-mobile-shell-v628-[a-f0-9]{12}$/);
-  assert.match(second.shellCacheName, /^codex-mobile-shell-v628-[a-f0-9]{12}$/);
+  assert.match(first.shellCacheName, /^codex-mobile-shell-v629-[a-f0-9]{12}$/);
+  assert.match(second.shellCacheName, /^codex-mobile-shell-v629-[a-f0-9]{12}$/);
   assert.notEqual(second.shellCacheName, first.shellCacheName);
   assert.notEqual(second.clientBuildId, first.clientBuildId);
+});
+
+test("Vite artifact cache identity changes the service worker shell cache", async () => {
+  const { buildViteArtifactCacheIdentity } = await loadViteShellArtifactPublisher();
+  const baseReadback = {
+    stage: "vite-shell-preview-html-v1",
+    sourceBuildStage: "vite-shell-artifact-contract-v1",
+    shellCacheName: "codex-mobile-shell-v625-aaaaaaaaaaaa",
+    clientBuildId: "0.1.11|codex-mobile-shell-v625-aaaaaaaaaaaa",
+    publishedFiles: [
+      { fileName: "codex-mobile-shell-manifest.json", bytes: 100, sha256: "0".repeat(64) },
+      { fileName: "assets/shard-04-before.js", bytes: 20, sha256: "1".repeat(64) },
+      { fileName: "preview.html", bytes: 30, sha256: "2".repeat(64) },
+    ],
+  };
+  const first = buildViteArtifactCacheIdentity(baseReadback);
+  const second = buildViteArtifactCacheIdentity({
+    ...baseReadback,
+    publishedFiles: [
+      ...baseReadback.publishedFiles.slice(0, 1),
+      { fileName: "assets/shard-04-after.js", bytes: 21, sha256: "3".repeat(64) },
+      ...baseReadback.publishedFiles.slice(2),
+    ],
+  });
+
+  assert.ok(first);
+  assert.ok(second);
+  assert.equal(first.viteArtifactCache.baseShellCacheName, baseReadback.shellCacheName);
+  assert.equal(first.viteArtifactCache.fileCount, 1);
+  assert.match(first.shellCacheName, /^codex-mobile-shell-v625-[a-f0-9]{12}$/);
+  assert.match(first.clientBuildId, /^0\.1\.11\|codex-mobile-shell-v625-[a-f0-9]{12}$/);
+  assert.notEqual(first.viteArtifactCache.fingerprint, second.viteArtifactCache.fingerprint);
+  assert.notEqual(first.shellCacheName, second.shellCacheName);
+  assert.notEqual(first.clientBuildId, second.clientBuildId);
+});
+
+test("Vite artifact cache identity is preserved only for the current classic shell hash", async () => {
+  const { buildPublicShellManifest } = await loadShellManifestGenerator();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-vite-cache-identity-"));
+  fs.mkdirSync(path.join(root, "public"), { recursive: true });
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ version: "0.1.11" }));
+  fs.writeFileSync(path.join(root, "public", "manifest.json"), JSON.stringify({ icons: [] }));
+  fs.writeFileSync(path.join(root, "public", "styles.css"), ".app{}\n");
+  fs.writeFileSync(path.join(root, "public", "sw.js"), "importScripts(\"/shell-asset-manifest.js\");\n");
+  fs.writeFileSync(path.join(root, "public", "a.js"), "\"use strict\";\nwindow.A = 1;\n");
+  fs.writeFileSync(path.join(root, "public", "index.html"), [
+    "<!doctype html>",
+    "<link rel=\"stylesheet\" href=\"/styles.css\">",
+    "<script src=\"/shell-asset-manifest.js\"></script>",
+    "<script src=\"/a.js\"></script>",
+  ].join("\n"));
+
+  const classic = buildPublicShellManifest(root);
+  const cacheIdentity = {
+    shellCacheName: "codex-mobile-shell-v625-bbbbbbbbbbbb",
+    clientBuildId: "0.1.11|codex-mobile-shell-v625-bbbbbbbbbbbb",
+    viteArtifactCache: {
+      schemaVersion: 1,
+      source: "vite-shell-public-artifact",
+      baseShellCacheName: classic.classicShellCacheName,
+      fingerprint: "f".repeat(64),
+      fileCount: 1,
+      byteCount: 20,
+      files: [{ fileName: "assets/a.js", bytes: 20, sha256: "e".repeat(64) }],
+    },
+  };
+  fs.writeFileSync(
+    path.join(root, "public", "shell-asset-manifest.json"),
+    `${JSON.stringify({ ...classic, ...cacheIdentity }, null, 2)}\n`
+  );
+
+  const preserved = buildPublicShellManifest(root);
+  assert.equal(preserved.shellCacheName, cacheIdentity.shellCacheName);
+  assert.equal(preserved.clientBuildId, cacheIdentity.clientBuildId);
+  assert.deepEqual(preserved.viteArtifactCache, cacheIdentity.viteArtifactCache);
+
+  fs.writeFileSync(path.join(root, "public", "a.js"), "\"use strict\";\nwindow.A = 2;\n");
+  const changed = buildPublicShellManifest(root);
+  assert.notEqual(changed.classicShellCacheName, classic.classicShellCacheName);
+  assert.notEqual(changed.shellCacheName, cacheIdentity.shellCacheName);
+  assert.equal(changed.viteArtifactCache, undefined);
+});
+
+test("Vite build-time manifest does not inherit previous artifact cache identity", async () => {
+  const { buildPublicShellManifest } = await loadShellManifestGenerator();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-vite-build-manifest-"));
+  fs.mkdirSync(path.join(root, "public"), { recursive: true });
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ version: "0.1.11" }));
+  fs.writeFileSync(path.join(root, "public", "manifest.json"), JSON.stringify({ icons: [] }));
+  fs.writeFileSync(path.join(root, "public", "styles.css"), ".app{}\n");
+  fs.writeFileSync(path.join(root, "public", "sw.js"), "importScripts(\"/shell-asset-manifest.js\");\n");
+  fs.writeFileSync(path.join(root, "public", "a.js"), "\"use strict\";\nwindow.A = 1;\n");
+  fs.writeFileSync(path.join(root, "public", "index.html"), [
+    "<!doctype html>",
+    "<link rel=\"stylesheet\" href=\"/styles.css\">",
+    "<script src=\"/shell-asset-manifest.js\"></script>",
+    "<script src=\"/a.js\"></script>",
+  ].join("\n"));
+
+  const classic = buildPublicShellManifest(root);
+  const cacheIdentity = {
+    shellCacheName: "codex-mobile-shell-v625-cccccccccccc",
+    clientBuildId: "0.1.11|codex-mobile-shell-v625-cccccccccccc",
+    viteArtifactCache: {
+      schemaVersion: 1,
+      source: "vite-shell-public-artifact",
+      baseShellCacheName: classic.classicShellCacheName,
+      fingerprint: "d".repeat(64),
+      fileCount: 1,
+      byteCount: 20,
+      files: [{ fileName: "assets/a.js", bytes: 20, sha256: "e".repeat(64) }],
+    },
+  };
+  fs.writeFileSync(
+    path.join(root, "public", "shell-asset-manifest.json"),
+    `${JSON.stringify({ ...classic, ...cacheIdentity }, null, 2)}\n`
+  );
+
+  const publicManifest = buildPublicShellManifest(root);
+  const buildTimeManifest = buildPublicShellManifest(root, { useExistingViteArtifactCache: false });
+  const viteEntrySource = fs.readFileSync(path.join(__dirname, "..", "frontend", "vite-shell-entry.mjs"), "utf8");
+  const deferredTopologySource = fs.readFileSync(path.join(__dirname, "..", "frontend", "vite-deferred-entry-topology.mjs"), "utf8");
+
+  assert.equal(publicManifest.shellCacheName, cacheIdentity.shellCacheName);
+  assert.equal(buildTimeManifest.shellCacheName, classic.classicShellCacheName);
+  assert.equal(buildTimeManifest.viteArtifactCache, undefined);
+  assert.match(viteEntrySource, /virtual:codex-mobile-shell-build-manifest/);
+  assert.equal(viteEntrySource.includes("../public/shell-asset-manifest.json"), false);
+  assert.match(deferredTopologySource, /virtual:codex-mobile-shell-build-manifest/);
+  assert.equal(deferredTopologySource.includes("../public/shell-asset-manifest.json"), false);
+});
+
+test("Vite build-time asset graph does not hash previous public shell manifest files", async () => {
+  const { buildShellAssetManifest } = await loadAssetGraphModule();
+  const root = path.resolve(__dirname, "..");
+  const publicGraph = buildShellAssetManifest(root);
+  const buildTimeGraph = buildShellAssetManifest(root, { useExistingViteArtifactCache: false });
+  const publicManifestRecord = publicGraph.assets.find((asset) => asset.path === "/shell-asset-manifest.json");
+  const buildManifestRecord = buildTimeGraph.assets.find((asset) => asset.path === "/shell-asset-manifest.json");
+  const buildManifestScriptRecord = buildTimeGraph.assets.find((asset) => asset.path === "/shell-asset-manifest.js");
+
+  assert.ok(publicManifestRecord && publicManifestRecord.sha256 && publicManifestRecord.sha256 !== "0".repeat(64));
+  assert.equal(buildManifestRecord.bytes, 1);
+  assert.equal(buildManifestRecord.sha256, "0".repeat(64));
+  assert.equal(buildManifestScriptRecord.bytes, 1);
+  assert.equal(buildManifestScriptRecord.sha256, "0".repeat(64));
+});
+
+test("native ESM build refresh policy matches the classic public API", async () => {
+  const classicApi = require("../public/build-refresh-policy.js");
+  const nativeApi = await import("../frontend/native/build-refresh-policy.mjs");
+  const cases = [
+    ["0.1.11|codex-mobile-shell-v626", "0.1.11|codex-mobile-shell-v625"],
+    ["0.1.11|codex-mobile-shell-v624", "0.1.11|codex-mobile-shell-v625"],
+    ["0.1.11|codex-mobile-shell-v625", "0.1.11|codex-mobile-shell-v625"],
+    ["build-a", "build-b"],
+  ];
+  for (const [serverBuildId, clientBuildId] of cases) {
+    assert.equal(
+      nativeApi.shellSequenceFromBuildId(serverBuildId),
+      classicApi.shellSequenceFromBuildId(serverBuildId)
+    );
+    assert.equal(
+      nativeApi.classifyServerBuildChange(serverBuildId, clientBuildId),
+      classicApi.classifyServerBuildChange(serverBuildId, clientBuildId)
+    );
+    assert.equal(
+      nativeApi.shouldPromptForServerBuildChange(serverBuildId, clientBuildId),
+      classicApi.shouldPromptForServerBuildChange(serverBuildId, clientBuildId)
+    );
+    assert.equal(
+      nativeApi.default.classifyServerBuildChange(serverBuildId, clientBuildId),
+      classicApi.classifyServerBuildChange(serverBuildId, clientBuildId)
+    );
+  }
+});
+
+test("native ESM pure utility modules match the classic public APIs", async () => {
+  const classicThreadListLoadPolicy = require("../public/thread-list-load-policy.js");
+  const nativeThreadListLoadPolicy = await import("../frontend/native/thread-list-load-policy.mjs");
+  for (const input of [
+    {},
+    { silent: true, documentHidden: true },
+    { silent: true, documentHidden: true, allowHidden: true, selectedCwd: "/Users/example" },
+    { silent: true, threadDetailOpening: true },
+    { silent: true, threadDetailOpening: true, allowDuringDetail: true, threadListLoadedAtMs: 100 },
+    { silent: true, threadDetailOpening: true, deferFallback: false },
+    { silent: false, search: " owner " },
+  ]) {
+    assert.deepEqual(
+      nativeThreadListLoadPolicy.planThreadListLoadRequest(input),
+      classicThreadListLoadPolicy.planThreadListLoadRequest(input),
+    );
+    assert.deepEqual(
+      nativeThreadListLoadPolicy.default.planThreadListLoadRequest(input),
+      classicThreadListLoadPolicy.planThreadListLoadRequest(input),
+    );
+  }
+
+  const classicViewportMetrics = require("../public/viewport-metrics.js");
+  const nativeViewportMetrics = await import("../frontend/native/viewport-metrics.mjs");
+  for (const value of [0, 0.4, 10.6, "22.4", -3, "bad"]) {
+    assert.equal(nativeViewportMetrics.cssPixel(value), classicViewportMetrics.cssPixel(value));
+  }
+  for (const input of [
+    { previous: 100, next: 100.5 },
+    { previous: 100, next: 103, options: { epsilonPx: 2 } },
+    { previous: 0, next: 1 },
+    { previous: 2, next: 0 },
+  ]) {
+    assert.equal(
+      nativeViewportMetrics.stablePixelChanged(input.previous, input.next, input.options),
+      classicViewportMetrics.stablePixelChanged(input.previous, input.next, input.options),
+    );
+  }
+  for (const element of [
+    null,
+    { tagName: "textarea", disabled: false, readOnly: false },
+    { tagName: "input", type: "text", disabled: false, readOnly: false },
+    { tagName: "input", type: "checkbox", disabled: false, readOnly: false },
+    { tagName: "div", isContentEditable: true },
+  ]) {
+    assert.equal(
+      nativeViewportMetrics.isKeyboardEditable(element),
+      classicViewportMetrics.isKeyboardEditable(element),
+    );
+  }
+  for (const input of [
+    { visualHeight: 700, visualOffsetTop: 0, innerHeight: 700 },
+    { visualHeight: 420, visualOffsetTop: 120, innerHeight: 800, keyboardInputActive: true },
+    { innerHeight: 900, hostKeyboardVisible: true, hostKeyboardBottomInset: 260, hostViewportHeight: 640 },
+  ]) {
+    assert.deepEqual(
+      nativeViewportMetrics.measureViewport(input),
+      classicViewportMetrics.measureViewport(input),
+    );
+  }
+
+  const classicRuntimeSettings = require("../public/runtime-settings.js");
+  const nativeRuntimeSettings = await import("../frontend/native/runtime-settings.mjs");
+  const settingsCases = [
+    { selected: "gpt-5.4-mini", defaultValue: "gpt-5.2", options: ["gpt-5.5"] },
+    { selected: "", defaultValue: "gpt-5.2", options: ["gpt-5.4"] },
+    { selected: "full-access", defaultValue: "auto-review", options: ["config.toml"] },
+    { selected: "", defaultValue: "", options: ["workspace-write"] },
+  ];
+  assert.deepEqual(
+    nativeRuntimeSettings.normalizeOptionList([" gpt-5.4 ", "", "gpt-5.4", "gpt-5.5"]),
+    classicRuntimeSettings.normalizeOptionList([" gpt-5.4 ", "", "gpt-5.4", "gpt-5.5"]),
+  );
+  for (const value of ["gpt-5.5", "gpt-5.3-codex-spark", "custom-model"]) {
+    assert.equal(nativeRuntimeSettings.labelForModel(value), classicRuntimeSettings.labelForModel(value));
+    assert.equal(nativeRuntimeSettings.compactLabelForModel(value), classicRuntimeSettings.compactLabelForModel(value));
+  }
+  for (const value of ["low", "xhigh", "unknown"]) {
+    assert.equal(nativeRuntimeSettings.labelForEffort(value), classicRuntimeSettings.labelForEffort(value));
+  }
+  for (const value of ["full", "full-access", "workspace-write", "config.toml", ""]) {
+    assert.equal(nativeRuntimeSettings.labelForPermissionMode(value), classicRuntimeSettings.labelForPermissionMode(value));
+    assert.equal(nativeRuntimeSettings.titleForPermissionMode(value), classicRuntimeSettings.titleForPermissionMode(value));
+    assert.equal(nativeRuntimeSettings.normalizePermissionModeValue(value), classicRuntimeSettings.normalizePermissionModeValue(value));
+  }
+  for (const settings of settingsCases) {
+    assert.equal(nativeRuntimeSettings.selectedNewThreadModel(settings), classicRuntimeSettings.selectedNewThreadModel(settings));
+    assert.equal(nativeRuntimeSettings.selectedNewThreadEffort(settings), classicRuntimeSettings.selectedNewThreadEffort(settings));
+    assert.equal(nativeRuntimeSettings.selectedNewThreadPermission(settings), classicRuntimeSettings.selectedNewThreadPermission(settings));
+  }
+});
+
+test("native ESM draft store and image compressor match classic fallback behavior", async () => {
+  const classicDraftStore = require("../public/draft-store.js");
+  const nativeDraftStore = await import("../frontend/native/draft-store.mjs");
+  assert.deepEqual(nativeDraftStore.DEFAULTS, classicDraftStore.DEFAULTS);
+  assert.equal(
+    nativeDraftStore.defaultNormalizeFsPath("\\\\?\\C:/Users/Owner/Project/"),
+    classicDraftStore.defaultNormalizeFsPath("\\\\?\\C:/Users/Owner/Project/"),
+  );
+  for (const raw of ["", "{\"a\":{\"text\":\"hello\"}}", "[]", "{bad"]) {
+    assert.deepEqual(nativeDraftStore.parseDraftMap(raw), classicDraftStore.parseDraftMap(raw));
+  }
+  for (const draft of [
+    null,
+    {},
+    { text: "  " },
+    { text: "hello" },
+    { attachments: [{ id: "a" }] },
+    { fastMode: true },
+  ]) {
+    assert.equal(nativeDraftStore.draftHasContent(draft), classicDraftStore.draftHasContent(draft));
+  }
+  const attachment = { id: 77, file: { name: "shot.png", type: "image/png", size: 42, lastModified: 123 } };
+  assert.deepEqual(nativeDraftStore.normalizeAttachmentMeta(attachment), classicDraftStore.normalizeAttachmentMeta(attachment));
+  assert.equal(
+    nativeDraftStore.attachmentStorageKey("new:C:\\Project", "a/b"),
+    classicDraftStore.attachmentStorageKey("new:C:\\Project", "a/b"),
+  );
+
+  const nativeStorage = createMemoryStorage();
+  const classicStorage = createMemoryStorage();
+  const nativeStore = nativeDraftStore.createDraftStore({ storage: nativeStorage, maxDrafts: 2 });
+  const classicStore = classicDraftStore.createDraftStore({ storage: classicStorage, maxDrafts: 2 });
+  assert.equal(nativeStore.keyForThread(" thread-a "), classicStore.keyForThread(" thread-a "));
+  assert.equal(nativeStore.keyForNewThread("C:/Work/App/"), classicStore.keyForNewThread("C:/Work/App/"));
+  const drafts = {
+    a: { text: "older", updatedAt: 1 },
+    b: { text: "newer", updatedAt: 3 },
+    c: { text: "middle", updatedAt: 2 },
+  };
+  nativeStore.writeMap(drafts);
+  classicStore.writeMap(drafts);
+  assert.deepEqual(nativeStore.readMap(), classicStore.readMap());
+  assert.deepEqual(nativeStorage.snapshot(), classicStorage.snapshot());
+  nativeStore.setTargetKey("thread:a");
+  classicStore.setTargetKey("thread:a");
+  assert.equal(nativeStore.getTargetKey(), classicStore.getTargetKey());
+  nativeStore.clearTargetKeyIfMatches("thread:a");
+  classicStore.clearTargetKeyIfMatches("thread:a");
+  assert.equal(nativeStore.getTargetKey(), classicStore.getTargetKey());
+
+  const classicImageCompressor = require("../public/image-compressor.js");
+  const nativeImageCompressor = await import("../frontend/native/image-compressor.mjs");
+  assert.deepEqual(nativeImageCompressor.DEFAULT_OPTIONS, classicImageCompressor.DEFAULT_OPTIONS);
+  for (const file of [
+    null,
+    { type: "image/png", size: 256 * 1024 },
+    { type: "image/gif", size: 999999 },
+    { type: "image/jpeg", size: 1024 },
+  ]) {
+    assert.equal(
+      nativeImageCompressor.isCompressibleImageFile(file),
+      classicImageCompressor.isCompressibleImageFile(file),
+    );
+  }
+  for (const dims of [
+    [4000, 2000, 1280],
+    [640, 480, 1280],
+    [0, 0, 0],
+  ]) {
+    assert.deepEqual(
+      nativeImageCompressor.targetDimensions(...dims),
+      classicImageCompressor.targetDimensions(...dims),
+    );
+  }
+  for (const [name, type] of [
+    ["photo.png", "image/jpeg"],
+    ["folder/name.webp", "image/webp"],
+    ["", ""],
+  ]) {
+    assert.equal(
+      nativeImageCompressor.compressedImageName(name, type),
+      classicImageCompressor.compressedImageName(name, type),
+    );
+  }
+  for (const input of [
+    [{ size: 1000 }, { size: 900 }],
+    [{ size: 1000 }, { size: 950 }],
+    [{ size: 0 }, { size: 1 }],
+    [{ size: 1000 }, null],
+  ]) {
+    assert.equal(
+      nativeImageCompressor.shouldUseCompressedBlob(input[0], input[1]),
+      classicImageCompressor.shouldUseCompressedBlob(input[0], input[1]),
+    );
+  }
+});
+
+test("native ESM conversation scroll matches classic fallback behavior", async () => {
+  const classicConversationScroll = require("../public/conversation-scroll.js");
+  const nativeConversationScroll = await import("../frontend/native/conversation-scroll.mjs");
+  assert.deepEqual(
+    nativeConversationScroll.DEFAULT_BOTTOM_FOLLOW_DELAYS_MS,
+    classicConversationScroll.DEFAULT_BOTTOM_FOLLOW_DELAYS_MS,
+  );
+  for (const metrics of [
+    { scrollHeight: 1800, scrollTop: 725, clientHeight: 980 },
+    { scrollHeight: 1800, scrollTop: 640, clientHeight: 980 },
+    { scrollHeight: "800", scrollTop: "600", clientHeight: "160" },
+  ]) {
+    assert.equal(nativeConversationScroll.isNearBottom(metrics), classicConversationScroll.isNearBottom(metrics));
+  }
+  const submittedFollow = { threadId: "thread-a", clientSubmissionId: "submit-1", untilMs: 6000 };
+  for (const input of [
+    ["thread-a", { clientSubmissionId: "submit-1", nowMs: 1000, ttlMs: 5000 }],
+    ["", { clientSubmissionId: "submit-1", nowMs: 1000, ttlMs: 5000 }],
+  ]) {
+    assert.deepEqual(
+      nativeConversationScroll.createSubmittedMessageFollow(input[0], input[1]),
+      classicConversationScroll.createSubmittedMessageFollow(input[0], input[1]),
+    );
+  }
+  for (const input of [
+    { threadId: "thread-a", nowMs: 5999 },
+    { threadId: "thread-b", nowMs: 2000 },
+    { threadId: "thread-a", nowMs: 6001 },
+  ]) {
+    assert.equal(
+      nativeConversationScroll.shouldFollowSubmittedMessage(submittedFollow, input),
+      classicConversationScroll.shouldFollowSubmittedMessage(submittedFollow, input),
+    );
+  }
+  for (const input of [
+    { nearBottom: true, nowMs: 10000 },
+    { nearBottom: false, nowMs: 10000, lastNearBottomAtMs: 7000, recentBottomMs: 5000 },
+    { nearBottom: false, nowMs: 10000, lastNearBottomAtMs: 4000, recentBottomMs: 5000 },
+  ]) {
+    assert.equal(nativeConversationScroll.shouldStartViewportFollow(input), classicConversationScroll.shouldStartViewportFollow(input));
+  }
+  const planCases = [
+    ["planBottomFollowLeaseEvaluation", { userReadingCurrentTurn: true, leaseActive: true, hasLease: true }],
+    ["planBottomFollowScrollSchedule", undefined],
+    ["planLocalPatchScrollCompletion", { submittedMessageFollow: true }],
+    ["planLocalPatchScrollCompletion", { userReadingCurrentTurn: true, nearBottom: true }],
+    ["planConversationJumpButtons", { hasThread: true, isScrollable: true, nearBottom: false, hasReplyTarget: true, replyTargetAbove: true }],
+    ["planUserReadingCurrentTurn", { nearBottom: false, recentScrollIntent: true, hasCurrentTurn: true }],
+    ["planConversationAutoScrollHoldFromScroll", { nearBottom: false, recentScrollIntent: true, hasCurrentTurn: true }],
+    ["planFullRenderScroll", { submittedMessageFollow: true, autoScrollHold: true }],
+    ["planFullRenderScroll", { viewportFollow: true }],
+    ["planReadingViewportPreservation", { nearBottom: false, userReadingAwayFromBottom: true }],
+    ["planAutomaticConversationRefresh", { hasThread: true, nearBottom: false, recentScrollIntent: true }],
+    ["planAutomaticConversationRefresh", { hasThread: true, nearBottom: false, recentScrollIntent: true, userInitiated: true }],
+  ];
+  for (const [fn, input] of planCases) {
+    assert.deepEqual(nativeConversationScroll[fn](input), classicConversationScroll[fn](input));
+    assert.deepEqual(nativeConversationScroll.default[fn](input), classicConversationScroll[fn](input));
+  }
+});
+
+test("native ESM thread detail state matches classic fallback behavior", async () => {
+  const classicThreadDetailState = require("../public/thread-detail-state.js");
+  const nativeThreadDetailState = await import("../frontend/native/thread-detail-state.mjs");
+  const loadedThread = {
+    id: "thread-a",
+    title: "Thread A",
+    status: "completed",
+    mobileDetailLoaded: true,
+    mobileLoading: false,
+    turns: [{
+      id: "turn-a",
+      status: "completed",
+      items: [{ type: "userMessage", text: "hello", clientSubmissionId: "submit-a" }],
+    }],
+    mobileProjection: { source: "sample" },
+    runtimeSettings: { model: "test" },
+  };
+  assert.deepEqual(
+    nativeThreadDetailState.threadListSummaryFromDetailThread(loadedThread),
+    classicThreadDetailState.threadListSummaryFromDetailThread(loadedThread),
+  );
+  for (const input of [
+    loadedThread,
+    Object.assign({}, loadedThread, { mobileLoading: true }),
+    Object.assign({}, loadedThread, { turns: [] }),
+  ]) {
+    assert.equal(
+      nativeThreadDetailState.threadHasLoadedDetailState(input),
+      classicThreadDetailState.threadHasLoadedDetailState(input),
+    );
+    assert.equal(
+      nativeThreadDetailState.threadHasReusableLoadedDetailState(input),
+      classicThreadDetailState.threadHasReusableLoadedDetailState(input),
+    );
+    assert.equal(
+      nativeThreadDetailState.threadHasVisualBaselineLoadedDetailState(input),
+      classicThreadDetailState.threadHasVisualBaselineLoadedDetailState(input),
+    );
+  }
+  for (const input of [
+    { currentThread: loadedThread, threadId: "thread-a" },
+    { currentThread: loadedThread, threadId: "thread-b" },
+    { currentThread: null, threadId: "thread-a" },
+  ]) {
+    assert.deepEqual(
+      nativeThreadDetailState.planThreadOpenCacheReuse(input),
+      classicThreadDetailState.planThreadOpenCacheReuse(input),
+    );
+  }
+  const policyOptions = {
+    itemVisibleWeight(item) {
+      if (item && Object.prototype.hasOwnProperty.call(item, "weight")) return Number(item.weight) || 0;
+      return JSON.stringify(item || {}).length;
+    },
+    isContextCompactionItem(item) {
+      return Boolean(item && item.type === "contextCompaction");
+    },
+    isOperationalItem(item) {
+      return Boolean(item && item.type === "commandExecution");
+    },
+    isAssistantReceiptLikeItem(item) {
+      return Boolean(item && (item.type === "agentMessage" || item.type === "plan"));
+    },
+    isTurnComplete(turn) {
+      return Boolean(turn && turn.status === "completed");
+    },
+    isReasoningItem(item) {
+      return Boolean(item && item.type === "reasoning");
+    },
+    visualReceiptMatchesSuppressionKeys(item, keys) {
+      return Boolean(item && keys && keys.has(item.suppressionKey));
+    },
+  };
+  const classicPolicy = classicThreadDetailState.createThreadDetailStatePolicy(policyOptions);
+  const nativePolicy = nativeThreadDetailState.createThreadDetailStatePolicy(policyOptions);
+  assert.deepEqual(
+    nativePolicy.mergeItemPreservingVisibleFields({
+      id: "existing",
+      type: "agentMessage",
+      text: "longer visible response",
+      weight: 100,
+    }, {
+      id: "incoming",
+      type: "agentMessage",
+      text: "short",
+      status: "completed",
+      weight: 10,
+    }),
+    classicPolicy.mergeItemPreservingVisibleFields({
+      id: "existing",
+      type: "agentMessage",
+      text: "longer visible response",
+      weight: 100,
+    }, {
+      id: "incoming",
+      type: "agentMessage",
+      text: "short",
+      status: "completed",
+      weight: 10,
+    }),
+  );
+  assert.equal(
+    nativePolicy.shouldPreserveLocalOnlyItem({ id: "mux-user-1", type: "userMessage", weight: 10 }, false),
+    classicPolicy.shouldPreserveLocalOnlyItem({ id: "mux-user-1", type: "userMessage", weight: 10 }, false),
+  );
+  assert.deepEqual(
+    nativeThreadDetailState.default.planSummaryOnlyCurrentThreadRecoveryEffects({
+      plan: { shouldRecover: true, reason: "summary-only-current" },
+      threadId: "thread-a",
+      seq: 4,
+    }),
+    classicThreadDetailState.planSummaryOnlyCurrentThreadRecoveryEffects({
+      plan: { shouldRecover: true, reason: "summary-only-current" },
+      threadId: "thread-a",
+      seq: 4,
+    }),
+  );
+});
+
+test("native ESM thread detail render plan matches classic fallback behavior", async () => {
+  const classicRenderPlan = require("../public/thread-detail-render-plan.js");
+  const nativeRenderPlan = await import("../frontend/native/thread-detail-render-plan.mjs");
+  for (const value of ["abc", 42, null, undefined]) {
+    assert.equal(nativeRenderPlan.normalizeSignature(value), classicRenderPlan.normalizeSignature(value));
+  }
+  for (const input of [
+    {
+      threadId: "thread-a",
+      threadLoadSeq: 7,
+      options: { source: "resume" },
+      hasActiveRefreshController: true,
+    },
+    {
+      currentThreadId: "thread-b",
+      threadLoadSeq: 3,
+      options: { mode: "full", source: "manual", force: true },
+      documentHidden: true,
+      hasActiveThreadLoadController: true,
+    },
+    {
+      threadLoadSeq: 4,
+      options: { source: "ignored" },
+      hasActiveRefreshController: true,
+    },
+  ]) {
+    assert.deepEqual(
+      nativeRenderPlan.planThreadDetailRefreshRequest(input),
+      classicRenderPlan.planThreadDetailRefreshRequest(input),
+    );
+  }
+  const backfillInput = {
+    thread: {
+      id: "thread-workflow",
+      mobileOlderTurnsCursor: "cursor-a",
+      turns: [
+        { items: [{ type: "agentMessage", text: "Task card id: ttc_a\nReturn policy: terminal" }] },
+        { items: [{ type: "agentMessage", text: "Source workspace: /workspace\nApproval: bypassed" }] },
+        { items: [{ type: "agentMessage", text: "Workflow mode: autonomous\nAuto-return: yes" }] },
+        { items: [{ type: "userMessage", text: "normal user message" }] },
+      ],
+    },
+  };
+  assert.deepEqual(
+    nativeRenderPlan.planThreadDetailHistoryAutoBackfill(backfillInput),
+    classicRenderPlan.planThreadDetailHistoryAutoBackfill(backfillInput),
+  );
+  const shellInput = {
+    thread: { id: "thread-a", title: "Thread A" },
+    escapedTitle: "Thread A",
+    mainHtml: "<article>content</article>",
+    pluginNoticeHtml: "<div>notice</div>",
+    emptyStateHtml: "",
+    loadErrorHtml: "",
+  };
+  assert.deepEqual(
+    nativeRenderPlan.planSingleThreadFullRenderShell(shellInput),
+    classicRenderPlan.planSingleThreadFullRenderShell(shellInput),
+  );
+  const patchInput = {
+    patchSurface: { patchable: true, reason: "single-thread", surface: "single-thread" },
+    renderPlan: { action: "patch", reason: "stable", signature: "sig-a" },
+    patchAttempt: { ok: true, patched: true, reason: "patched", elapsedMs: 4 },
+  };
+  assert.deepEqual(
+    nativeRenderPlan.default.planThreadDetailRefreshOutcomeExecution(patchInput),
+    classicRenderPlan.planThreadDetailRefreshOutcomeExecution(patchInput),
+  );
+});
+
+test("native ESM thread detail patch and merge helpers match classic fallback behavior", async () => {
+  const classicPatchPlan = require("../public/thread-detail-patch-plan.js");
+  const nativePatchPlan = await import("../frontend/native/thread-detail-patch-plan.mjs");
+  const visiblePatchInput = [
+    [{ key: "user-1", signature: { type: "userMessage", text: "request" } }],
+    [
+      { key: "user-1", signature: { type: "userMessage", text: "request" } },
+      { key: "usage-1", signature: { type: "turnUsageSummary", total: 12 } },
+    ],
+  ];
+  assert.deepEqual(
+    nativePatchPlan.planVisibleItemRefreshPatch(...visiblePatchInput),
+    classicPatchPlan.planVisibleItemRefreshPatch(...visiblePatchInput),
+  );
+  const patchSurfaceInput = {
+    threadId: "thread-1",
+    threadTileMode: true,
+    threadTileSurface: true,
+    tilePaneVisible: true,
+    conversationPresent: true,
+  };
+  assert.deepEqual(
+    nativePatchPlan.planThreadDetailDomPatchSurface(patchSurfaceInput),
+    classicPatchPlan.planThreadDetailDomPatchSurface(patchSurfaceInput),
+  );
+  const domPatchInput = {
+    nextTurnEntries: [
+      { key: "turn-1", articlePresent: true, itemPatchable: true, hasPreviousTurn: true },
+      { key: "turn-2", articlePresent: false, itemPatchable: false, hasPreviousTurn: false },
+    ],
+    previousTurnKeys: ["turn-1", "turn-old"],
+  };
+  assert.deepEqual(
+    nativePatchPlan.default.planThreadDetailRefreshDomPatch(domPatchInput),
+    classicPatchPlan.planThreadDetailRefreshDomPatch(domPatchInput),
+  );
+
+  const classicMergeState = require("../public/thread-detail-merge-state.js");
+  const nativeMergeState = await import("../frontend/native/thread-detail-merge-state.mjs");
+  const sortTurnsForDisplay = (turns) => (turns || []).slice().sort((left, right) => (
+    Number(left && (left.completedAtMs || left.startedAtMs) || 0)
+    - Number(right && (right.completedAtMs || right.startedAtMs) || 0)
+  ));
+  const mergeOptions = {
+    normalizeThreadVisibleUserMessages: (thread) => thread,
+    turnVisibleWeight: (turn) => (Array.isArray(turn && turn.items) ? turn.items.length : 0),
+    shouldPreserveExistingTurnVisibleItems: (existingTurn, incomingTurn) => (
+      String(existingTurn && existingTurn.status || "") === "running"
+      && String(incomingTurn && incomingTurn.status || "") === "completed"
+    ),
+    mergeItemsPreservingLocalVisible(existingItems, incomingItems, preserveLocalVisible) {
+      if (!preserveLocalVisible) return incomingItems;
+      return incomingItems.concat((existingItems || []).filter((item) => item && item.localOnly));
+    },
+    isTurnComplete: (turn) => String(turn && turn.status || "") === "completed",
+    sortTurnsForDisplay,
+    threadHasInitialSubmissionEcho: () => true,
+  };
+  const existingThread = {
+    id: "thread-1",
+    turns: [
+      { id: "turn-b", status: "completed", completedAtMs: 2000, items: [{ id: "b-old" }] },
+      { id: "turn-a", status: "running", startedAtMs: 1000, items: [{ id: "a-old" }, { id: "local", localOnly: true }] },
+    ],
+  };
+  const incomingThread = {
+    id: "thread-1",
+    turns: [
+      { id: "turn-a", status: "completed", completedAtMs: 1000, items: [{ id: "a-new" }] },
+      { id: "turn-b", status: "completed", completedAtMs: 2000, items: [{ id: "b-new" }] },
+    ],
+  };
+  assert.deepEqual(
+    nativeMergeState.createThreadDetailMergePolicy(mergeOptions).mergeThreadPreservingVisibleItems(
+      JSON.parse(JSON.stringify(existingThread)),
+      JSON.parse(JSON.stringify(incomingThread)),
+    ),
+    classicMergeState.createThreadDetailMergePolicy(mergeOptions).mergeThreadPreservingVisibleItems(
+      JSON.parse(JSON.stringify(existingThread)),
+      JSON.parse(JSON.stringify(incomingThread)),
+    ),
+  );
+
+  const classicV4MergeState = require("../public/thread-detail-v4-merge-state.js");
+  const nativeV4MergeState = await import("../frontend/native/thread-detail-v4-merge-state.mjs");
+  const comparableText = (item) => String(item && (item.message || item.text || "") || "").trim().toLowerCase();
+  const v4Options = {
+    normalizeThreadVisibleUserMessages: (thread) => thread,
+    turnVisibleWeight: (turn) => (Array.isArray(turn && turn.items) ? turn.items.length : 0),
+    isOptimisticUserMessage: (item) => Boolean(item && item.mobilePendingSubmission),
+    isRecentlySubmittedUserMessage: (item) => Boolean(item && item.mobilePendingSubmission),
+    isReasoningItem: (item) => Boolean(item && item.type === "reasoning"),
+    userMessageHasSubmissionId: (item, submissionId) => Boolean(item && submissionId && String(item.clientSubmissionId || "") === String(submissionId)),
+    userMessagesCanShadow: (incoming, pending) => Boolean(incoming && pending && incoming.type === "userMessage" && pending.type === "userMessage" && comparableText(incoming) === comparableText(pending)),
+    isTurnComplete: (turn) => /completed|failed|cancel|interrupted/i.test(String(turn && (turn.status && turn.status.type || turn.status) || "")),
+    isRunningStatus: (status) => /active|running|queued|processing|pending/i.test(String(status && status.type || status || "")),
+    isIncompleteInterruptedTurn: () => false,
+    turnHasActiveLiveItems: () => false,
+    turnOrderMs: (turn) => Number(turn && (turn.completedAtMs || turn.startedAtMs || 0)) || 0,
+    mergeTurnPreservingVisibleItems: (existingTurn, incomingTurn) => Object.assign({}, existingTurn, incomingTurn, {
+      items: Array.isArray(incomingTurn && incomingTurn.items) ? incomingTurn.items.slice() : [],
+    }),
+    sortTurnsForDisplay,
+    maxVisibleTurnsForThread: () => 10,
+  };
+  const existingV4Thread = {
+    id: "thread-v4",
+    mobileProjectionVersion: "v4",
+    turns: [{
+      id: "pending-turn",
+      startedAtMs: 300,
+      status: { type: "running" },
+      items: [{ id: "local", type: "userMessage", message: "send me", clientSubmissionId: "submit-1", mobilePendingSubmission: true }],
+    }],
+  };
+  const incomingV4Thread = {
+    id: "thread-v4",
+    mobileProjectionVersion: "v4",
+    turns: [{
+      id: "durable-turn",
+      startedAtMs: 100,
+      completedAtMs: 200,
+      status: { type: "completed" },
+      items: [
+        { id: "durable", type: "userMessage", message: "send me", clientSubmissionId: "submit-1" },
+        { id: "assistant", type: "agentMessage", text: "done" },
+      ],
+    }],
+  };
+  assert.deepEqual(
+    nativeV4MergeState.default.createThreadDetailV4MergePolicy(v4Options).mergeV4ProjectionThread(
+      JSON.parse(JSON.stringify(existingV4Thread)),
+      JSON.parse(JSON.stringify(incomingV4Thread)),
+    ),
+    classicV4MergeState.createThreadDetailV4MergePolicy(v4Options).mergeV4ProjectionThread(
+      JSON.parse(JSON.stringify(existingV4Thread)),
+      JSON.parse(JSON.stringify(incomingV4Thread)),
+    ),
+  );
+});
+
+test("native ESM low-risk UI helper modules match classic fallback behavior", async () => {
+  const classicStableOrder = require("../public/thread-list-stable-order.js");
+  const nativeStableOrder = await import("../frontend/native/thread-list-stable-order.mjs");
+  const stableOrderInput = {
+    nowMs: 2000,
+    selectedCwd: "/workspace",
+    threads: [
+      { id: "thread-b", updatedAtMs: 1000 },
+      { id: "thread-a", updatedAtMs: 900 },
+    ],
+    previousState: {
+      scopeKey: JSON.stringify({ cwd: "/workspace", search: "" }),
+      holdUntilMs: 3000,
+      order: ["thread-a", "thread-b"],
+      updatedAtById: { "thread-a": 900, "thread-b": 1000 },
+    },
+  };
+  assert.deepEqual(
+    nativeStableOrder.planThreadListStableOrder(stableOrderInput),
+    classicStableOrder.planThreadListStableOrder(stableOrderInput),
+  );
+  assert.equal(
+    nativeStableOrder.default.threadListOrderScopeKey({ selectedCwd: "/workspace", search: "Xcode" }),
+    classicStableOrder.threadListOrderScopeKey({ selectedCwd: "/workspace", search: "Xcode" }),
+  );
+
+  const classicStatusHints = require("../public/thread-status-hints.js");
+  const nativeStatusHints = await import("../frontend/native/thread-status-hints.mjs");
+  const statusHintInput = {
+    threadId: "thread-a",
+    isRunningHinted: true,
+    status: { type: "completed" },
+    thread: { id: "thread-a", status: { type: "completed" }, updatedAtMs: 1000 },
+    runningHintedAtMs: 900,
+    nowMs: 2000,
+    wasRunning: true,
+    eventAtMs: 1100,
+  };
+  assert.equal(
+    nativeStatusHints.shouldExpireRunningThreadHint(statusHintInput),
+    classicStatusHints.shouldExpireRunningThreadHint(statusHintInput),
+  );
+  assert.equal(
+    nativeStatusHints.default.shouldMarkThreadUnread({
+      thread: { status: { type: "completed" }, updatedAtMs: 3000 },
+      wasRunning: true,
+      runningHintedAtMs: 2500,
+      viewedAtMs: 2000,
+      eventAtMs: 3000,
+    }),
+    classicStatusHints.shouldMarkThreadUnread({
+      thread: { status: { type: "completed" }, updatedAtMs: 3000 },
+      wasRunning: true,
+      runningHintedAtMs: 2500,
+      viewedAtMs: 2000,
+      eventAtMs: 3000,
+    }),
+  );
+
+  const classicActions = require("../public/thread-detail-actions.js");
+  const nativeActions = await import("../frontend/native/thread-detail-actions.mjs");
+  const approvalButton = {
+    dataset: {
+      approvalAction: "approve-once",
+      approvalId: "1688",
+      approvalThreadId: "thread-a",
+    },
+    closest(selector) {
+      return selector === "[data-approval-action]" ? this : null;
+    },
+  };
+  assert.deepEqual(
+    nativeActions.resolveThreadDetailClickAction({ target: approvalButton }),
+    classicActions.resolveThreadDetailClickAction({ target: approvalButton }),
+  );
+  const copyButton = {
+    dataset: { copyKey: "copy-1" },
+    closest(selector) {
+      return selector === "[data-copy-key]" ? this : null;
+    },
+  };
+  assert.deepEqual(
+    nativeActions.default.resolveRichContentClickAction({ target: copyButton }),
+    classicActions.resolveRichContentClickAction({ target: copyButton }),
+  );
+});
+
+test("native ESM thread tile helper modules match classic fallback behavior", async () => {
+  const classicLayout = require("../public/thread-tile-layout.js");
+  const nativeLayout = await import("../frontend/native/thread-tile-layout.mjs");
+  const layoutInput = {
+    width: 1440,
+    height: 900,
+    desiredPaneCount: 4,
+    maxPanes: 12,
+    recommendedMaxPanes: 6,
+    verticalChromePx: 120,
+    coarsePointer: false,
+    keyboardFocusActive: false,
+  };
+  assert.deepEqual(
+    nativeLayout.layoutForViewport(layoutInput),
+    classicLayout.layoutForViewport(layoutInput),
+  );
+  const columnInput = {
+    ids: ["thread-a", "thread-b", "thread-c", "thread-d"],
+    columns: 3,
+    splitPairs: [{ anchorId: "thread-a", childId: "thread-b" }],
+  };
+  assert.deepEqual(
+    nativeLayout.default.threadTileColumnGroups(columnInput),
+    classicLayout.threadTileColumnGroups(columnInput),
+  );
+
+  const classicActions = require("../public/thread-tile-actions.js");
+  const nativeActions = await import("../frontend/native/thread-tile-actions.mjs");
+  const pane = {
+    disabled: false,
+    getAttribute(name) {
+      return name === "data-thread-tile-pane" ? "thread-a" : "";
+    },
+    closest(selector) {
+      return selector === "[data-thread-tile-pane]" ? this : null;
+    },
+  };
+  const title = {
+    disabled: false,
+    getAttribute(name) {
+      return name === "data-thread-tile-title" ? "thread-a" : "";
+    },
+    closest(selector) {
+      if (selector === "[data-thread-tile-title]") return this;
+      if (selector === "[data-thread-tile-pane]") return pane;
+      return null;
+    },
+  };
+  const actionRoot = { contains(node) { return node === pane || node === title; } };
+  assert.deepEqual(
+    nativeActions.resolveThreadTilePointerAction({ root: actionRoot, target: title }),
+    classicActions.resolveThreadTilePointerAction({ root: actionRoot, target: title }),
+  );
+  const dragInput = { root: actionRoot, target: pane, draggingId: "thread-b" };
+  assert.deepEqual(
+    nativeActions.default.resolveThreadTileDragOverAction(dragInput),
+    classicActions.resolveThreadTileDragOverAction(dragInput),
+  );
+
+  const classicState = require("../public/thread-tile-state.js");
+  const nativeState = await import("../frontend/native/thread-tile-state.mjs");
+  const paneStateInput = {
+    paneCount: 0,
+    runningIds: ["thread-live"],
+    pinnedIds: ["thread-pinned"],
+    candidateIds: ["thread-current", "thread-list"],
+    maxCandidateIds: ["thread-current", "thread-list", "thread-live", "thread-pinned"],
+    currentThreadId: "thread-current",
+    maxPaneCount: 4,
+  };
+  assert.deepEqual(
+    nativeState.paneCountStatePlan(paneStateInput),
+    classicState.paneCountStatePlan(paneStateInput),
+  );
+  const detailQueueInput = {
+    ids: ["thread-a", "thread-b", "thread-c"],
+    readyIds: ["thread-a"],
+    loadingIds: ["thread-b"],
+    controllerIds: ["thread-old"],
+    maxConcurrentLoads: 2,
+  };
+  assert.deepEqual(
+    nativeState.default.detailLoadQueuePlan(detailQueueInput),
+    classicState.detailLoadQueuePlan(detailQueueInput),
+  );
+});
+
+test("native ESM standalone helper modules match classic fallback behavior", async () => {
+  const classicVoiceInput = require("../public/plugin-voice-input.js");
+  const nativeVoiceInput = await import("../frontend/native/plugin-voice-input.mjs");
+  const voiceInputPayload = {
+    actions: ["append", "submit", "replace"],
+    composerId: "composer-a",
+    threadId: "thread-a",
+    draftId: "draft-a",
+    maxChars: 24000,
+    writable: true,
+    requestId: "request-a",
+    voiceSessionId: "voice-a",
+  };
+  assert.deepEqual(
+    nativeVoiceInput.startRequestMessage(voiceInputPayload),
+    classicVoiceInput.startRequestMessage(voiceInputPayload),
+  );
+  assert.equal(
+    nativeVoiceInput.actionFromMessageType(classicVoiceInput.TYPES.APPEND_TEXT),
+    classicVoiceInput.actionFromMessageType(classicVoiceInput.TYPES.APPEND_TEXT),
+  );
+  assert.equal(
+    nativeVoiceInput.default.textFromMessage({ final_text: "  spoken text  " }),
+    classicVoiceInput.textFromMessage({ final_text: "  spoken text  " }),
+  );
+
+  const classicApiClient = require("../public/api-client.js");
+  const nativeApiClient = await import("../frontend/native/api-client.mjs");
+  class FakeFormData {}
+  assert.equal(
+    nativeApiClient.isFormDataBody(new FakeFormData(), FakeFormData),
+    classicApiClient.isFormDataBody(new FakeFormData(), FakeFormData),
+  );
+  function FakeAbortController() {
+    this.signal = {
+      aborted: false,
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    this.abort = () => {
+      this.signal.aborted = true;
+    };
+  }
+  const createFetch = (calls) => async (path, options) => {
+    calls.push({ path, contentType: options.headers["Content-Type"], key: options.headers["X-Codex-Mobile-Key"] });
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { ok: true, path };
+      },
+    };
+  };
+  const classicApiCalls = [];
+  const nativeApiCalls = [];
+  assert.deepEqual(
+    await nativeApiClient.createApiClient({
+      fetch: createFetch(nativeApiCalls),
+      AbortControllerCtor: FakeAbortController,
+      FormDataCtor: FakeFormData,
+      getKey: () => "key-a",
+    }).request("/api/test", { method: "POST", body: JSON.stringify({ value: 1 }) }),
+    await classicApiClient.createApiClient({
+      fetch: createFetch(classicApiCalls),
+      AbortControllerCtor: FakeAbortController,
+      FormDataCtor: FakeFormData,
+      getKey: () => "key-a",
+    }).request("/api/test", { method: "POST", body: JSON.stringify({ value: 1 }) }),
+  );
+  assert.deepEqual(nativeApiCalls, classicApiCalls);
+
+  const classicMarkdown = require("../public/markdown-renderer.js");
+  const nativeMarkdown = await import("../frontend/native/markdown-renderer.mjs");
+  const markdownSource = [
+    "## Links",
+    "",
+    "[repo](https://example.com/path?q=1) and `code`",
+    "",
+    "| A | B |",
+    "| --- | --- |",
+    "| **x** | y |",
+  ].join("\n");
+  assert.equal(
+    nativeMarkdown.renderMarkdown(markdownSource),
+    classicMarkdown.renderMarkdown(markdownSource),
+  );
+  assert.equal(
+    nativeMarkdown.default.normalizeMermaidSourceForRender("flowchart TD\nsubgraph Needs Review\nA[Do (work)]\nend"),
+    classicMarkdown.normalizeMermaidSourceForRender("flowchart TD\nsubgraph Needs Review\nA[Do (work)]\nend"),
+  );
+
+  const classicPluginEmbed = require("../public/plugin-embed.js");
+  const nativePluginEmbed = await import("../frontend/native/plugin-embed.mjs");
+  const embedUrl = "http://127.0.0.1:8787/?embed=hermes&pluginId=codex-mobile&pluginRoute=task&pluginThreadId=thread-a&pluginTaskId=task-a&pluginTheme=dark";
+  assert.deepEqual(
+    nativePluginEmbed.detect(embedUrl),
+    classicPluginEmbed.detect(embedUrl),
+  );
+  const routeHint = {
+    pluginId: "codex-mobile",
+    route: "task",
+    threadId: "thread-a",
+    taskId: "task-a",
+  };
+  assert.deepEqual(
+    nativePluginEmbed.routeHintOpenPlan(routeHint),
+    classicPluginEmbed.routeHintOpenPlan(routeHint),
+  );
+  assert.deepEqual(
+    nativePluginEmbed.default.navigationMessage({ currentThreadId: "thread-a" }, { settingsOpen: true }),
+    classicPluginEmbed.navigationMessage({ currentThreadId: "thread-a" }, { settingsOpen: true }),
+  );
+});
+
+test("native ESM app update runtime matches classic fallback behavior", async () => {
+  const classicAppUpdate = require("../public/app-update-runtime.js");
+  const nativeAppUpdate = await import("../frontend/native/app-update-runtime.mjs");
+  const state = {
+    appVersion: "0.1.11",
+    appWorkspacePath: "/Users/hermes-dev/HermesMobileDev/plugins/codex-mobile-web",
+    selectedCwd: "/Users/hermes-dev/HermesMobileDev/plugins/codex-mobile-web",
+    publicReleaseEnabled: true,
+    publicReleaseRepository: "pentiumxp/codex-mobile-web",
+    publicReleaseBranch: "main",
+    publicPrEnabled: true,
+    publicPrRepository: "pentiumxp/codex-mobile-web",
+    workspaces: [
+      { cwd: "/Users/hermes-dev/HermesMobileDev/plugins/codex-mobile-web" },
+    ],
+    threads: [],
+    appUpdateStatus: {
+      version: "0.1.11",
+      supported: true,
+      updateAvailable: true,
+      canFastForward: true,
+      remote: "origin",
+      branch: "main",
+      remoteShort: "abc1234",
+      remoteUrl: "https://github.com/pentiumxp/codex-mobile-web.git",
+    },
+  };
+  const deps = {
+    state,
+    CLIENT_BUILD_ID: "0.1.11|codex-mobile-shell-v625-cbb2ef9490a1",
+    normalizeFsPath: (value) => String(value || "").toLowerCase(),
+    threadMatchesWorkspaceCwd: (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase(),
+  };
+  const classicRuntime = classicAppUpdate.createAppUpdateRuntime(deps);
+  const nativeRuntime = nativeAppUpdate.createAppUpdateRuntime(deps);
+  assert.equal(
+    nativeRuntime.clientBuildVersionText(),
+    classicRuntime.clientBuildVersionText(),
+  );
+  assert.equal(
+    nativeRuntime.clientBuildVersionText(),
+    "客户端 v625",
+  );
+  assert.equal(
+    nativeRuntime.appVersionText(),
+    classicRuntime.appVersionText(),
+  );
+  assert.equal(
+    nativeRuntime.appVersionText(),
+    "v0.1.11 · 客户端 v625",
+  );
+  assert.equal(
+    nativeRuntime.fullClientBuildVersionText({
+      clientBuildId: "0.1.11|codex-mobile-shell-v625-cbb2ef9490a1",
+      shellCacheName: "codex-mobile-shell-v625-cbb2ef9490a1",
+      classicShellCacheName: "codex-mobile-shell-v625-basebasebase",
+    }),
+    classicRuntime.fullClientBuildVersionText({
+      clientBuildId: "0.1.11|codex-mobile-shell-v625-cbb2ef9490a1",
+      shellCacheName: "codex-mobile-shell-v625-cbb2ef9490a1",
+      classicShellCacheName: "codex-mobile-shell-v625-basebasebase",
+    }),
+  );
+  assert.equal(
+    nativeRuntime.fullClientBuildVersionText({
+      clientBuildId: "0.1.11|codex-mobile-shell-v625-cbb2ef9490a1",
+      shellCacheName: "codex-mobile-shell-v625-cbb2ef9490a1",
+      classicShellCacheName: "codex-mobile-shell-v625-basebasebase",
+    }),
+    "clientBuildId 0.1.11|codex-mobile-shell-v625-cbb2ef9490a1 · shellCacheName codex-mobile-shell-v625-cbb2ef9490a1",
+  );
+  assert.equal(
+    nativeRuntime.fullClientBuildVersionText({
+      clientBuildId: "0.1.11|codex-mobile-shell-v625-basebasebase",
+      shellCacheName: "codex-mobile-shell-v625-basebasebase",
+      classicShellCacheName: "codex-mobile-shell-v625-basebasebase",
+      currentBuild: {
+        clientBuildId: "0.1.11|codex-mobile-shell-v625-cbb2ef9490a1",
+        shellCacheName: "codex-mobile-shell-v625-cbb2ef9490a1",
+        classicShellCacheName: "codex-mobile-shell-v625-basebasebase",
+      },
+    }),
+    "clientBuildId 0.1.11|codex-mobile-shell-v625-cbb2ef9490a1 · shellCacheName codex-mobile-shell-v625-cbb2ef9490a1",
+  );
+  assert.equal(
+    nativeRuntime.currentUpdateUsesPublicRelease(),
+    classicRuntime.currentUpdateUsesPublicRelease(),
+  );
+  assert.equal(
+    nativeRuntime.updateStatusLine(state.appUpdateStatus),
+    classicRuntime.updateStatusLine(state.appUpdateStatus),
+  );
+  assert.equal(
+    nativeRuntime.publicReleaseStatusLine({ updateAvailable: false, publicShort: "def5678" }),
+    classicRuntime.publicReleaseStatusLine({ updateAvailable: false, publicShort: "def5678" }),
+  );
+  const publicPrStatus = {
+    repository: "pentiumxp/codex-mobile-web",
+    openPullRequestCount: 1,
+    pullRequests: [{ number: 82, title: "Public release", updatedAt: "2026-07-05T00:00:00Z" }],
+    hasOpenPullRequests: true,
+  };
+  assert.equal(
+    nativeRuntime.publicPrPromptKey(publicPrStatus),
+    classicRuntime.publicPrPromptKey(publicPrStatus),
+  );
+  assert.equal(
+    nativeRuntime.publicPrSummaryText(publicPrStatus),
+    classicRuntime.publicPrSummaryText(publicPrStatus),
+  );
+  assert.equal(
+    nativeRuntime.publicPrReviewWorkspacePath(),
+    classicRuntime.publicPrReviewWorkspacePath(),
+  );
+
+  const diagnosticConfig = {
+    clientBuildId: "0.1.11|codex-mobile-shell-v625-cbb2ef9490a1",
+    buildId: "test-build",
+    frontendDiagnosticLog: {
+      enabled: true,
+      upload: true,
+      scopes: ["submitted_echo"],
+      maxEntries: 800,
+      updatedAt: "2026-07-06T09:46:56.028Z",
+    },
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return diagnosticConfig;
+    },
+  });
+  try {
+    for (const createRuntime of [
+      classicAppUpdate.createAppUpdateRuntime,
+      nativeAppUpdate.createAppUpdateRuntime,
+    ]) {
+      const applied = [];
+      const events = [];
+      const runtime = createRuntime({
+        state: {},
+        CLIENT_BUILD_ID: "0.1.11|codex-mobile-shell-v625-cbb2ef9490a1",
+        applyFrontendDiagnosticLogPublicConfig(config) {
+          applied.push(config.frontendDiagnosticLog);
+          return {
+            enabled: true,
+            upload: true,
+            scopes: ["submitted_echo"],
+            maxEntries: 800,
+          };
+        },
+        postClientEvent(event, details) {
+          events.push({ event, details });
+        },
+      });
+      assert.equal((await runtime.fetchPageBuildConfig()).clientBuildId, diagnosticConfig.clientBuildId);
+      assert.equal(applied.length, 1);
+      assert.deepEqual(applied[0], diagnosticConfig.frontendDiagnosticLog);
+      assert.deepEqual(events.map((entry) => entry.event), ["frontend_diagnostic_log_settings_applied"]);
+      assert.equal(events[0].details.source, "page-build-check");
+      assert.equal(events[0].details.enabled, true);
+      await runtime.fetchPageBuildConfig();
+      assert.equal(applied.length, 1);
+      assert.equal(events.length, 1);
+    }
+  } finally {
+    if (originalFetch) globalThis.fetch = originalFetch;
+    else delete globalThis.fetch;
+  }
+});
+
+test("native ESM modal runtime preserves classic global dialog helpers", async () => {
+  globalThis.CODEX_PROFILE_SWITCH_STAGES = [
+    { id: "profile_lookup", label: "读取 Profile" },
+  ];
+  const classicModal = require("../public/modal-runtime.js");
+  const classicRuntime = classicModal.createModalRuntime();
+  const classicProgress = globalThis.formatCodexProfileSwitchProgress;
+  const classicStageLabel = globalThis.codexProfileSwitchStageLabel;
+  const nativeModal = await import("../frontend/native/modal-runtime.mjs");
+  const nativeRuntime = nativeModal.createModalRuntime();
+  const runtimeKeys = [
+    "requestAppNativeDialog",
+    "requestAppAlert",
+    "requestAppConfirmation",
+    "requestAppTextInput",
+    "requestCodexProfileSwitchConfirmation",
+  ];
+  assert.deepEqual(
+    Object.fromEntries(runtimeKeys.map((key) => [key, typeof nativeRuntime[key]])),
+    Object.fromEntries(runtimeKeys.map((key) => [key, typeof classicRuntime[key]])),
+  );
+  assert.equal(globalThis.CodexModalRuntime, nativeModal.default);
+  assert.equal(typeof globalThis.handleAppNativeDialogKeydown, "function");
+  assert.equal(typeof globalThis.closeAppNativeDialog, "function");
+  assert.equal(typeof globalThis.performCodexProfileSwitch, "function");
+  const progressInput = {
+    stage: "profile_lookup",
+    message: "",
+    stepIndex: 1,
+    stepCount: 3,
+  };
+  assert.equal(
+    globalThis.formatCodexProfileSwitchProgress(progressInput),
+    classicProgress(progressInput),
+  );
+  assert.equal(
+    globalThis.codexProfileSwitchStageLabel("profile_lookup"),
+    classicStageLabel("profile_lookup"),
+  );
+});
+
+test("native ESM client render guard and live operation dock match classic policies", async () => {
+  const classicGuard = require("../public/client-render-stability-guard.js");
+  const nativeGuard = await import("../frontend/native/client-render-stability-guard.mjs");
+  const sourceTurn = {
+    id: "local-turn-submission-secret",
+    items: [{ type: "userMessage", clientSubmissionId: "submission-secret", mobilePendingSubmission: true }],
+  };
+  const nativeSourceTurn = structuredClone(sourceTurn);
+  const targetTurn = {
+    id: "server-turn-1",
+    items: [{ type: "userMessage", clientSubmissionId: "submission-secret" }],
+  };
+  const nativeTargetTurn = structuredClone(targetTurn);
+  const classicKey = classicGuard.markSubmittedTurn(sourceTurn, "submission-secret");
+  const nativeKey = nativeGuard.markSubmittedTurn(nativeSourceTurn, "submission-secret");
+  assert.equal(nativeKey, classicKey);
+  assert.equal(
+    nativeGuard.transferSubmittedTurnIdentity(nativeSourceTurn, nativeTargetTurn, "submission-secret"),
+    classicGuard.transferSubmittedTurnIdentity(sourceTurn, targetTurn, "submission-secret"),
+  );
+  assert.equal(nativeGuard.stableTurnIdentity(nativeTargetTurn), classicGuard.stableTurnIdentity(targetTurn));
+  assert.equal(globalThis.CodexClientRenderStabilityGuard, nativeGuard.default);
+
+  const classicDock = require("../public/live-operation-dock-state.js");
+  const nativeDock = await import("../frontend/native/live-operation-dock-state.mjs");
+  const dockInput = {
+    itemId: "cmd-1",
+    type: "commandExecution",
+    status: "running",
+    title: "Command",
+    detail: "npm   test",
+    durationText: "00:00:05",
+    durationAttrs: "data-started-at-ms=\"1\" data-ended-at-ms=\"6\"",
+    extraClass: "mobile-operation-sheet-card",
+  };
+  assert.deepEqual(
+    nativeDock.operationCardContentPlan(dockInput),
+    classicDock.operationCardContentPlan(dockInput),
+  );
+  assert.deepEqual(
+    nativeDock.compactBubblePreservation({
+      nextHtml: "",
+      visibleUntilMs: 1500,
+      nowMs: 1200,
+      savedHtml: "<button class=\"mobile-operation-bubble\"></button>",
+      savedThreadId: "thread-1",
+      currentThreadId: "thread-1",
+      dockHasBubble: true,
+    }),
+    classicDock.compactBubblePreservation({
+      nextHtml: "",
+      visibleUntilMs: 1500,
+      nowMs: 1200,
+      savedHtml: "<button class=\"mobile-operation-bubble\"></button>",
+      savedThreadId: "thread-1",
+      currentThreadId: "thread-1",
+      dockHasBubble: true,
+    }),
+  );
+  assert.equal(globalThis.CodexLiveOperationDockState, nativeDock.default);
+});
+
+test("native ESM runtime wiring exposes startup factory without initializing globals", async () => {
+  const classicRuntimeWiring = require("../public/runtime-wiring-runtime.js");
+  const nativeRuntimeWiring = await import("../frontend/native/runtime-wiring-runtime.mjs");
+  const classicRuntime = classicRuntimeWiring.createRuntimeWiringRuntime();
+  const nativeRuntime = nativeRuntimeWiring.createRuntimeWiringRuntime();
+
+  assert.equal(typeof classicRuntime.initialize, "function");
+  assert.equal(typeof nativeRuntime.initialize, "function");
+  assert.equal(globalThis.CodexRuntimeWiringRuntime, nativeRuntimeWiring.default);
+});
+
+test("native ESM diagnostic and metrics helpers match classic public APIs", async () => {
+  const classicThreadPerformanceMetrics = require("../public/thread-performance-metrics.js");
+  const nativeThreadPerformanceMetrics = await import("../frontend/native/thread-performance-metrics.mjs");
+  const detailThread = {
+    status: { type: "running" },
+    mobileReadMode: "projection-v4-partial",
+    mobileOmittedTurnCount: 2,
+    rolloutSizeBytes: 2048,
+    mobileDiagnostics: {
+      threadDetailTimings: {
+        readDecision: "projection-partial-hit",
+        projectionState: "hit",
+        prepareResponseMs: 14,
+      },
+    },
+    turns: [{
+      status: "completed",
+      items: [
+        { type: "userMessage", text: "hello" },
+        { type: "agentMessage", text: "done" },
+        { type: "turnUsageSummary" },
+      ],
+    }],
+  };
+  for (const value of [0, 1.4, "22.8", -1, "bad", 20 * 60 * 1000]) {
+    assert.equal(
+      nativeThreadPerformanceMetrics.boundedTiming(value),
+      classicThreadPerformanceMetrics.boundedTiming(value),
+    );
+  }
+  assert.equal(
+    nativeThreadPerformanceMetrics.classifyThreadDetailPhase(detailThread.mobileDiagnostics.threadDetailTimings, { readMode: detailThread.mobileReadMode }),
+    classicThreadPerformanceMetrics.classifyThreadDetailPhase(detailThread.mobileDiagnostics.threadDetailTimings, { readMode: detailThread.mobileReadMode }),
+  );
+  assert.deepEqual(
+    nativeThreadPerformanceMetrics.threadDetailRefreshEventFields(detailThread, { source: "test", elapsedMs: 44, renderMode: "patch" }),
+    classicThreadPerformanceMetrics.threadDetailRefreshEventFields(detailThread, { source: "test", elapsedMs: 44, renderMode: "patch" }),
+  );
+  assert.deepEqual(
+    nativeThreadPerformanceMetrics.threadListEventFields({ mobileDiagnostics: { threadListTimings: { fallbackCacheDecision: "hit" } } }),
+    classicThreadPerformanceMetrics.threadListEventFields({ mobileDiagnostics: { threadListTimings: { fallbackCacheDecision: "hit" } } }),
+  );
+  assert.equal(
+    nativeThreadPerformanceMetrics.default.classifyThreadListPhase({ fallbackDeferred: true }),
+    classicThreadPerformanceMetrics.classifyThreadListPhase({ fallbackDeferred: true }),
+  );
+
+  const classicFrontendRuntimeHealth = require("../public/frontend-runtime-health.js");
+  const nativeFrontendRuntimeHealth = await import("../frontend/native/frontend-runtime-health.mjs");
+  const submitProbe = {
+    elapsedMs: 500,
+    currentThreadMatch: true,
+    hasThreadSubmission: true,
+    domHasSubmission: false,
+    domCount: 1,
+    visibleCount: 3,
+    threadHash: "thread_h",
+    itemHash: "item_h",
+  };
+  assert.deepEqual(
+    nativeFrontendRuntimeHealth.submittedMessageDomProbeEffects(submitProbe),
+    classicFrontendRuntimeHealth.submittedMessageDomProbeEffects(submitProbe),
+  );
+  assert.deepEqual(
+    nativeFrontendRuntimeHealth.threadListInteractionStallEffects({ elapsedMs: 6000, thresholdMs: 3000, threadListCount: 4 }),
+    classicFrontendRuntimeHealth.threadListInteractionStallEffects({ elapsedMs: 6000, thresholdMs: 3000, threadListCount: 4 }),
+  );
+  const nativeMonitor = nativeFrontendRuntimeHealth.createMonitor({ windowMs: 10000 });
+  const classicMonitor = classicFrontendRuntimeHealth.createMonitor({ windowMs: 10000 });
+  const renderSample = {
+    nowMs: 1000,
+    fullRender: true,
+    fullRenderThreshold: 1,
+    previousCount: 5,
+    domCount: 1,
+    visibleCount: 5,
+    sameThreadRender: true,
+    renderMode: "full-render",
+  };
+  assert.deepEqual(nativeMonitor.recordRender(renderSample), classicMonitor.recordRender(renderSample));
+  assert.equal(
+    nativeFrontendRuntimeHealth.default.compactToken(" hello world "),
+    classicFrontendRuntimeHealth.compactToken(" hello world "),
+  );
+
+  const classicHomeAiDiagnosticReporting = require("../public/home-ai-diagnostic-reporting.js");
+  const nativeHomeAiDiagnosticReporting = await import("../frontend/native/home-ai-diagnostic-reporting.mjs");
+  const diagnosticInput = {
+    diagnostic_type: "render_dom_drop",
+    error_code: "render_dom_drop",
+    severity_hint: "H2",
+    context: { surface: "conversation-render", action: "refresh", thread_hash: "thread_h", rawText: "unsafe" },
+    counts: { visible_count: 3, raw_payload_bytes: 999, ok: true },
+    breadcrumbs: [{ kind: "render", code: "drop", status: "failed", fields: { visible_count: 3, rawText: "unsafe" } }],
+  };
+  assert.deepEqual(
+    nativeHomeAiDiagnosticReporting.sanitizeInput(diagnosticInput),
+    classicHomeAiDiagnosticReporting.sanitizeInput(diagnosticInput),
+  );
+  const nativeReporter = nativeHomeAiDiagnosticReporting.createDiagnosticReporter({ threshold: 2, throttleMs: 1000, now: () => 1000 });
+  const classicReporter = classicHomeAiDiagnosticReporting.createDiagnosticReporter({ threshold: 2, throttleMs: 1000, now: () => 1000 });
+  assert.deepEqual(nativeReporter.recordFailure(diagnosticInput), classicReporter.recordFailure(diagnosticInput));
+  assert.deepEqual(nativeReporter.recordFailure(diagnosticInput), classicReporter.recordFailure(diagnosticInput));
+  assert.deepEqual(nativeReporter.recordSuccess(diagnosticInput), classicReporter.recordSuccess(diagnosticInput));
+  assert.equal(
+    nativeHomeAiDiagnosticReporting.default.hashIdentifier("thread-1", "t"),
+    classicHomeAiDiagnosticReporting.hashIdentifier("thread-1", "t"),
+  );
+
+  const classicThreadDiagnosticEvents = require("../public/thread-diagnostic-events.js");
+  const nativeThreadDiagnosticEvents = await import("../frontend/native/thread-diagnostic-events.mjs");
+  const projectionSnapshotInput = {
+    renderedConversationSignature: "a",
+    currentSignature: "b",
+    source: "refresh",
+    renderMode: "patch",
+    domShape: { renderKeyCount: 2, duplicateRenderKeyCount: 0 },
+    thread: detailThread,
+  };
+  const deps = {
+    visibleShape: () => ({ visibleTurnCount: 1, visibleItemCount: 3 }),
+    singleSignature: () => "b",
+  };
+  assert.deepEqual(
+    nativeThreadDiagnosticEvents.conversationProjectionDiagnosticSnapshot(projectionSnapshotInput, deps),
+    classicThreadDiagnosticEvents.conversationProjectionDiagnosticSnapshot(projectionSnapshotInput, deps),
+  );
+  assert.deepEqual(
+    nativeThreadDiagnosticEvents.turnOrderDiagnosticSnapshot({ expectedTurnIds: ["a", "b"], domTurnIds: ["a", "c"] }),
+    classicThreadDiagnosticEvents.turnOrderDiagnosticSnapshot({ expectedTurnIds: ["a", "b"], domTurnIds: ["a", "c"] }),
+  );
+  assert.deepEqual(
+    nativeThreadDiagnosticEvents.threadDetailResponseDiagnosticEffects({
+      slowPlan: { shouldReport: true, reason: "thread-read", threadId: "thread", elapsedMs: 3500 },
+      contractPlan: { shouldReport: false, reason: "ok", readMode: "projection-v4-partial" },
+    }),
+    classicThreadDiagnosticEvents.threadDetailResponseDiagnosticEffects({
+      slowPlan: { shouldReport: true, reason: "thread-read", threadId: "thread", elapsedMs: 3500 },
+      contractPlan: { shouldReport: false, reason: "ok", readMode: "projection-v4-partial" },
+    }),
+  );
+  assert.equal(
+    nativeThreadDiagnosticEvents.default.compactToken("bad value!"),
+    classicThreadDiagnosticEvents.compactToken("bad value!"),
+  );
 });
 
 test("Vite shell entry imports the asset-graph ESM compatibility module", async () => {
@@ -164,6 +1663,11 @@ test("Vite shell entry imports the asset-graph ESM compatibility module", async 
   const root = path.resolve(__dirname, "..");
   const source = fs.readFileSync(path.join(root, "frontend", "vite-shell-entry.mjs"), "utf8");
   assert.match(source, /virtual:codex-mobile-esm-compatibility/);
+  assert.match(source, /import buildTimeShellManifest from "virtual:codex-mobile-shell-build-manifest"/);
+  assert.equal(source.includes("../public/shell-asset-manifest.json"), false);
+  assert.match(source, /function runtimeShellManifest\(\)/);
+  assert.match(source, /globalThis\.CODEX_MOBILE_SHELL_MANIFEST/);
+  assert.match(source, /return buildTimeShellManifest/);
   assert.match(source, /import\("virtual:codex-mobile-esm-compatibility"\)/);
   assert.doesNotMatch(source, /import\s+\{\s*codexMobileViteEsmCompatibility\s*\}\s+from\s+"virtual:codex-mobile-esm-compatibility"/);
   assert.match(source, /__CODEX_MOBILE_VITE_ESM_COMPATIBILITY_PROMISE__/);
@@ -241,32 +1745,72 @@ test("Vite shell entry imports the asset-graph ESM compatibility module", async 
     assert.equal(shardResolved, `\0${shard.source}`);
     return plugin.load(shardResolved);
   }).join("\n");
-  assert.match(shardSources, /public\/api-client\.js/);
-  assert.match(shardSources, /public\/markdown-renderer\.js/);
-  assert.match(shardSources, /public\/build-refresh-policy\.js/);
-  assert.match(shardSources, /public\/runtime-settings\.js/);
-  assert.match(shardSources, /public\/viewport-metrics\.js/);
-  assert.match(shardSources, /public\/conversation-scroll\.js/);
-  assert.match(shardSources, /public\/thread-performance-metrics\.js/);
-  assert.match(shardSources, /public\/thread-detail-state\.js/);
-  assert.match(shardSources, /public\/thread-detail-render-plan\.js/);
+  assert.match(shardSources, /frontend\/native\/build-refresh-policy\.mjs/);
+  assert.match(shardSources, /frontend\/native\/runtime-settings\.mjs/);
+  assert.match(shardSources, /frontend\/native\/viewport-metrics\.mjs/);
+  assert.match(shardSources, /frontend\/native\/conversation-scroll\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-detail-state\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-detail-render-plan\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-detail-patch-plan\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-detail-merge-state\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-detail-v4-merge-state\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-list-load-policy\.mjs/);
+  assert.match(shardSources, /frontend\/native\/draft-store\.mjs/);
+  assert.match(shardSources, /frontend\/native\/image-compressor\.mjs/);
+  assert.match(shardSources, /frontend\/native\/plugin-voice-input\.mjs/);
+  assert.match(shardSources, /frontend\/native\/api-client\.mjs/);
+  assert.match(shardSources, /frontend\/native\/markdown-renderer\.mjs/);
+  assert.match(shardSources, /frontend\/native\/plugin-embed\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-performance-metrics\.mjs/);
+  assert.match(shardSources, /frontend\/native\/frontend-runtime-health\.mjs/);
+  assert.match(shardSources, /frontend\/native\/home-ai-diagnostic-reporting\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-diagnostic-events\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-list-stable-order\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-status-hints\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-detail-actions\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-tile-layout\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-tile-actions\.mjs/);
+  assert.match(shardSources, /frontend\/native\/thread-tile-state\.mjs/);
+  assert.match(shardSources, /frontend\/native\/app-update-runtime\.mjs/);
+  assert.match(shardSources, /frontend\/native\/modal-runtime\.mjs/);
+  assert.match(shardSources, /frontend\/native\/runtime-wiring-runtime\.mjs/);
+  assert.match(shardSources, /frontend\/native\/client-render-stability-guard\.mjs/);
+  assert.match(shardSources, /frontend\/native\/live-operation-dock-state\.mjs/);
+  assert.doesNotMatch(shardSources, /from ".*public\/build-refresh-policy\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/runtime-settings\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/viewport-metrics\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/conversation-scroll\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-detail-state\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-detail-render-plan\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-detail-patch-plan\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-detail-merge-state\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-detail-v4-merge-state\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-list-load-policy\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/draft-store\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/image-compressor\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/plugin-voice-input\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/api-client\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/markdown-renderer\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/plugin-embed\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-performance-metrics\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/frontend-runtime-health\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/home-ai-diagnostic-reporting\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-diagnostic-events\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-list-stable-order\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-status-hints\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-detail-actions\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-tile-layout\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-tile-actions\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/thread-tile-state\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/app-update-runtime\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/modal-runtime\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/runtime-wiring-runtime\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/client-render-stability-guard\.js"/);
+  assert.doesNotMatch(shardSources, /from ".*public\/live-operation-dock-state\.js"/);
   assert.match(shardSources, /public\/thread-detail-dom-patch\.js/);
-  assert.match(shardSources, /public\/image-compressor\.js/);
-  assert.match(shardSources, /public\/plugin-voice-input\.js/);
-  assert.match(shardSources, /public\/plugin-embed\.js/);
-  assert.match(shardSources, /public\/frontend-runtime-health\.js/);
-  assert.match(shardSources, /public\/home-ai-diagnostic-reporting\.js/);
-  assert.match(shardSources, /public\/thread-diagnostic-events\.js/);
-  assert.match(shardSources, /public\/draft-store\.js/);
-  assert.match(shardSources, /public\/thread-tile-layout\.js/);
-  assert.match(shardSources, /public\/thread-tile-actions\.js/);
-  assert.match(shardSources, /public\/thread-tile-state\.js/);
   assert.match(shardSources, /public\/thread-tile-runtime\.js/);
-  assert.match(shardSources, /public\/app-update-runtime\.js/);
   assert.match(shardSources, /public\/settings-runtime\.js/);
-  assert.match(shardSources, /public\/modal-runtime\.js/);
   assert.match(shardSources, /public\/navigation-runtime\.js/);
-  assert.match(shardSources, /public\/runtime-wiring-runtime\.js/);
   assert.match(shardSources, /public\/app-shell-runtime\.js/);
   assert.match(shardSources, /public\/pane-layout-runtime\.js/);
   assert.match(shardSources, /public\/app\.js/);
@@ -276,20 +1820,11 @@ test("Vite shell entry imports the asset-graph ESM compatibility module", async 
   assert.match(shardSources, /public\/composer-runtime\.js/);
   assert.match(shardSources, /public\/composer-bridge-runtime\.js/);
   assert.match(shardSources, /public\/api-client-runtime\.js/);
-  assert.match(shardSources, /public\/thread-list-load-policy\.js/);
-  assert.match(shardSources, /public\/thread-list-stable-order\.js/);
-  assert.match(shardSources, /public\/thread-status-hints\.js/);
-  assert.match(shardSources, /public\/thread-detail-patch-plan\.js/);
-  assert.match(shardSources, /public\/thread-detail-actions\.js/);
-  assert.match(shardSources, /public\/thread-detail-merge-state\.js/);
-  assert.match(shardSources, /public\/thread-detail-v4-merge-state\.js/);
   assert.match(shardSources, /public\/thread-detail-runtime\.js/);
   assert.match(shardSources, /public\/task-card-runtime\.js/);
   assert.match(shardSources, /public\/notification-ui-runtime\.js/);
   assert.match(shardSources, /public\/conversation-render-runtime\.js/);
   assert.match(shardSources, /public\/event-stream-runtime\.js/);
-  assert.match(shardSources, /public\/client-render-stability-guard\.js/);
-  assert.match(shardSources, /public\/live-operation-dock-state\.js/);
   assert.match(shardSources, /createApiClient/);
   assert.match(shardSources, /renderMarkdownTable/);
   assert.match(shardSources, /planThreadListLoadRequest/);
@@ -313,6 +1848,7 @@ test("Vite shell entry imports the asset-graph ESM compatibility module", async 
   assert.match(shardSources, /activePaneSyncPlan/);
   assert.match(shardSources, /createThreadTileRuntime/);
   assert.match(shardSources, /createAppUpdateRuntime/);
+  assert.match(shardSources, /客户端 v625/);
   assert.match(shardSources, /createSettingsRuntime/);
   assert.match(shardSources, /createModalRuntime/);
   assert.match(shardSources, /createNavigationRuntime/);
@@ -441,7 +1977,7 @@ test("Vite shell build contract records entry chunks and classic fallback output
   const contract = buildViteShellBuildContract(manifest, bundle);
   assert.equal(contract.validation.ok, true);
   assert.equal(contract.stage, "vite-shell-artifact-contract-v1");
-  assert.equal(contract.productionExecution, "classic-script-fallback");
+  assert.equal(contract.productionExecution, "vite-app-preview-native-esm");
   assert.equal(contract.entryGroupImportOwner, "vite-shell-entry");
   assert.equal(contract.viteEntry.source, "frontend/vite-shell-entry.mjs");
   assert.equal(contract.viteEntry.fileName, "assets/vite-shell-entry-example.js");
@@ -547,6 +2083,8 @@ test("Vite shell build contract records entry chunks and classic fallback output
     VITE_ESM_COMPATIBILITY_MODULES.length
   );
   assert.equal(contract.esmCompatibility.moduleCount, VITE_ESM_COMPATIBILITY_MODULES.length);
+  assert.equal(contract.esmCompatibility.nativeEsmModuleCount, 49);
+  assert.equal(contract.esmCompatibility.classicGlobalCompatibilityModuleCount, VITE_ESM_COMPATIBILITY_MODULES.length - 49);
   assert.equal(contract.esmCompatibility.hashCount, VITE_ESM_COMPATIBILITY_MODULES.length);
   assert.equal(
     contract.esmCompatibility.expectedFunctionCount,
@@ -559,6 +2097,260 @@ test("Vite shell build contract records entry chunks and classic fallback output
   assert.deepEqual(
     contract.esmCompatibility.modules.map((entry) => entry.assetPath),
     VITE_ESM_COMPATIBILITY_MODULES.map((entry) => `/${entry.source.replace(/^public\//, "")}`)
+  );
+  assert.deepEqual(
+    contract.esmCompatibility.modules.filter((entry) => entry.compatibilityMode === "native-esm").map((entry) => ({
+      id: entry.id,
+      nativeSource: entry.nativeSource,
+      importSource: entry.importSource,
+    })),
+    [
+      {
+        id: "build-refresh-policy",
+        nativeSource: "frontend/native/build-refresh-policy.mjs",
+        importSource: "frontend/native/build-refresh-policy.mjs",
+      },
+      {
+        id: "runtime-settings",
+        nativeSource: "frontend/native/runtime-settings.mjs",
+        importSource: "frontend/native/runtime-settings.mjs",
+      },
+      {
+        id: "viewport-metrics",
+        nativeSource: "frontend/native/viewport-metrics.mjs",
+        importSource: "frontend/native/viewport-metrics.mjs",
+      },
+      {
+        id: "conversation-scroll",
+        nativeSource: "frontend/native/conversation-scroll.mjs",
+        importSource: "frontend/native/conversation-scroll.mjs",
+      },
+      {
+        id: "thread-performance-metrics",
+        nativeSource: "frontend/native/thread-performance-metrics.mjs",
+        importSource: "frontend/native/thread-performance-metrics.mjs",
+      },
+      {
+        id: "thread-detail-state",
+        nativeSource: "frontend/native/thread-detail-state.mjs",
+        importSource: "frontend/native/thread-detail-state.mjs",
+      },
+      {
+        id: "thread-detail-render-plan",
+        nativeSource: "frontend/native/thread-detail-render-plan.mjs",
+        importSource: "frontend/native/thread-detail-render-plan.mjs",
+      },
+      {
+        id: "thread-detail-dom-patch",
+        nativeSource: "frontend/native/thread-detail-dom-patch.mjs",
+        importSource: "frontend/native/thread-detail-dom-patch.mjs",
+      },
+      {
+        id: "draft-store",
+        nativeSource: "frontend/native/draft-store.mjs",
+        importSource: "frontend/native/draft-store.mjs",
+      },
+      {
+        id: "image-compressor",
+        nativeSource: "frontend/native/image-compressor.mjs",
+        importSource: "frontend/native/image-compressor.mjs",
+      },
+      {
+        id: "plugin-voice-input",
+        nativeSource: "frontend/native/plugin-voice-input.mjs",
+        importSource: "frontend/native/plugin-voice-input.mjs",
+      },
+      {
+        id: "api-client",
+        nativeSource: "frontend/native/api-client.mjs",
+        importSource: "frontend/native/api-client.mjs",
+      },
+      {
+        id: "markdown-renderer",
+        nativeSource: "frontend/native/markdown-renderer.mjs",
+        importSource: "frontend/native/markdown-renderer.mjs",
+      },
+      {
+        id: "plugin-embed",
+        nativeSource: "frontend/native/plugin-embed.mjs",
+        importSource: "frontend/native/plugin-embed.mjs",
+      },
+      {
+        id: "frontend-runtime-health",
+        nativeSource: "frontend/native/frontend-runtime-health.mjs",
+        importSource: "frontend/native/frontend-runtime-health.mjs",
+      },
+      {
+        id: "home-ai-diagnostic-reporting",
+        nativeSource: "frontend/native/home-ai-diagnostic-reporting.mjs",
+        importSource: "frontend/native/home-ai-diagnostic-reporting.mjs",
+      },
+      {
+        id: "thread-diagnostic-events",
+        nativeSource: "frontend/native/thread-diagnostic-events.mjs",
+        importSource: "frontend/native/thread-diagnostic-events.mjs",
+      },
+      {
+        id: "thread-tile-layout",
+        nativeSource: "frontend/native/thread-tile-layout.mjs",
+        importSource: "frontend/native/thread-tile-layout.mjs",
+      },
+      {
+        id: "thread-tile-actions",
+        nativeSource: "frontend/native/thread-tile-actions.mjs",
+        importSource: "frontend/native/thread-tile-actions.mjs",
+      },
+      {
+        id: "thread-tile-state",
+        nativeSource: "frontend/native/thread-tile-state.mjs",
+        importSource: "frontend/native/thread-tile-state.mjs",
+      },
+      {
+        id: "thread-tile-runtime",
+        nativeSource: "frontend/native/thread-tile-runtime.mjs",
+        importSource: "frontend/native/thread-tile-runtime.mjs",
+      },
+      {
+        id: "app-update-runtime",
+        nativeSource: "frontend/native/app-update-runtime.mjs",
+        importSource: "frontend/native/app-update-runtime.mjs",
+      },
+      {
+        id: "settings-runtime",
+        nativeSource: "frontend/native/settings-runtime.mjs",
+        importSource: "frontend/native/settings-runtime.mjs",
+      },
+      {
+        id: "modal-runtime",
+        nativeSource: "frontend/native/modal-runtime.mjs",
+        importSource: "frontend/native/modal-runtime.mjs",
+      },
+      {
+        id: "navigation-runtime",
+        nativeSource: "frontend/native/navigation-runtime.mjs",
+        importSource: "frontend/native/navigation-runtime.mjs",
+      },
+      {
+        id: "runtime-wiring-runtime",
+        nativeSource: "frontend/native/runtime-wiring-runtime.mjs",
+        importSource: "frontend/native/runtime-wiring-runtime.mjs",
+      },
+      {
+        id: "app-shell-runtime",
+        nativeSource: "frontend/native/app-shell-runtime.mjs",
+        importSource: "frontend/native/app-shell-runtime.mjs",
+      },
+      {
+        id: "pane-layout-runtime",
+        nativeSource: "frontend/native/pane-layout-runtime.mjs",
+        importSource: "frontend/native/pane-layout-runtime.mjs",
+      },
+      {
+        id: "app-entry",
+        nativeSource: "frontend/native/app-entry.mjs",
+        importSource: "frontend/native/app-entry.mjs",
+      },
+      {
+        id: "thread-list-runtime",
+        nativeSource: "frontend/native/thread-list-runtime.mjs",
+        importSource: "frontend/native/thread-list-runtime.mjs",
+      },
+      {
+        id: "side-chat-runtime",
+        nativeSource: "frontend/native/side-chat-runtime.mjs",
+        importSource: "frontend/native/side-chat-runtime.mjs",
+      },
+      {
+        id: "media-preview-runtime",
+        nativeSource: "frontend/native/media-preview-runtime.mjs",
+        importSource: "frontend/native/media-preview-runtime.mjs",
+      },
+      {
+        id: "composer-runtime",
+        nativeSource: "frontend/native/composer-runtime.mjs",
+        importSource: "frontend/native/composer-runtime.mjs",
+      },
+      {
+        id: "composer-bridge-runtime",
+        nativeSource: "frontend/native/composer-bridge-runtime.mjs",
+        importSource: "frontend/native/composer-bridge-runtime.mjs",
+      },
+      {
+        id: "api-client-runtime",
+        nativeSource: "frontend/native/api-client-runtime.mjs",
+        importSource: "frontend/native/api-client-runtime.mjs",
+      },
+      {
+        id: "thread-list-load-policy",
+        nativeSource: "frontend/native/thread-list-load-policy.mjs",
+        importSource: "frontend/native/thread-list-load-policy.mjs",
+      },
+      {
+        id: "thread-list-stable-order",
+        nativeSource: "frontend/native/thread-list-stable-order.mjs",
+        importSource: "frontend/native/thread-list-stable-order.mjs",
+      },
+      {
+        id: "thread-status-hints",
+        nativeSource: "frontend/native/thread-status-hints.mjs",
+        importSource: "frontend/native/thread-status-hints.mjs",
+      },
+      {
+        id: "thread-detail-patch-plan",
+        nativeSource: "frontend/native/thread-detail-patch-plan.mjs",
+        importSource: "frontend/native/thread-detail-patch-plan.mjs",
+      },
+      {
+        id: "thread-detail-actions",
+        nativeSource: "frontend/native/thread-detail-actions.mjs",
+        importSource: "frontend/native/thread-detail-actions.mjs",
+      },
+      {
+        id: "thread-detail-merge-state",
+        nativeSource: "frontend/native/thread-detail-merge-state.mjs",
+        importSource: "frontend/native/thread-detail-merge-state.mjs",
+      },
+      {
+        id: "thread-detail-v4-merge-state",
+        nativeSource: "frontend/native/thread-detail-v4-merge-state.mjs",
+        importSource: "frontend/native/thread-detail-v4-merge-state.mjs",
+      },
+      {
+        id: "thread-detail-runtime",
+        nativeSource: "frontend/native/thread-detail-runtime.mjs",
+        importSource: "frontend/native/thread-detail-runtime.mjs",
+      },
+      {
+        id: "task-card-runtime",
+        nativeSource: "frontend/native/task-card-runtime.mjs",
+        importSource: "frontend/native/task-card-runtime.mjs",
+      },
+      {
+        id: "notification-ui-runtime",
+        nativeSource: "frontend/native/notification-ui-runtime.mjs",
+        importSource: "frontend/native/notification-ui-runtime.mjs",
+      },
+      {
+        id: "conversation-render-runtime",
+        nativeSource: "frontend/native/conversation-render-runtime.mjs",
+        importSource: "frontend/native/conversation-render-runtime.mjs",
+      },
+      {
+        id: "event-stream-runtime",
+        nativeSource: "frontend/native/event-stream-runtime.mjs",
+        importSource: "frontend/native/event-stream-runtime.mjs",
+      },
+      {
+        id: "client-render-stability-guard",
+        nativeSource: "frontend/native/client-render-stability-guard.mjs",
+        importSource: "frontend/native/client-render-stability-guard.mjs",
+      },
+      {
+        id: "live-operation-dock-state",
+        nativeSource: "frontend/native/live-operation-dock-state.mjs",
+        importSource: "frontend/native/live-operation-dock-state.mjs",
+      },
+    ]
   );
   assert.ok(contract.esmCompatibility.modules.every((entry) => entry.classicLoaderExcluded === true));
   assert.ok(contract.esmCompatibility.modules.every((entry) => entry.bytes > 0));

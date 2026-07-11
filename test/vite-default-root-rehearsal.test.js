@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const { test } = require("node:test");
+const { version: packageVersion } = require("../package.json");
 
 const {
   createViteDefaultRootRehearsalService,
@@ -38,7 +39,7 @@ test("Vite default-root rehearsal service serves app-preview at plain root", asy
     assert.equal(configResponse.status, 200);
     assert.equal(config.defaultShellMode, "vite-app-preview");
     assert.equal(config.authRequired, false);
-    assert.match(config.clientBuildId, /^0\.1\.12\|codex-mobile-shell-/);
+    assert.equal(config.clientBuildId.startsWith(`${packageVersion}|codex-mobile-shell-`), true);
 
     const rootResponse = await fetch(`${baseUrl}/`);
     const rootHtml = await rootResponse.text();

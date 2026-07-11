@@ -101,12 +101,15 @@ function usage() {
     "  --exercise-submit          Send one short UI message through Composer in the target test thread.",
     "  --submit-thread-id <id>    Dedicated thread id for --exercise-submit. Defaults to first selected thread.",
     "  --submit-message <text>    Test message. Default asks for a one-token OK reply.",
+    "  --submit-repeat <n>        Number of submit messages for interruption/echo checks. Default: 1.",
+    "  --submit-interval-ms <n>   Delay between repeated submit messages. Default: 120.",
     "  --submit-sample-delays-ms <csv> Delays after submit. Default: 100,350,900,1600,2800,6000.",
     "  --viewport <WxH>           Browser viewport. Default: 390x844.",
     "  --chrome-path <path>       Chrome executable. Default: macOS Google Chrome.",
     "  --headed                   Run visible Chrome instead of headless.",
     "  --timeout-ms <n>           Request/browser timeout. Default: 20000.",
     "  --min-settled-delay-ms <n> Sparse-after-nonempty H2 threshold. Default: 1000.",
+    "  --diagnostic-samples       Include bounded metadata-only DOM/API sample shapes.",
     "  --json                     Print JSON only.",
     "  --help                     Show this help.",
   ].join("\n");
@@ -169,11 +172,14 @@ function parseArgs(argv = process.argv.slice(2), env = process.env) {
     exerciseSubmit: /^(1|true|yes)$/i.test(String(env.CODEX_MOBILE_BROWSER_SELF_CHECK_EXERCISE_SUBMIT || "")),
     submitThreadId: String(env.CODEX_MOBILE_BROWSER_SELF_CHECK_SUBMIT_THREAD_ID || "").trim(),
     submitMessage: String(env.CODEX_MOBILE_BROWSER_SELF_CHECK_SUBMIT_MESSAGE || "Codex Mobile self-check test. Reply exactly: OK").slice(0, 500),
+    submitRepeat: readPositiveInt(env.CODEX_MOBILE_BROWSER_SELF_CHECK_SUBMIT_REPEAT || "1", 1, 5),
+    submitIntervalMs: readNonNegativeInt(env.CODEX_MOBILE_BROWSER_SELF_CHECK_SUBMIT_INTERVAL_MS || "120", 120, 5000),
     submitSampleDelaysMs: parseDelayList(env.CODEX_MOBILE_BROWSER_SELF_CHECK_SUBMIT_SAMPLE_DELAYS_MS || "100,350,900,1600,2800,6000", [100, 350, 900, 1600, 2800, 6000]),
     viewport: parseViewport(env.CODEX_MOBILE_BROWSER_SELF_CHECK_VIEWPORT || DEFAULT_VIEWPORT),
     headed: false,
     timeoutMs: readPositiveInt(env.CODEX_MOBILE_BROWSER_SELF_CHECK_TIMEOUT_MS || "20000", 20000, 120000),
     minSettledDelayMs: readPositiveInt(env.CODEX_MOBILE_BROWSER_SELF_CHECK_MIN_SETTLED_DELAY_MS || "1000", 1000, 10000),
+    diagnosticSamples: /^(1|true|yes)$/i.test(String(env.CODEX_MOBILE_BROWSER_SELF_CHECK_DIAGNOSTIC_SAMPLES || "")),
     json: false,
     help: false,
   };
@@ -205,11 +211,14 @@ function parseArgs(argv = process.argv.slice(2), env = process.env) {
     else if (arg === "--exercise-submit") options.exerciseSubmit = true;
     else if (arg === "--submit-thread-id") options.submitThreadId = next();
     else if (arg === "--submit-message") options.submitMessage = next().slice(0, 500);
+    else if (arg === "--submit-repeat") options.submitRepeat = readPositiveInt(next(), options.submitRepeat, 5);
+    else if (arg === "--submit-interval-ms") options.submitIntervalMs = readNonNegativeInt(next(), options.submitIntervalMs, 5000);
     else if (arg === "--submit-sample-delays-ms") options.submitSampleDelaysMs = parseDelayList(next(), options.submitSampleDelaysMs);
     else if (arg === "--viewport") options.viewport = parseViewport(next());
     else if (arg === "--headed") options.headed = true;
     else if (arg === "--timeout-ms") options.timeoutMs = readPositiveInt(next(), options.timeoutMs, 120000);
     else if (arg === "--min-settled-delay-ms") options.minSettledDelayMs = readPositiveInt(next(), options.minSettledDelayMs, 10000);
+    else if (arg === "--diagnostic-samples") options.diagnosticSamples = true;
     else if (arg === "--json") options.json = true;
     else throw new Error(`unknown option: ${arg}`);
   }
@@ -217,6 +226,8 @@ function parseArgs(argv = process.argv.slice(2), env = process.env) {
   options.threadIds = options.threadIds.map((id) => String(id || "").trim()).filter(Boolean);
   options.submitThreadId = String(options.submitThreadId || "").trim();
   options.submitMessage = String(options.submitMessage || "Codex Mobile self-check test. Reply exactly: OK").slice(0, 500);
+  options.submitRepeat = readPositiveInt(options.submitRepeat, 1, 5);
+  options.submitIntervalMs = readNonNegativeInt(options.submitIntervalMs, 120, 5000);
   return options;
 }
 
@@ -667,6 +678,14 @@ function completedStatus(value) {
   return /completed|failed|cancel|error|interrupted/i.test(statusText(value));
 }
 
+function staleActiveStatus(value) {
+  return Boolean(value && typeof value === "object" && value.mobileStaleActiveTurn === true);
+}
+
+function staleActiveTurn(turn = {}) {
+  return Boolean(turn && (turn.mobileStaleActiveTurn === true || staleActiveStatus(turn.status)));
+}
+
 function inputTextValue(part = {}) {
   if (!part || typeof part !== "object") return "";
   return String(part.text || part.input_text || part.value || part.content || "");
@@ -729,6 +748,40 @@ function turnItemTimestampRange(items = []) {
   };
 }
 
+function expectedItemKind(item = {}) {
+  const type = String(item && item.type || "").trim();
+  if (!type) return "unknown";
+  if (/^agentMessage$/i.test(type)) return "agentMessage";
+  if (/^userMessage$/i.test(type)) return isInjectedThreadTaskCardItem(item) ? "threadTaskCard" : "userMessage";
+  if (/^plan$/i.test(type)) return "plan";
+  if (/^turnUsageSummary$/i.test(type)) return "turnUsageSummary";
+  if (/^reasoning$/i.test(type)) return "reasoning";
+  if (/^(commandExecution|fileChange|dynamicToolCall|mcpToolCall|collabAgentToolCall)$/i.test(type)) return "operation";
+  if (/^contextCompaction$/i.test(type)) return "contextCompaction";
+  if (/^turnDiagnostic$/i.test(type)) return "turnDiagnostic";
+  return "other";
+}
+
+function itemOrderShape(items = []) {
+  const kinds = (Array.isArray(items) ? items : []).map(expectedItemKind);
+  let assistantLikeSeen = false;
+  let userAfterAssistantLikeCount = 0;
+  for (const kind of kinds) {
+    if (kind === "userMessage") {
+      if (assistantLikeSeen) userAfterAssistantLikeCount += 1;
+      continue;
+    }
+    if (["agentMessage", "plan", "operation", "reasoning", "contextCompaction", "turnUsageSummary"].includes(kind)) {
+      assistantLikeSeen = true;
+    }
+  }
+  return {
+    itemKindSequence: kinds.slice(0, 60),
+    userAfterAssistantLikeCount,
+    userAtTail: kinds.length ? kinds[kinds.length - 1] === "userMessage" : false,
+  };
+}
+
 function duplicateLatestUserMessageEventCount(userItems = []) {
   const seen = new Set();
   let duplicates = 0;
@@ -759,6 +812,7 @@ function latestTurnExpectation(detail = {}) {
     expectedLatestUsageRequired: Boolean(latest && completedStatus(latest.status) && itemTypes.includes("turnUsageSummary")),
     expectedLatestItemCount: items.length,
     expectedLatestUserMessageCount: Math.max(0, userItems.length - injectedTaskCardUserItems.length),
+    expectedLatestAssistantMessageCount: itemTypes.filter((type) => /^(agentMessage|plan)$/i.test(type)).length,
     expectedLatestUserMessageDuplicateCount: duplicateLatestUserMessageEventCount(ordinaryUserItems),
     expectedLatestTaskCardUserMessageCount: injectedTaskCardUserItems.length,
     expectedLatestOperationItemCount: itemTypes.filter((type) => /^(commandExecution|fileChange|dynamicToolCall|mcpToolCall|collabAgentToolCall)$/i.test(type)).length,
@@ -776,10 +830,12 @@ function turnShapeExpectation(detail = {}) {
     const injectedTaskCardUserItems = userItems.filter(isInjectedThreadTaskCardItem);
     const itemTypes = items.map((item) => String(item && item.type || "unknown").trim() || "unknown");
     const timestampRange = turnItemTimestampRange(items);
+    const orderShape = itemOrderShape(items);
     return {
       index,
       turnHash: browserStableHash(turn && turn.id || ""),
       completed: completedStatus(turn && turn.status),
+      staleActive: staleActiveTurn(turn),
       expectedFirstTimestampMs: timestampRange.firstTimestampMs,
       expectedLastTimestampMs: timestampRange.lastTimestampMs,
       expectedItemCount: items.length,
@@ -788,8 +844,75 @@ function turnShapeExpectation(detail = {}) {
       expectedAssistantMessageCount: itemTypes.filter((type) => /^(agentMessage|plan)$/i.test(type)).length,
       expectedUsageRequired: Boolean(completedStatus(turn && turn.status) && itemTypes.includes("turnUsageSummary")),
       expectedTimestampItemCount: itemTypes.filter((type) => /^(userMessage|agentMessage|plan|turnDiagnostic)$/i.test(type)).length,
+      expectedItemKindSequence: orderShape.itemKindSequence,
+      expectedUserAfterAssistantLikeCount: orderShape.userAfterAssistantLikeCount,
+      expectedUserAtTail: orderShape.userAtTail,
     };
   });
+}
+
+function diagnosticTurnShape(row = {}) {
+  const source = row && typeof row === "object" ? row : {};
+  return {
+    index: Math.max(0, Math.trunc(Number(source.index || 0))),
+    turnHash: String(source.turnHash || "").slice(0, 32),
+    completed: source.completed === true,
+    expectedItemCount: Math.max(0, Math.trunc(Number(source.expectedItemCount || 0))),
+    itemCount: Math.max(0, Math.trunc(Number(source.itemCount || 0))),
+    expectedUserMessageCount: Math.max(0, Math.trunc(Number(source.expectedUserMessageCount || 0))),
+    userMessageCount: Math.max(0, Math.trunc(Number(source.userMessageCount || 0))),
+    expectedAssistantMessageCount: Math.max(0, Math.trunc(Number(source.expectedAssistantMessageCount || 0))),
+    assistantMessageCount: Math.max(0, Math.trunc(Number(source.assistantMessageCount || 0))),
+    expectedUserAfterAssistantLikeCount: Math.max(0, Math.trunc(Number(source.expectedUserAfterAssistantLikeCount || 0))),
+    userAfterAssistantLikeCount: Math.max(0, Math.trunc(Number(source.userAfterAssistantLikeCount || 0))),
+    expectedUserAtTail: source.expectedUserAtTail === true,
+    userAtTail: source.userAtTail === true,
+    expectedItemKindSequence: Array.isArray(source.expectedItemKindSequence) ? source.expectedItemKindSequence.slice(0, 40) : [],
+    itemKindSequence: Array.isArray(source.itemKindSequence) ? source.itemKindSequence.slice(0, 40) : [],
+  };
+}
+
+function boundedDiagnosticSamples(samples = []) {
+  return (Array.isArray(samples) ? samples : [])
+    .filter((sample) => sample && typeof sample === "object" && sample.probeKind !== "thread-list-interaction")
+    .slice(-12)
+    .map((sample) => ({
+      label: String(sample.label || "").slice(0, 80),
+      threadHash: String(sample.threadHash || "").slice(0, 32),
+      delayMs: Math.max(0, Math.trunc(Number(sample.delayMs || 0))),
+      latestTurnHash: String(sample.latestTurnHash || "").slice(0, 32),
+      latestTurnMatchesTarget: sample.latestTurnMatchesTarget === true,
+      latestTurnAtDomBottom: sample.latestTurnAtDomBottom === true,
+      expectedLatestItemCount: Math.max(0, Math.trunc(Number(sample.expectedLatestItemCount || 0))),
+      latestTurnItemCount: Math.max(0, Math.trunc(Number(sample.latestTurnItemCount || 0))),
+      expectedLatestUserMessageCount: Math.max(0, Math.trunc(Number(sample.expectedLatestUserMessageCount || 0))),
+      latestTurnUserMessageCount: Math.max(0, Math.trunc(Number(sample.latestTurnUserMessageCount || 0))),
+      expectedLatestAssistantMessageCount: Math.max(0, Math.trunc(Number(sample.expectedLatestAssistantMessageCount || 0))),
+      latestTurnAssistantMessageCount: Math.max(0, Math.trunc(Number(sample.latestTurnAssistantMessageCount || 0))),
+      expectedReadMode: boundedToken(sample.expectedReadMode || sample.readMode || "", "", 80),
+      expectedReadDecision: boundedToken(sample.expectedReadDecision || sample.readDecision || "", "", 80),
+      expectedPerformancePhase: boundedToken(sample.expectedPerformancePhase || sample.performancePhase || "", "", 80),
+      latestTurnOperationItemCount: Math.max(0, Math.trunc(Number(sample.latestTurnOperationItemCount || 0))),
+      latestTurnReasoningItemCount: Math.max(0, Math.trunc(Number(sample.latestTurnReasoningItemCount || 0))),
+      clientSubmissionCount: Math.max(0, Math.trunc(Number(sample.clientSubmissionCount || 0))),
+      returnLedgerCount: Math.max(0, Math.trunc(Number(sample.returnLedgerCount || 0))),
+      returnLedgerVisibleCount: Math.max(0, Math.trunc(Number(sample.returnLedgerVisibleCount || 0))),
+      returnLedgerProjectionFailedCount: Math.max(0, Math.trunc(Number(sample.returnLedgerProjectionFailedCount || 0))),
+      returnLedgerDeliveryFailedCount: Math.max(0, Math.trunc(Number(sample.returnLedgerDeliveryFailedCount || 0))),
+      returnLedgerIssueCodes: Array.isArray(sample.returnLedgerIssueCodes) ? sample.returnLedgerIssueCodes.slice(0, 8) : [],
+      returnReceiptVisibleCount: Math.max(0, Math.trunc(Number(sample.returnReceiptVisibleCount || 0))),
+      returnReceiptTurnVisibleCount: Math.max(0, Math.trunc(Number(sample.returnReceiptTurnVisibleCount || 0))),
+      returnReceiptTurnAtDomBottom: sample.returnReceiptTurnAtDomBottom === true,
+      returnFollowUpTaskCardCount: Math.max(0, Math.trunc(Number(sample.returnFollowUpTaskCardCount || 0))),
+      returnFollowUpBadgeVisibleCount: Math.max(0, Math.trunc(Number(sample.returnFollowUpBadgeVisibleCount || 0))),
+      latestTurnUserTextDuplicateCount: Math.max(0, Math.trunc(Number(sample.latestTurnUserTextDuplicateCount || 0))),
+      allUserEventDuplicateCount: Math.max(0, Math.trunc(Number(sample.allUserEventDuplicateCount || 0))),
+      pluginRefreshBannerSeededForThreadEntry: sample.pluginRefreshBannerSeededForThreadEntry === true,
+      pluginRefreshBannerVisibleAfterThreadEntry: sample.pluginRefreshBannerVisibleAfterThreadEntry === true,
+      latestTurnUserNodeDetails: Array.isArray(sample.latestTurnUserNodeDetails) ? sample.latestTurnUserNodeDetails.slice(0, 6) : [],
+      expectedTurnShapes: (Array.isArray(sample.expectedTurnShapes) ? sample.expectedTurnShapes : []).slice(-3).map(diagnosticTurnShape),
+      domTurnShapes: (Array.isArray(sample.domTurnShapes) ? sample.domTurnShapes : []).slice(-3).map(diagnosticTurnShape),
+    }));
 }
 
 function safeThreadPlan(ids = []) {
@@ -797,6 +920,11 @@ function safeThreadPlan(ids = []) {
     threadHash: shortHash(id),
     expectedTurnHashCount: 0,
     expectedLatestTurnHash: "",
+    returnLedgerCount: 0,
+    returnLedgerVisibleCount: 0,
+    returnLedgerProjectionFailedCount: 0,
+    returnLedgerDeliveryFailedCount: 0,
+    returnLedgerIssueCodes: [],
   }));
 }
 
@@ -806,6 +934,15 @@ async function loadThreadPlan(options, key, ids) {
     let expectedTurnHashes = [];
     let expectation = latestTurnExpectation();
     let expectedTurnShapes = [];
+    let expectedReadMode = "";
+    let expectedReadDecision = "";
+    let expectedPerformancePhase = "";
+    let returnLedgerCount = 0;
+    let returnLedgerVisibleCount = 0;
+    let returnLedgerProjectionFailedCount = 0;
+    let returnLedgerDeliveryFailedCount = 0;
+    let returnLedgerIssueCodes = [];
+    let returnFollowUpTaskCardCount = 0;
     try {
       const detail = await fetchJson(requestUrl(options, `/api/threads/${encodeURIComponent(id)}`, {
         mode: "recent",
@@ -814,6 +951,43 @@ async function loadThreadPlan(options, key, ids) {
       expectedTurnHashes = visibleTurnIds(detail).map(browserStableHash);
       expectation = latestTurnExpectation(detail);
       expectedTurnShapes = turnShapeExpectation(detail);
+      const thread = detailThread(detail);
+      const timings = thread
+        && thread.mobileDiagnostics
+        && thread.mobileDiagnostics.threadDetailTimings
+        && typeof thread.mobileDiagnostics.threadDetailTimings === "object"
+        ? thread.mobileDiagnostics.threadDetailTimings
+        : {};
+      expectedReadMode = boundedToken(thread && thread.mobileReadMode || "", "", 80);
+      expectedReadDecision = boundedToken(timings.readDecision || "", "", 80);
+      expectedPerformancePhase = boundedToken(timings.performancePhase || "", "", 80);
+      returnFollowUpTaskCardCount = Math.max(0, Number(thread && thread.returnFollowUpTaskCardCount || 0) || 0);
+      const returnLedger = Array.isArray(thread && thread.taskCardReturnLedger)
+        ? thread.taskCardReturnLedger
+        : [];
+      const ledgerStatusCounts = thread
+        && thread.taskCardReturnLedgerStatusCounts
+        && typeof thread.taskCardReturnLedgerStatusCounts === "object"
+        ? thread.taskCardReturnLedgerStatusCounts
+        : {};
+      const ledgerIssueSet = new Set(Array.isArray(thread && thread.taskCardReturnLedgerIssueCodes)
+        ? thread.taskCardReturnLedgerIssueCodes
+        : []);
+      returnLedgerCount = returnLedger.length;
+      returnLedgerVisibleCount = Math.max(0, Number(ledgerStatusCounts.return_visible || 0) || 0);
+      returnLedgerProjectionFailedCount = Math.max(0, Number(ledgerStatusCounts.return_projection_failed || 0) || 0);
+      returnLedgerDeliveryFailedCount = Math.max(0, Number(ledgerStatusCounts.return_delivery_failed || 0) || 0);
+      for (const entry of returnLedger) {
+        const status = boundedToken(entry && entry.status || "", "", 80);
+        if (status === "return_visible") returnLedgerVisibleCount += ledgerStatusCounts.return_visible ? 0 : 1;
+        if (status === "return_projection_failed") returnLedgerProjectionFailedCount += ledgerStatusCounts.return_projection_failed ? 0 : 1;
+        if (status === "return_delivery_failed") returnLedgerDeliveryFailedCount += ledgerStatusCounts.return_delivery_failed ? 0 : 1;
+        for (const code of Array.isArray(entry && entry.issueCodes) ? entry.issueCodes : []) {
+          const issueCode = boundedToken(code, "", 120);
+          if (issueCode) ledgerIssueSet.add(issueCode);
+        }
+      }
+      returnLedgerIssueCodes = Array.from(ledgerIssueSet).slice(0, 12);
     } catch (_) {
       expectedTurnHashes = [];
     }
@@ -826,12 +1000,22 @@ async function loadThreadPlan(options, key, ids) {
       expectedLatestUsageRequired: expectation.expectedLatestUsageRequired,
       expectedLatestItemCount: expectation.expectedLatestItemCount,
       expectedLatestUserMessageCount: expectation.expectedLatestUserMessageCount,
+      expectedLatestAssistantMessageCount: expectation.expectedLatestAssistantMessageCount,
       expectedLatestUserMessageDuplicateCount: expectation.expectedLatestUserMessageDuplicateCount,
       expectedLatestTaskCardUserMessageCount: expectation.expectedLatestTaskCardUserMessageCount,
       expectedLatestOperationItemCount: expectation.expectedLatestOperationItemCount,
       expectedLatestReasoningItemCount: expectation.expectedLatestReasoningItemCount,
       expectedLatestTimestampItemCount: expectation.expectedLatestTimestampItemCount,
       expectedTurnShapes,
+      expectedReadMode,
+      expectedReadDecision,
+      expectedPerformancePhase,
+      returnLedgerCount,
+      returnLedgerVisibleCount,
+      returnLedgerProjectionFailedCount,
+      returnLedgerDeliveryFailedCount,
+      returnLedgerIssueCodes,
+      returnFollowUpTaskCardCount,
     });
   }
   return plan;
@@ -857,9 +1041,18 @@ function snapshotInputForPlanEntry(entry, extra = {}) {
     expectedLatestUsageRequired: entry.expectedLatestUsageRequired,
     expectedLatestItemCount: entry.expectedLatestItemCount,
     expectedLatestUserMessageCount: entry.expectedLatestUserMessageCount,
+    expectedLatestAssistantMessageCount: entry.expectedLatestAssistantMessageCount,
     expectedLatestUserMessageDuplicateCount: entry.expectedLatestUserMessageDuplicateCount,
     expectedLatestTaskCardUserMessageCount: entry.expectedLatestTaskCardUserMessageCount,
     expectedTurnShapes: entry.expectedTurnShapes,
+    expectedReadMode: entry.expectedReadMode,
+    expectedReadDecision: entry.expectedReadDecision,
+    expectedPerformancePhase: entry.expectedPerformancePhase,
+    returnLedgerCount: entry.returnLedgerCount,
+    returnLedgerVisibleCount: entry.returnLedgerVisibleCount,
+    returnLedgerProjectionFailedCount: entry.returnLedgerProjectionFailedCount,
+    returnLedgerDeliveryFailedCount: entry.returnLedgerDeliveryFailedCount,
+    returnLedgerIssueCodes: entry.returnLedgerIssueCodes,
   }, extra);
 }
 
@@ -919,10 +1112,30 @@ function safeConsoleText(value) {
   const text = String(value || "").toLowerCase();
   if (text.includes("not allowed to load local resource")) return "local_resource_blocked";
   if (text.includes("failed to load resource")) return "resource_load_failed";
+  if (text.includes("typeerror") || text.includes("cannot read properties")) return "type_error";
+  if (text.includes("referenceerror") || text.includes("is not defined")) return "reference_error";
+  if (text.includes("syntaxerror")) return "syntax_error";
+  if (text.includes("rangeerror")) return "range_error";
   if (text.includes("uncaught")) return "uncaught";
   if (text.includes("error")) return "console_error";
   if (text.includes("warning")) return "console_warning";
   return "console_event";
+}
+
+function boundedException(details = {}) {
+  const exception = details && details.exception && typeof details.exception === "object"
+    ? details.exception
+    : {};
+  const raw = [
+    details && details.text,
+    exception.className,
+    exception.description,
+  ].filter(Boolean).join(" | ");
+  return {
+    code: safeConsoleText(raw || "exception"),
+    label: boundedToken(raw || "exception", "exception", 80),
+    detailHash: shortHash(raw || "exception"),
+  };
 }
 
 class CdpClient {
@@ -1123,23 +1336,139 @@ function browserInitScript(key, initialThreadId = "") {
 
 function startupProbeExpression(input = {}) {
   const expectedClientBuildId = String(input.clientBuildId || "").slice(0, 120);
+  const expectedShellCacheName = String(input.shellCacheName || "").slice(0, 120);
+  const expectedClassicShellCacheName = String(input.classicShellCacheName || "").slice(0, 120);
   return `
-    (() => {
+    (async () => {
       const visible = (node) => {
         if (!node || typeof node.getBoundingClientRect !== "function") return false;
         const style = typeof getComputedStyle === "function" ? getComputedStyle(node) : {};
         const rect = node.getBoundingClientRect();
         return style.display !== "none" && style.visibility !== "hidden" && rect.height > 0 && rect.width > 0;
       };
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
       let clientBuildId = "";
       try {
         clientBuildId = typeof CLIENT_BUILD_ID === "string" ? CLIENT_BUILD_ID : "";
       } catch (_) {}
+      const shellManifest = window.CODEX_MOBILE_SHELL_MANIFEST || {};
+      const appPreviewStatus = window.__CODEX_MOBILE_VITE_APP_PREVIEW__ || {};
+      const runtimeClientBuildUsesClassicCache = Boolean(${JSON.stringify(expectedClassicShellCacheName)} && clientBuildId.includes(${JSON.stringify(expectedClassicShellCacheName)}));
+      let updateStatusCurrentBuildIdentityPresent = false;
+      let updateStatusCurrentBuildIssueCodes = [];
+      let updateStatusCurrentClientBuildMatches = false;
+      let updateStatusCurrentShellCacheMatches = false;
+      let updateFullClientVersionPresent = false;
+      let updateFullClientVersionMatches = false;
+      let updateFullClientVersionUsesClassicCache = false;
+      let updateFullClientVersionErrorCode = "";
+      try {
+        const settingsRuntime = (() => {
+          const candidate = window.CodexSettingsRuntime || null;
+          if (candidate && typeof candidate.refreshAppUpdateStatus === "function") return candidate;
+          if (typeof window.refreshAppUpdateStatus === "function" || typeof window.renderUpdatePanel === "function") {
+            return {
+              refreshAppUpdateStatus: window.refreshAppUpdateStatus,
+              renderUpdatePanel: window.renderUpdatePanel,
+            };
+          }
+          return candidate;
+        })();
+        if (settingsRuntime && typeof settingsRuntime.refreshAppUpdateStatus === "function") {
+          const status = await settingsRuntime.refreshAppUpdateStatus({ force: true, silent: true });
+          const currentBuild = status && status.currentBuild && typeof status.currentBuild === "object"
+            ? status.currentBuild
+            : {};
+          const statusClientBuildId = String(currentBuild.clientBuildId || status && status.clientBuildId || "");
+          const statusShellCacheName = String(currentBuild.shellCacheName || status && status.shellCacheName || "");
+          const classicShellCacheName = String(currentBuild.classicShellCacheName || status && status.classicShellCacheName || "");
+          const statusIssueCodes = new Set();
+          for (const values of [currentBuild.issueCodes, status && status.currentBuildIssueCodes, status && status.issueCodes]) {
+            if (!Array.isArray(values)) continue;
+            values.forEach((value) => {
+              const code = String(value || "").replace(/[^a-z0-9_.:-]+/gi, "_").slice(0, 80);
+              if (code) statusIssueCodes.add(code);
+            });
+          }
+          updateStatusCurrentBuildIdentityPresent = Boolean(statusClientBuildId && statusShellCacheName);
+          updateStatusCurrentBuildIssueCodes = Array.from(statusIssueCodes).slice(0, 8);
+          updateStatusCurrentClientBuildMatches = ${JSON.stringify(expectedClientBuildId)}
+            ? statusClientBuildId === ${JSON.stringify(expectedClientBuildId)}
+            : Boolean(statusClientBuildId);
+          updateStatusCurrentShellCacheMatches = ${JSON.stringify(expectedShellCacheName)}
+            ? statusShellCacheName === ${JSON.stringify(expectedShellCacheName)}
+            : Boolean(statusShellCacheName);
+          if (window.state && typeof window.state === "object") window.state.updatePanelOpen = true;
+          if (typeof settingsRuntime.renderUpdatePanel === "function") settingsRuntime.renderUpdatePanel();
+          await wait(0);
+          const versionNode = document.querySelector(".update-version-card .update-row-meta");
+          const versionText = String(versionNode && versionNode.textContent || "");
+          updateFullClientVersionPresent = Boolean(versionText);
+          updateFullClientVersionMatches = ${JSON.stringify(expectedClientBuildId)}
+            ? versionText.includes(${JSON.stringify(expectedClientBuildId)})
+            : Boolean(versionText);
+          updateFullClientVersionUsesClassicCache = Boolean((classicShellCacheName || ${JSON.stringify(expectedClassicShellCacheName)}) && versionText.includes(classicShellCacheName || ${JSON.stringify(expectedClassicShellCacheName)}));
+          if (window.state && typeof window.state === "object") window.state.updatePanelOpen = false;
+          if (typeof settingsRuntime.renderUpdatePanel === "function") settingsRuntime.renderUpdatePanel();
+        } else {
+          updateFullClientVersionErrorCode = "settings_runtime_unavailable";
+        }
+      } catch (err) {
+        updateFullClientVersionErrorCode = String(err && err.message || "update_version_probe_failed").slice(0, 160);
+      }
+      if (!updateStatusCurrentBuildIdentityPresent) {
+        try {
+          const selfCheckKey = String(localStorage.getItem("codexMobileKey") || "");
+          if (selfCheckKey) {
+            const response = await fetch("/api/app-update/status?force=1", {
+              headers: { Authorization: "Bearer " + selfCheckKey },
+            });
+            if (response.ok) {
+              const status = await response.json();
+              const currentBuild = status && status.currentBuild && typeof status.currentBuild === "object"
+                ? status.currentBuild
+                : {};
+              const statusClientBuildId = String(currentBuild.clientBuildId || status && status.clientBuildId || "");
+              const statusShellCacheName = String(currentBuild.shellCacheName || status && status.shellCacheName || "");
+              const statusIssueCodes = new Set();
+              for (const values of [currentBuild.issueCodes, status && status.currentBuildIssueCodes, status && status.issueCodes]) {
+                if (!Array.isArray(values)) continue;
+                values.forEach((value) => {
+                  const code = String(value || "").replace(/[^a-z0-9_.:-]+/gi, "_").slice(0, 80);
+                  if (code) statusIssueCodes.add(code);
+                });
+              }
+              updateStatusCurrentBuildIdentityPresent = Boolean(statusClientBuildId && statusShellCacheName);
+              updateStatusCurrentBuildIssueCodes = Array.from(statusIssueCodes).slice(0, 8);
+              updateStatusCurrentClientBuildMatches = ${JSON.stringify(expectedClientBuildId)}
+                ? statusClientBuildId === ${JSON.stringify(expectedClientBuildId)}
+                : Boolean(statusClientBuildId);
+              updateStatusCurrentShellCacheMatches = ${JSON.stringify(expectedShellCacheName)}
+                ? statusShellCacheName === ${JSON.stringify(expectedShellCacheName)}
+                : Boolean(statusShellCacheName);
+              if (updateStatusCurrentBuildIdentityPresent) updateFullClientVersionErrorCode = "";
+            } else {
+              updateFullClientVersionErrorCode = "app_update_status_http_" + String(response.status || 0);
+            }
+          }
+        } catch (err) {
+          updateFullClientVersionErrorCode = String(err && err.message || "app_update_status_probe_failed").slice(0, 160);
+        }
+      }
       const app = document.getElementById("app");
       const login = document.getElementById("loginPanel");
       const bootRecovery = document.getElementById("bootRecovery");
       const hardRefreshButton = document.getElementById("hardRefreshButton");
       const pageRefreshPrompt = document.getElementById("pageRefreshPrompt");
+      const pluginRefreshPending = document.querySelector(".plugin-refresh-pending");
+      const connectionStateText = String(document.getElementById("connectionState") && document.getElementById("connectionState").textContent || "");
+      const pluginRefreshBannerVisibleAfterBuildSettled = Boolean(
+        ${JSON.stringify(expectedClientBuildId)}
+        && clientBuildId === ${JSON.stringify(expectedClientBuildId)}
+        && updateStatusCurrentClientBuildMatches
+        && updateStatusCurrentShellCacheMatches
+        && (visible(pluginRefreshPending) || /Refreshing plugin page/i.test(connectionStateText))
+      );
       const refreshFunctions = {
         refreshPageForNewBuild: typeof window.refreshPageForNewBuild === "function",
         clearAllShellCaches: typeof window.clearAllShellCaches === "function",
@@ -1155,6 +1484,228 @@ function startupProbeExpression(input = {}) {
         && window.navigator.serviceWorker
         && window.caches
       );
+      let settingsMobileViewportExpected = false;
+      let settingsPanelPresent = false;
+      let settingsPanelOverflowScrollable = false;
+      let settingsPanelTouchScrollReady = false;
+      let settingsPanelScrollable = false;
+      let settingsPanelScrollMoved = false;
+      let settingsRmwSectionPresent = false;
+      let settingsRmwFieldCount = 0;
+      let settingsRmwActionCount = 0;
+      let settingsRmwVisibleFieldCount = 0;
+      let settingsRmwVisibleActionCount = 0;
+      let settingsRmwReachableFieldCount = 0;
+      let settingsRmwReachableActionCount = 0;
+      let settingsRmwWorkspaceRowCount = 0;
+      let settingsRmwVisibleWorkspaceRowCount = 0;
+      let settingsRmwReachableWorkspaceRowCount = 0;
+      let settingsRmwPanelReachableOnMobile = true;
+      let settingsPanelVisualReadyOnMobile = true;
+      let settingsPanelVisibleHeight = 0;
+      let settingsPanelVisibleWidth = 0;
+      let settingsPanelRectHeight = 0;
+      let settingsPanelRectWidth = 0;
+      let settingsPanelLeft = 0;
+      let settingsPanelRight = 0;
+      let settingsInitialVisibleTitleCount = 0;
+      let settingsPrimarySiblingVisibleCount = 0;
+      let settingsPanelScrollHeight = 0;
+      let settingsPanelClientHeight = 0;
+      let settingsPanelVisualProbeWaitMs = 0;
+      try {
+        const settingsPanel = document.getElementById("themeSettingsPanel");
+        const settingsButton = document.getElementById("themeSettingsToggle");
+        const sidebar = document.getElementById("sidebar");
+        const openMenuButton = document.getElementById("openMenu");
+        settingsMobileViewportExpected = Boolean(
+          (window.matchMedia && (window.matchMedia("(max-width: 760px)").matches || window.matchMedia("(pointer: coarse)").matches))
+          || /Android/i.test(String(navigator && navigator.userAgent || ""))
+        );
+        settingsPanelPresent = Boolean(settingsPanel);
+        if (settingsPanel) {
+          const embeddedPrimaryBeforeOpen = document.documentElement.classList.contains("embed-hermes-primary");
+          const originalSidebarOpen = Boolean(sidebar && sidebar.classList.contains("open"));
+          const originalSidebarEdgeDragging = Boolean(sidebar && sidebar.classList.contains("edge-dragging"));
+          const originalSidebarTransform = sidebar && sidebar.style ? sidebar.style.transform || "" : "";
+          let openedSidebarForSettings = false;
+          if (settingsMobileViewportExpected && !embeddedPrimaryBeforeOpen && sidebar) {
+            if (!sidebar.classList.contains("open") && openMenuButton) openMenuButton.click();
+            openedSidebarForSettings = true;
+            await wait(0);
+            if (!sidebar.classList.contains("open")) sidebar.classList.add("open");
+            if (sidebar.style) sidebar.style.setProperty("transform", "translateX(0px)", "important");
+          }
+          const wasHidden = settingsPanel.classList.contains("hidden");
+          const originalTop = settingsPanel.scrollTop || 0;
+          const originalExpanded = settingsButton ? settingsButton.getAttribute("aria-expanded") : null;
+          const ensureSettingsPanelProbeOpen = () => {
+            settingsPanel.classList.remove("hidden");
+            if (settingsButton) settingsButton.setAttribute("aria-expanded", "true");
+            if (!openedSidebarForSettings || !sidebar) return;
+            sidebar.classList.add("open");
+            sidebar.classList.remove("edge-dragging");
+            if (sidebar.style) sidebar.style.setProperty("transform", "translateX(0px)", "important");
+          };
+          settingsPanel.scrollTop = 0;
+          ensureSettingsPanelProbeOpen();
+          await wait(0);
+          ensureSettingsPanelProbeOpen();
+          const style = typeof getComputedStyle === "function" ? getComputedStyle(settingsPanel) : {};
+          const titleNodes = Array.from(settingsPanel.querySelectorAll(".theme-settings-title"));
+          const rmwTitle = titleNodes
+            .find((node) => /Remote Managed Workspace/i.test(String(node && node.textContent || "")));
+          const rmwSettings = document.getElementById("remoteManagedWorkspaceSettings");
+          const rmwAnchor = rmwTitle || rmwSettings;
+          settingsRmwSectionPresent = Boolean(rmwAnchor);
+          const rmwFields = Array.from(settingsPanel.querySelectorAll("[data-rmw-field]"));
+          const rmwActions = Array.from(settingsPanel.querySelectorAll("[data-rmw-action]"));
+          const currentRmwWorkspaceRows = () => Array.from(settingsPanel.querySelectorAll(".remote-managed-workspace-item"))
+            .filter((node) => node && node.isConnected !== false);
+          let rmwWorkspaceRows = currentRmwWorkspaceRows();
+          settingsRmwFieldCount = rmwFields.length;
+          settingsRmwActionCount = rmwActions.length;
+          settingsRmwWorkspaceRowCount = rmwWorkspaceRows.length;
+          settingsPanelScrollHeight = Math.trunc(Number(settingsPanel.scrollHeight || 0));
+          settingsPanelClientHeight = Math.trunc(Number(settingsPanel.clientHeight || 0));
+          settingsPanelScrollable = settingsPanelScrollHeight > settingsPanelClientHeight + 4;
+          settingsPanelOverflowScrollable = /auto|scroll/i.test(String(style.overflowY || style.overflow || ""));
+          settingsPanelTouchScrollReady = /pan-y|auto|manipulation/i.test(String(style.touchAction || ""));
+          const viewportWidth = Math.max(0, Math.trunc(Number(window.innerWidth || document.documentElement.clientWidth || 0)));
+          const viewportHeight = Math.max(0, Math.trunc(Number(window.innerHeight || document.documentElement.clientHeight || 0)));
+          const minimumUsefulVisibleWidth = Math.min(280, Math.max(180, Math.round(viewportWidth * 0.58)));
+          const visibleWidthForRect = (rect) => Math.max(0, Math.trunc(
+            Math.min(Number(rect && rect.right || 0), viewportWidth)
+            - Math.max(Number(rect && rect.left || 0), 0)
+          ));
+          const visibleWithinViewport = (node) => {
+            if (!node || typeof node.getBoundingClientRect !== "function") return false;
+            const rect = node.getBoundingClientRect();
+            return rect.bottom > 0 && rect.top < viewportHeight && rect.right > 0 && rect.left < viewportWidth && rect.width > 0 && rect.height > 0;
+          };
+          if (settingsMobileViewportExpected && !embeddedPrimaryBeforeOpen) {
+            const startedAt = Date.now();
+            for (let attempt = 0; attempt < 8; attempt += 1) {
+              ensureSettingsPanelProbeOpen();
+              const rect = settingsPanel.getBoundingClientRect();
+              if (visibleWidthForRect(rect) >= minimumUsefulVisibleWidth) break;
+              await wait(40);
+            }
+            ensureSettingsPanelProbeOpen();
+            settingsPanelVisualProbeWaitMs = Math.max(0, Math.round(Date.now() - startedAt));
+          }
+          const initialPanelRect = settingsPanel.getBoundingClientRect();
+          settingsPanelRectHeight = Math.max(0, Math.trunc(Number(initialPanelRect.height || 0)));
+          settingsPanelRectWidth = Math.max(0, Math.trunc(Number(initialPanelRect.width || 0)));
+          settingsPanelLeft = Math.trunc(Number(initialPanelRect.left || 0));
+          settingsPanelRight = Math.trunc(Number(initialPanelRect.right || 0));
+          settingsPanelVisibleHeight = Math.max(0, Math.trunc(
+            Math.min(Number(initialPanelRect.bottom || 0), viewportHeight)
+            - Math.max(Number(initialPanelRect.top || 0), 0)
+          ));
+          settingsPanelVisibleWidth = Math.max(0, Math.trunc(
+            Math.min(Number(initialPanelRect.right || 0), viewportWidth)
+            - Math.max(Number(initialPanelRect.left || 0), 0)
+          ));
+          settingsInitialVisibleTitleCount = titleNodes.filter(visibleWithinViewport).length;
+          const embeddedPrimary = document.documentElement.classList.contains("embed-hermes-primary");
+          if (embeddedPrimary && settingsPanel.parentElement) {
+            const siblings = Array.from(settingsPanel.parentElement.children || []);
+            const startIndex = siblings.indexOf(settingsPanel);
+            settingsPrimarySiblingVisibleCount = siblings
+              .slice(Math.max(0, startIndex + 1))
+              .filter((node) => {
+                if (!node || node.hidden || node.classList && node.classList.contains("hidden")) return false;
+                const siblingStyle = typeof getComputedStyle === "function" ? getComputedStyle(node) : {};
+                if (siblingStyle.display === "none" || siblingStyle.visibility === "hidden") return false;
+                return visibleWithinViewport(node);
+              }).length;
+          }
+          const maxTop = Math.max(0, settingsPanel.scrollHeight - settingsPanel.clientHeight);
+          const anchorTop = rmwAnchor && Number.isFinite(Number(rmwAnchor.offsetTop)) ? Number(rmwAnchor.offsetTop) : maxTop;
+          const targetTop = Math.max(0, Math.min(maxTop, anchorTop - 12));
+          settingsPanel.scrollTop = targetTop;
+          await wait(0);
+          settingsPanelScrollMoved = maxTop <= 2 || Math.abs(Number(settingsPanel.scrollTop || 0) - targetTop) <= 2;
+          const visibleWithinPanel = (node, panelRect) => {
+            if (!node || typeof node.getBoundingClientRect !== "function") return false;
+            const rect = node.getBoundingClientRect();
+            return rect.bottom <= panelRect.bottom + 2 && rect.top >= panelRect.top - 2 && rect.width > 0 && rect.height > 0;
+          };
+          const scrollNodeIntoPanel = async (node, alignFraction = 0.18) => {
+            if (!node || typeof node.getBoundingClientRect !== "function") return false;
+            const beforePanelRect = settingsPanel.getBoundingClientRect();
+            const beforeRect = node.getBoundingClientRect();
+            const relativeTop = beforeRect.top - beforePanelRect.top + Number(settingsPanel.scrollTop || 0);
+            const target = Math.max(0, Math.min(maxTop, relativeTop - Math.round(settingsPanel.clientHeight * alignFraction)));
+            settingsPanel.scrollTop = target;
+            await wait(0);
+            const afterPanelRect = settingsPanel.getBoundingClientRect();
+            return visibleWithinPanel(node, afterPanelRect);
+          };
+          const panelRect = settingsPanel.getBoundingClientRect();
+          settingsRmwVisibleFieldCount = rmwFields.filter((node) => visibleWithinPanel(node, panelRect)).length;
+          settingsRmwVisibleActionCount = rmwActions.filter((node) => visibleWithinPanel(node, panelRect)).length;
+          rmwWorkspaceRows = currentRmwWorkspaceRows();
+          settingsRmwWorkspaceRowCount = rmwWorkspaceRows.length;
+          settingsRmwVisibleWorkspaceRowCount = rmwWorkspaceRows.filter((node) => visibleWithinPanel(node, panelRect)).length;
+          for (const field of rmwFields) {
+            if (await scrollNodeIntoPanel(field, 0.18)) settingsRmwReachableFieldCount += 1;
+          }
+          for (const action of rmwActions) {
+            if (await scrollNodeIntoPanel(action, 0.72)) settingsRmwReachableActionCount += 1;
+          }
+          rmwWorkspaceRows = currentRmwWorkspaceRows();
+          settingsRmwWorkspaceRowCount = Math.max(settingsRmwWorkspaceRowCount, rmwWorkspaceRows.length);
+          for (const row of rmwWorkspaceRows) {
+            if (await scrollNodeIntoPanel(row, 0.28)) settingsRmwReachableWorkspaceRowCount += 1;
+          }
+          if (settingsMobileViewportExpected) {
+            settingsRmwPanelReachableOnMobile = Boolean(
+              rmwAnchor
+              && settingsPanelOverflowScrollable
+              && settingsPanelTouchScrollReady
+              && settingsPanelScrollMoved
+              && settingsRmwReachableFieldCount >= 1
+              && settingsRmwReachableActionCount >= 3
+              && (settingsRmwWorkspaceRowCount === 0
+                || settingsRmwVisibleWorkspaceRowCount >= 1
+                || settingsRmwReachableWorkspaceRowCount >= 1)
+            );
+          }
+          if (settingsMobileViewportExpected) {
+            const minimumUsefulVisibleHeight = Math.min(480, Math.max(280, Math.round(viewportHeight * 0.62)));
+            settingsPanelVisualReadyOnMobile = Boolean(
+              settingsPanelVisibleHeight >= minimumUsefulVisibleHeight
+              && settingsPanelVisibleWidth >= minimumUsefulVisibleWidth
+              && settingsInitialVisibleTitleCount >= 2
+              && settingsPrimarySiblingVisibleCount === 0
+            );
+          }
+          settingsPanel.scrollTop = originalTop;
+          if (wasHidden) settingsPanel.classList.add("hidden");
+          if (settingsButton) {
+            if (originalExpanded === null) settingsButton.removeAttribute("aria-expanded");
+            else settingsButton.setAttribute("aria-expanded", originalExpanded);
+          }
+          if (openedSidebarForSettings && sidebar) {
+            sidebar.classList.toggle("open", originalSidebarOpen);
+            sidebar.classList.toggle("edge-dragging", originalSidebarEdgeDragging);
+            if (sidebar.style) {
+              if (originalSidebarTransform) sidebar.style.setProperty("transform", originalSidebarTransform);
+              else sidebar.style.removeProperty("transform");
+            }
+          }
+        } else if (settingsMobileViewportExpected) {
+          settingsRmwPanelReachableOnMobile = false;
+          settingsPanelVisualReadyOnMobile = false;
+        }
+      } catch (_) {
+        if (settingsMobileViewportExpected) {
+          settingsRmwPanelReachableOnMobile = false;
+          settingsPanelVisualReadyOnMobile = false;
+        }
+      }
       return {
         label: "startup",
         probeKind: "startup",
@@ -1168,6 +1719,9 @@ function startupProbeExpression(input = {}) {
         renderKeys: 0,
         clientBuildPresent: Boolean(clientBuildId),
         clientBuildMatches: ${JSON.stringify(expectedClientBuildId)} ? clientBuildId === ${JSON.stringify(expectedClientBuildId)} : Boolean(clientBuildId),
+        shellCacheMatches: ${JSON.stringify(expectedShellCacheName)} ? String(shellManifest.shellCacheName || "") === ${JSON.stringify(expectedShellCacheName)} : Boolean(shellManifest.shellCacheName),
+        appStartPending: appPreviewStatus.appStartPending === true,
+        runtimeClientBuildUsesClassicCache,
         composerRuntimeReady: Boolean(window.CodexComposerRuntime && typeof window.CodexComposerRuntime.createComposerRuntime === "function"),
         threadListRuntimeReady: Boolean(window.CodexThreadListRuntime && typeof window.CodexThreadListRuntime.createThreadListRuntime === "function"),
         threadTileRuntimeReady: Boolean(window.CodexThreadTileRuntime && typeof window.CodexThreadTileRuntime.createThreadTileRuntime === "function"),
@@ -1181,6 +1735,44 @@ function startupProbeExpression(input = {}) {
         shellRefreshResetServiceWorkerReady: refreshFunctions.resetPageShellServiceWorker,
         shellRefreshServiceWorkerCapable: Boolean(window.navigator && window.navigator.serviceWorker),
         shellRefreshCachesCapable: Boolean(window.caches),
+        updateStatusCurrentBuildIdentityPresent,
+        updateStatusCurrentBuildIssueCodes,
+        updateStatusCurrentClientBuildMatches,
+        updateStatusCurrentShellCacheMatches,
+        updateFullClientVersionPresent,
+        updateFullClientVersionMatches,
+        updateFullClientVersionUsesClassicCache,
+        updateFullClientVersionErrorCode,
+        pluginRefreshBannerVisibleAfterBuildSettled,
+        settingsMobileViewportExpected,
+        settingsPanelPresent,
+        settingsPanelOverflowScrollable,
+        settingsPanelTouchScrollReady,
+        settingsPanelScrollable,
+        settingsPanelScrollMoved,
+        settingsRmwSectionPresent,
+        settingsRmwFieldCount,
+        settingsRmwActionCount,
+        settingsRmwVisibleFieldCount,
+        settingsRmwVisibleActionCount,
+        settingsRmwReachableFieldCount,
+        settingsRmwReachableActionCount,
+        settingsRmwWorkspaceRowCount,
+        settingsRmwVisibleWorkspaceRowCount,
+        settingsRmwReachableWorkspaceRowCount,
+        settingsRmwPanelReachableOnMobile,
+        settingsPanelVisualReadyOnMobile,
+        settingsPanelVisibleHeight,
+        settingsPanelVisibleWidth,
+        settingsPanelRectHeight,
+        settingsPanelRectWidth,
+        settingsPanelLeft,
+        settingsPanelRight,
+        settingsPanelVisualProbeWaitMs,
+        settingsInitialVisibleTitleCount,
+        settingsPrimarySiblingVisibleCount,
+        settingsPanelScrollHeight,
+        settingsPanelClientHeight,
       };
     })();
   `;
@@ -1478,6 +2070,22 @@ function vitePreviewProbeExpression(input = {}) {
         esmCompatibilityReadyCount: Number(esmCompatibility.readyCount) || esmCompatibilityModules.filter((entry) => entry && entry.ready === true).length,
         esmCompatibilityExpectedCount: expectedEsmCompatibilityCount,
         esmCompatibilityGlobalsPublished,
+        esmCompatibilityNotReadyModuleIds: esmCompatibilityModules
+          .filter((entry) => entry && entry.ready !== true)
+          .map((entry) => String(entry && entry.id || ""))
+          .filter(Boolean)
+          .slice(0, 20),
+        esmCompatibilityNotReadyModules: esmCompatibilityModules
+          .filter((entry) => entry && entry.ready !== true)
+          .map((entry) => ({
+            id: String(entry && entry.id || ""),
+            expectedFunctionCount: Array.isArray(entry && entry.expectedFunctions) ? entry.expectedFunctions.length : 0,
+            exportedFunctionCount: Array.isArray(entry && entry.exportedFunctions) ? entry.exportedFunctions.length : 0,
+            globalPublished: entry && entry.globalPublished === true,
+            sample: entry && entry.sample && typeof entry.sample === "object" ? entry.sample : null,
+          }))
+          .filter((entry) => entry.id)
+          .slice(0, 8),
         deferredGroupCount,
         deferredLoaded,
       };
@@ -1497,7 +2105,7 @@ function analyzeVitePreviewProbe(sample = {}, runtimeSignals = {}) {
   if (!sample || sample.markerVisible !== true) append("vite_preview_marker_missing");
   if (sample && sample.stage !== "vite-shell-preview-html-v1") append("vite_preview_stage_mismatch");
   if (sample && sample.sourceBuildStage !== "vite-shell-artifact-contract-v1") append("vite_preview_source_build_stage_mismatch");
-  if (sample && sample.productionExecution !== "classic-script-fallback") append("vite_preview_execution_mode_mismatch");
+  if (sample && sample.productionExecution !== "vite-app-preview-native-esm") append("vite_preview_execution_mode_mismatch");
   if (sample && sample.clientBuildMatches !== true) append("vite_preview_client_build_mismatch");
   if (sample && sample.shellCacheMatches !== true) append("vite_preview_shell_cache_mismatch");
   if (sample && sample.moduleScriptMatchesPreview !== true) append("vite_preview_module_entry_missing");
@@ -1524,7 +2132,19 @@ function analyzeVitePreviewProbe(sample = {}, runtimeSignals = {}) {
   if (sample && sample.classicCompatibilityStartupGlobalContractReady !== true) {
     append("vite_preview_classic_startup_global_contract_mismatch");
   }
-  if (sample && sample.esmCompatibilityReady !== true) append("vite_preview_esm_compatibility_missing");
+  if (sample && sample.esmCompatibilityReady !== true) {
+    append("vite_preview_esm_compatibility_missing", "H2", {
+      owner: sample.esmCompatibilityOwner || "",
+      moduleCount: Number(sample.esmCompatibilityModuleCount) || 0,
+      readyCount: Number(sample.esmCompatibilityReadyCount) || 0,
+      notReadyModuleIds: Array.isArray(sample.esmCompatibilityNotReadyModuleIds)
+        ? sample.esmCompatibilityNotReadyModuleIds.slice(0, 20)
+        : [],
+      notReadyModules: Array.isArray(sample.esmCompatibilityNotReadyModules)
+        ? sample.esmCompatibilityNotReadyModules.slice(0, 8)
+        : [],
+    });
+  }
   if (sample && sample.deferredLoaded !== true) append("vite_preview_deferred_not_loaded");
   if ((runtimeSignals.exceptions || []).length) append("vite_preview_browser_exception");
   if ((runtimeSignals.consoleEvents || []).some((entry) => entry && entry.type === "error")) {
@@ -1539,9 +2159,83 @@ function analyzeVitePreviewProbe(sample = {}, runtimeSignals = {}) {
   };
 }
 
+function clientVersionSwitchConfirmed(sample = {}) {
+  return Boolean(
+    sample
+    && (clientVersionSwitchProbeDeferred(sample) || (
+      sample.updateStatusCurrentBuildIdentityPresent !== false
+      && sample.updateStatusCurrentClientBuildMatches === true
+      && sample.updateStatusCurrentShellCacheMatches === true
+      && sample.updateFullClientVersionPresent === true
+      && sample.updateFullClientVersionMatches === true
+      && sample.updateFullClientVersionUsesClassicCache !== true
+      && sample.runtimeClientBuildUsesClassicCache !== true
+      && sample.pluginRefreshBannerVisibleAfterBuildSettled !== true
+    ))
+  );
+}
+
+function clientVersionSwitchProbeDeferred(sample = {}) {
+  return Boolean(
+    sample
+    && sample.updateFullClientVersionErrorCode === "settings_runtime_unavailable"
+    && sample.appStartPending === true
+    && sample.clientBuildMatches === true
+    && sample.shellCacheMatches === true
+    && sample.runtimeClientBuildUsesClassicCache !== true
+    && sample.pluginRefreshBannerVisibleAfterBuildSettled !== true
+  );
+}
+
+function hasClientVersionSwitchProbe(sample = {}) {
+  return Boolean(sample && (
+    Object.prototype.hasOwnProperty.call(sample, "updateStatusCurrentBuildIdentityPresent")
+    || Object.prototype.hasOwnProperty.call(sample, "updateStatusCurrentBuildIssueCodes")
+    || Object.prototype.hasOwnProperty.call(sample, "updateStatusCurrentClientBuildMatches")
+    || Object.prototype.hasOwnProperty.call(sample, "updateStatusCurrentShellCacheMatches")
+    || Object.prototype.hasOwnProperty.call(sample, "updateFullClientVersionPresent")
+    || Object.prototype.hasOwnProperty.call(sample, "updateFullClientVersionMatches")
+    || Object.prototype.hasOwnProperty.call(sample, "updateFullClientVersionUsesClassicCache")
+    || Object.prototype.hasOwnProperty.call(sample, "updateFullClientVersionErrorCode")
+    || Object.prototype.hasOwnProperty.call(sample, "runtimeClientBuildUsesClassicCache")
+    || Object.prototype.hasOwnProperty.call(sample, "pluginRefreshBannerVisibleAfterBuildSettled")
+  ));
+}
+
+function clientVersionSwitchIssueDescriptors(sample = {}) {
+  const issues = [];
+  const issueCodes = Array.isArray(sample && sample.updateStatusCurrentBuildIssueCodes)
+    ? sample.updateStatusCurrentBuildIssueCodes
+    : [];
+  const reason = boundedToken(issueCodes[0] || sample.updateFullClientVersionErrorCode || "", "");
+  if (sample && sample.updateStatusCurrentBuildIdentityPresent === false && !clientVersionSwitchProbeDeferred(sample)) {
+    issues.push({
+      severity: "H2",
+      code: "app_update_current_build_identity_empty",
+      statusClientBuildMatches: sample.updateStatusCurrentClientBuildMatches === true,
+      statusShellCacheMatches: sample.updateStatusCurrentShellCacheMatches === true,
+      reason,
+    });
+  }
+  if (sample && sample.runtimeClientBuildUsesClassicCache === true) {
+    issues.push({
+      severity: "H2",
+      code: "client_runtime_stuck_on_classic_cache_identity",
+    });
+  }
+  if (sample && sample.pluginRefreshBannerVisibleAfterBuildSettled === true) {
+    issues.push({
+      severity: "H2",
+      code: "plugin_refresh_banner_stuck_after_build_settled",
+    });
+  }
+  return issues;
+}
+
 function viteAppPreviewProbeExpression(input = {}) {
   const expectedClientBuildId = String(input.clientBuildId || "");
   const expectedShellCacheName = String(input.shellCacheName || "");
+  const expectedClassicShellCacheName = String(input.classicShellCacheName || "");
   const expectEmbed = input.expectEmbed === true;
   const expectPluginSession = input.expectPluginSession === true;
   const expectRoot = input.expectRoot === true;
@@ -1746,6 +2440,117 @@ function viteAppPreviewProbeExpression(input = {}) {
         } catch (_) {}
         return result;
       })();
+      const currentClientBuildId = String(window.CLIENT_BUILD_ID || "");
+      const runtimeClientBuildUsesClassicCache = Boolean(${JSON.stringify(expectedClassicShellCacheName)} && currentClientBuildId.includes(${JSON.stringify(expectedClassicShellCacheName)}));
+      let updateStatusCurrentBuildIdentityPresent = false;
+      let updateStatusCurrentBuildIssueCodes = [];
+      let updateStatusCurrentClientBuildMatches = false;
+      let updateStatusCurrentShellCacheMatches = false;
+      let updateFullClientVersionPresent = false;
+      let updateFullClientVersionMatches = false;
+      let updateFullClientVersionUsesClassicCache = false;
+      let updateFullClientVersionErrorCode = "";
+      try {
+        const settingsRuntime = (() => {
+          const candidate = window.CodexSettingsRuntime || null;
+          if (candidate && typeof candidate.refreshAppUpdateStatus === "function") return candidate;
+          if (typeof window.refreshAppUpdateStatus === "function" || typeof window.renderUpdatePanel === "function") {
+            return {
+              refreshAppUpdateStatus: window.refreshAppUpdateStatus,
+              renderUpdatePanel: window.renderUpdatePanel,
+            };
+          }
+          return candidate;
+        })();
+        if (settingsRuntime && typeof settingsRuntime.refreshAppUpdateStatus === "function") {
+          const appUpdateStatus = await settingsRuntime.refreshAppUpdateStatus({ force: true, silent: true });
+          const currentBuild = appUpdateStatus && appUpdateStatus.currentBuild && typeof appUpdateStatus.currentBuild === "object"
+            ? appUpdateStatus.currentBuild
+            : {};
+          const statusClientBuildId = String(currentBuild.clientBuildId || appUpdateStatus && appUpdateStatus.clientBuildId || "");
+          const statusShellCacheName = String(currentBuild.shellCacheName || appUpdateStatus && appUpdateStatus.shellCacheName || "");
+          const classicShellCacheName = String(currentBuild.classicShellCacheName || appUpdateStatus && appUpdateStatus.classicShellCacheName || "");
+          const statusIssueCodes = new Set();
+          for (const values of [currentBuild.issueCodes, appUpdateStatus && appUpdateStatus.currentBuildIssueCodes, appUpdateStatus && appUpdateStatus.issueCodes]) {
+            if (!Array.isArray(values)) continue;
+            values.forEach((value) => {
+              const code = String(value || "").replace(/[^a-z0-9_.:-]+/gi, "_").slice(0, 80);
+              if (code) statusIssueCodes.add(code);
+            });
+          }
+          updateStatusCurrentBuildIdentityPresent = Boolean(statusClientBuildId && statusShellCacheName);
+          updateStatusCurrentBuildIssueCodes = Array.from(statusIssueCodes).slice(0, 8);
+          updateStatusCurrentClientBuildMatches = ${JSON.stringify(expectedClientBuildId)}
+            ? statusClientBuildId === ${JSON.stringify(expectedClientBuildId)}
+            : Boolean(statusClientBuildId);
+          updateStatusCurrentShellCacheMatches = ${JSON.stringify(expectedShellCacheName)}
+            ? statusShellCacheName === ${JSON.stringify(expectedShellCacheName)}
+            : Boolean(statusShellCacheName);
+          if (window.state && typeof window.state === "object") window.state.updatePanelOpen = true;
+          if (typeof settingsRuntime.renderUpdatePanel === "function") settingsRuntime.renderUpdatePanel();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          const versionNode = document.querySelector(".update-version-card .update-row-meta");
+          const versionText = String(versionNode && versionNode.textContent || "");
+          updateFullClientVersionPresent = Boolean(versionText);
+          updateFullClientVersionMatches = ${JSON.stringify(expectedClientBuildId)}
+            ? versionText.includes(${JSON.stringify(expectedClientBuildId)})
+            : Boolean(versionText);
+          updateFullClientVersionUsesClassicCache = Boolean((classicShellCacheName || ${JSON.stringify(expectedClassicShellCacheName)}) && versionText.includes(classicShellCacheName || ${JSON.stringify(expectedClassicShellCacheName)}));
+          if (window.state && typeof window.state === "object") window.state.updatePanelOpen = false;
+          if (typeof settingsRuntime.renderUpdatePanel === "function") settingsRuntime.renderUpdatePanel();
+        } else {
+          updateFullClientVersionErrorCode = "settings_runtime_unavailable";
+        }
+      } catch (err) {
+        updateFullClientVersionErrorCode = String(err && err.message || "update_version_probe_failed").slice(0, 160);
+      }
+      if (!updateStatusCurrentBuildIdentityPresent) {
+        try {
+          if (localStorageKey) {
+            const response = await fetch("/api/app-update/status?force=1", {
+              headers: { Authorization: "Bearer " + localStorageKey },
+            });
+            if (response.ok) {
+              const appUpdateStatus = await response.json();
+              const currentBuild = appUpdateStatus && appUpdateStatus.currentBuild && typeof appUpdateStatus.currentBuild === "object"
+                ? appUpdateStatus.currentBuild
+                : {};
+              const statusClientBuildId = String(currentBuild.clientBuildId || appUpdateStatus && appUpdateStatus.clientBuildId || "");
+              const statusShellCacheName = String(currentBuild.shellCacheName || appUpdateStatus && appUpdateStatus.shellCacheName || "");
+              const statusIssueCodes = new Set();
+              for (const values of [currentBuild.issueCodes, appUpdateStatus && appUpdateStatus.currentBuildIssueCodes, appUpdateStatus && appUpdateStatus.issueCodes]) {
+                if (!Array.isArray(values)) continue;
+                values.forEach((value) => {
+                  const code = String(value || "").replace(/[^a-z0-9_.:-]+/gi, "_").slice(0, 80);
+                  if (code) statusIssueCodes.add(code);
+                });
+              }
+              updateStatusCurrentBuildIdentityPresent = Boolean(statusClientBuildId && statusShellCacheName);
+              updateStatusCurrentBuildIssueCodes = Array.from(statusIssueCodes).slice(0, 8);
+              updateStatusCurrentClientBuildMatches = ${JSON.stringify(expectedClientBuildId)}
+                ? statusClientBuildId === ${JSON.stringify(expectedClientBuildId)}
+                : Boolean(statusClientBuildId);
+              updateStatusCurrentShellCacheMatches = ${JSON.stringify(expectedShellCacheName)}
+                ? statusShellCacheName === ${JSON.stringify(expectedShellCacheName)}
+                : Boolean(statusShellCacheName);
+              if (updateStatusCurrentBuildIdentityPresent) updateFullClientVersionErrorCode = "";
+            } else {
+              updateFullClientVersionErrorCode = "app_update_status_http_" + String(response.status || 0);
+            }
+          }
+        } catch (err) {
+          updateFullClientVersionErrorCode = String(err && err.message || "app_update_status_probe_failed").slice(0, 160);
+        }
+      }
+      const pluginRefreshPending = document.querySelector(".plugin-refresh-pending");
+      const connectionStateText = String(document.getElementById("connectionState") && document.getElementById("connectionState").textContent || "");
+      const pluginRefreshBannerVisibleAfterBuildSettled = Boolean(
+        ${JSON.stringify(expectedClientBuildId)}
+        && currentClientBuildId === ${JSON.stringify(expectedClientBuildId)}
+        && updateStatusCurrentClientBuildMatches
+        && updateStatusCurrentShellCacheMatches
+        && (visible(pluginRefreshPending) || /Refreshing plugin page/i.test(connectionStateText))
+      );
       return {
         label: "vite-app-preview",
         probeKind: "vite-app-preview",
@@ -1785,6 +2590,22 @@ function viteAppPreviewProbeExpression(input = {}) {
         esmCompatibilityReadyCount: Number(esmCompatibility.readyCount) || esmCompatibilityModules.filter((entry) => entry && entry.ready === true).length,
         esmCompatibilityExpectedCount: expectedEsmCompatibilityCount,
         esmCompatibilityGlobalsPublished,
+        esmCompatibilityNotReadyModuleIds: esmCompatibilityModules
+          .filter((entry) => entry && entry.ready !== true)
+          .map((entry) => String(entry && entry.id || ""))
+          .filter(Boolean)
+          .slice(0, 20),
+        esmCompatibilityNotReadyModules: esmCompatibilityModules
+          .filter((entry) => entry && entry.ready !== true)
+          .map((entry) => ({
+            id: String(entry && entry.id || ""),
+            expectedFunctionCount: Array.isArray(entry && entry.expectedFunctions) ? entry.expectedFunctions.length : 0,
+            exportedFunctionCount: Array.isArray(entry && entry.exportedFunctions) ? entry.exportedFunctions.length : 0,
+            globalPublished: entry && entry.globalPublished === true,
+            sample: entry && entry.sample && typeof entry.sample === "object" ? entry.sample : null,
+          }))
+          .filter((entry) => entry.id)
+          .slice(0, 8),
         loaderOk: loaderPromiseOk || loaderStatusOk,
         loaderTimedOut: loaderPromiseTimedOut && !loaderStatusOk,
         loaderPromiseOk,
@@ -1841,8 +2662,18 @@ function viteAppPreviewProbeExpression(input = {}) {
         pluginAppPreviewPathPreserved: window.location.pathname === "/vite-shell/app-preview.html",
         pluginStartupLoadingCleared: state.pluginStartupLoading === false,
         clientBuildPresent: Boolean(window.CLIENT_BUILD_ID),
-        clientBuildMatches: ${JSON.stringify(expectedClientBuildId)} ? window.CLIENT_BUILD_ID === ${JSON.stringify(expectedClientBuildId)} : Boolean(window.CLIENT_BUILD_ID),
+        clientBuildMatches: ${JSON.stringify(expectedClientBuildId)} ? currentClientBuildId === ${JSON.stringify(expectedClientBuildId)} : Boolean(currentClientBuildId),
+        runtimeClientBuildUsesClassicCache,
         shellCacheMatches: ${JSON.stringify(expectedShellCacheName)} ? String(shellManifest.shellCacheName || "") === ${JSON.stringify(expectedShellCacheName)} : Boolean(shellManifest.shellCacheName),
+        updateStatusCurrentBuildIdentityPresent,
+        updateStatusCurrentBuildIssueCodes,
+        updateStatusCurrentClientBuildMatches,
+        updateStatusCurrentShellCacheMatches,
+        updateFullClientVersionPresent,
+        updateFullClientVersionMatches,
+        updateFullClientVersionUsesClassicCache,
+        updateFullClientVersionErrorCode,
+        pluginRefreshBannerVisibleAfterBuildSettled,
         appVisible: visible(app),
         loginVisible: visible(login),
         bootRecoveryVisible: visible(bootRecovery),
@@ -1898,6 +2729,12 @@ function analyzeViteAppPreviewProbe(sample = {}, runtimeSignals = {}, options = 
       owner: sample.esmCompatibilityOwner || "",
       moduleCount: Number(sample.esmCompatibilityModuleCount) || 0,
       readyCount: Number(sample.esmCompatibilityReadyCount) || 0,
+      notReadyModuleIds: Array.isArray(sample.esmCompatibilityNotReadyModuleIds)
+        ? sample.esmCompatibilityNotReadyModuleIds.slice(0, 20)
+        : [],
+      notReadyModules: Array.isArray(sample.esmCompatibilityNotReadyModules)
+        ? sample.esmCompatibilityNotReadyModules.slice(0, 8)
+        : [],
     });
   }
   if (sample && Number(sample.loaderPlanExcludedEsmScriptCount || 0) > 0
@@ -1933,6 +2770,21 @@ function analyzeViteAppPreviewProbe(sample = {}, runtimeSignals = {}, options = 
   }
   if (sample && sample.clientBuildMatches !== true) append("vite_app_preview_client_build_mismatch");
   if (sample && sample.shellCacheMatches !== true) append("vite_app_preview_shell_cache_mismatch");
+  for (const issue of clientVersionSwitchIssueDescriptors(sample)) {
+    const { code, severity, ...extra } = issue;
+    append(code, severity, extra);
+  }
+  if (sample && hasClientVersionSwitchProbe(sample) && !clientVersionSwitchConfirmed(sample)) append("client_version_switch_not_confirmed", "H2", {
+    statusIdentityPresent: sample.updateStatusCurrentBuildIdentityPresent === true,
+    statusClientBuildMatches: sample.updateStatusCurrentClientBuildMatches === true,
+    statusShellCacheMatches: sample.updateStatusCurrentShellCacheMatches === true,
+    fullVersionPresent: sample.updateFullClientVersionPresent === true,
+    fullVersionMatches: sample.updateFullClientVersionMatches === true,
+    fullVersionUsesClassicCache: sample.updateFullClientVersionUsesClassicCache === true,
+    runtimeUsesClassicCache: sample.runtimeClientBuildUsesClassicCache === true,
+    refreshBannerStuck: sample.pluginRefreshBannerVisibleAfterBuildSettled === true,
+    reason: boundedToken(sample.updateFullClientVersionErrorCode, ""),
+  });
   const expectEmbed = options.expectEmbed === true || (sample && sample.embedExpected === true);
   const expectPluginSession = options.expectPluginSession === true || (sample && sample.pluginSessionExpected === true);
   const expectRoot = options.expectRoot === true || (sample && sample.rootPreviewExpected === true);
@@ -2125,12 +2977,37 @@ function threadListStressProbeExpression(label = "thread-list-stress", rounds = 
   `;
 }
 
-function openThreadExpression(threadId) {
+function openThreadExpression(threadId, input = {}) {
+  const expectedClientBuildId = String(input.clientBuildId || "");
   return `
     (async () => {
       const id = ${JSON.stringify(threadId)};
       try { localStorage.setItem("codexMobileCurrentThreadId", id); } catch (_) {}
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const visible = (node) => {
+        if (!node || typeof node.getBoundingClientRect !== "function") return false;
+        const style = typeof getComputedStyle === "function" ? getComputedStyle(node) : {};
+        const rect = node.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.height > 0 && rect.width > 0;
+      };
+      const refreshBannerVisible = () => {
+        const pluginRefreshPending = document.querySelector(".plugin-refresh-pending");
+        const connectionText = String(document.getElementById("connectionState") && document.getElementById("connectionState").textContent || "");
+        return Boolean(visible(pluginRefreshPending) || /Refreshing plugin page/i.test(connectionText));
+      };
+      const seedRefreshNotice = () => {
+        const expectedBuild = ${JSON.stringify(expectedClientBuildId)};
+        const currentBuild = String(window.CLIENT_BUILD_ID || "");
+        if (!expectedBuild || currentBuild !== expectedBuild) return false;
+        const sourceState = typeof state !== "undefined" ? state : window.state;
+        if (!sourceState || typeof sourceState !== "object") return false;
+        sourceState.pluginRefreshPendingReason = "server_build_changed";
+        sourceState.pluginRefreshPendingNotice = "Refreshing plugin page for a new Mobile Web build...";
+        sourceState.pluginRefreshRequestReason = "server_build_changed";
+        sourceState.pluginRefreshRequestSignature = "self-check-thread-entry-seed";
+        return true;
+      };
+      const seededThreadEntryRefreshBanner = seedRefreshNotice();
       const confirmedOpen = () => {
         try {
           const sourceState = typeof state !== "undefined" ? state : window.state;
@@ -2155,20 +3032,28 @@ function openThreadExpression(threadId) {
         }
         return false;
       };
-      if (clickCard() && await waitForConfirmedOpen()) return { ok: true, method: "thread-card" };
+      const finish = async (ok, method) => {
+        await wait(0);
+        window.__codexSelfCheckThreadEntryRefreshBanner = {
+          seeded: seededThreadEntryRefreshBanner,
+          visibleAfterOpen: Boolean(seededThreadEntryRefreshBanner && refreshBannerVisible()),
+        };
+        return { ok, method };
+      };
+      if (clickCard() && await waitForConfirmedOpen()) return finish(true, "thread-card");
       if (typeof window.loadThread === "function") {
         try {
           await window.loadThread(id, { source: "browser-runtime-self-check" });
-          return { ok: true, method: "loadThread" };
+          return finish(true, "loadThread");
         } catch (_) {
-          return { ok: false, method: "loadThread-failed" };
+          return finish(false, "loadThread-failed");
         }
       }
       for (let index = 0; index < 20; index += 1) {
         await wait(100);
-        if (clickCard() && await waitForConfirmedOpen()) return { ok: true, method: "thread-card-delayed" };
+        if (clickCard() && await waitForConfirmedOpen()) return finish(true, "thread-card-delayed");
       }
-      return { ok: false, method: "unavailable" };
+      return finish(false, "unavailable");
     })();
   `;
 }
@@ -2181,9 +3066,18 @@ function snapshotExpression(input = {}) {
   const expectedLatestUsageRequired = Boolean(input.expectedLatestUsageRequired);
   const expectedLatestItemCount = Math.max(0, Number(input.expectedLatestItemCount || 0) || 0);
   const expectedLatestUserMessageCount = Math.max(0, Number(input.expectedLatestUserMessageCount || 0) || 0);
+  const expectedLatestAssistantMessageCount = Math.max(0, Number(input.expectedLatestAssistantMessageCount || 0) || 0);
   const expectedLatestUserMessageDuplicateCount = Math.max(0, Number(input.expectedLatestUserMessageDuplicateCount || 0) || 0);
   const expectedLatestTaskCardUserMessageCount = Math.max(0, Number(input.expectedLatestTaskCardUserMessageCount || 0) || 0);
   const expectedTurnShapes = Array.isArray(input.expectedTurnShapes) ? input.expectedTurnShapes.slice(-20) : [];
+  const expectedReadMode = boundedToken(input.expectedReadMode || "", "", 80);
+  const expectedReadDecision = boundedToken(input.expectedReadDecision || "", "", 80);
+  const expectedPerformancePhase = boundedToken(input.expectedPerformancePhase || "", "", 80);
+  const returnLedgerCount = Math.max(0, Number(input.returnLedgerCount || 0) || 0);
+  const returnLedgerVisibleCount = Math.max(0, Number(input.returnLedgerVisibleCount || 0) || 0);
+  const returnLedgerProjectionFailedCount = Math.max(0, Number(input.returnLedgerProjectionFailedCount || 0) || 0);
+  const returnLedgerDeliveryFailedCount = Math.max(0, Number(input.returnLedgerDeliveryFailedCount || 0) || 0);
+  const returnLedgerIssueCodes = Array.isArray(input.returnLedgerIssueCodes) ? input.returnLedgerIssueCodes.slice(0, 12) : [];
   const dynamicThreadPlan = input.dynamicThreadPlan === true;
   const label = String(input.label || "");
   const delayMs = Math.max(0, Number(input.delayMs || 0) || 0);
@@ -2199,9 +3093,18 @@ function snapshotExpression(input = {}) {
       const expectedLatestUsageRequired = ${JSON.stringify(expectedLatestUsageRequired)};
       const expectedLatestItemCount = ${JSON.stringify(expectedLatestItemCount)};
       const expectedLatestUserMessageCount = ${JSON.stringify(expectedLatestUserMessageCount)};
+      const expectedLatestAssistantMessageCount = ${JSON.stringify(expectedLatestAssistantMessageCount)};
       const expectedLatestUserMessageDuplicateCount = ${JSON.stringify(expectedLatestUserMessageDuplicateCount)};
       const expectedLatestTaskCardUserMessageCount = ${JSON.stringify(expectedLatestTaskCardUserMessageCount)};
       const expectedTurnShapes = ${JSON.stringify(expectedTurnShapes)};
+      const expectedReadMode = ${JSON.stringify(expectedReadMode)};
+      const expectedReadDecision = ${JSON.stringify(expectedReadDecision)};
+      const expectedPerformancePhase = ${JSON.stringify(expectedPerformancePhase)};
+      const returnLedgerCount = ${JSON.stringify(returnLedgerCount)};
+      const returnLedgerVisibleCount = ${JSON.stringify(returnLedgerVisibleCount)};
+      const returnLedgerProjectionFailedCount = ${JSON.stringify(returnLedgerProjectionFailedCount)};
+      const returnLedgerDeliveryFailedCount = ${JSON.stringify(returnLedgerDeliveryFailedCount)};
+      const returnLedgerIssueCodes = ${JSON.stringify(returnLedgerIssueCodes)};
       const dynamicThreadPlan = ${JSON.stringify(dynamicThreadPlan)};
       const label = ${JSON.stringify(label)};
       const delayMs = ${JSON.stringify(delayMs)};
@@ -2280,6 +3183,7 @@ function snapshotExpression(input = {}) {
       const latestTurnNode = latestTurnIndex >= 0 ? turnNodes[latestTurnIndex] : null;
       const latestTurnHash = latestTurnIndex >= 0 ? String(turnHashes[latestTurnIndex] || "") : "";
       const actualLatestTurnNode = turnNodes.length ? turnNodes[turnNodes.length - 1] : null;
+      const actualLatestTurnIsReturnReceipt = Boolean(actualLatestTurnNode && actualLatestTurnNode.matches && actualLatestTurnNode.matches("article.turn[data-task-card-return-turn]"));
       const actualLatestUserNodes = actualLatestTurnNode ? Array.from(actualLatestTurnNode.querySelectorAll(".item.userMessage")) : [];
       const actualLatestTaskCardNodes = actualLatestTurnNode ? Array.from(actualLatestTurnNode.querySelectorAll(".item.thread-task-card-injected[data-thread-task-card-item]")) : [];
       const actualLatestAssistantNodes = actualLatestTurnNode ? Array.from(actualLatestTurnNode.querySelectorAll(".item.agentMessage, .item.plan")) : [];
@@ -2353,9 +3257,11 @@ function snapshotExpression(input = {}) {
       const allUserEventHashes = Array.from(renderRoot.querySelectorAll(".item.userMessage"))
         .map((node) => {
           const submissionHash = String(node.getAttribute("data-client-submission-hash") || "").trim();
-          if (submissionHash) return "submission:" + submissionHash;
           const body = node.querySelector(".item-body") || node;
           const text = String(body.textContent || "").replace(/\\s+/g, " ").trim();
+          const textHash = text ? stableHash(text) : "";
+          if (submissionHash && textHash) return "submission-text:" + submissionHash + ":" + textHash;
+          if (submissionHash) return "submission:" + submissionHash;
           if (!text) return "";
           const timestamp = node.querySelector(".item-timestamp");
           const datetime = String(timestamp && timestamp.getAttribute("datetime") || "").trim();
@@ -2384,11 +3290,31 @@ function snapshotExpression(input = {}) {
           const closestTurn = node.closest("article.turn[data-turn], article.thread-tile-turn[data-thread-tile-turn]");
           return closestTurn === turnNode;
         });
+      const domItemKind = (node) => {
+        const className = String(node && node.className || "");
+        if (className.includes("userMessage")) return "userMessage";
+        if (className.includes("agentMessage")) return "agentMessage";
+        if (className.includes("plan")) return "plan";
+        if (className.includes("turnUsageSummary")) return "turnUsageSummary";
+        if (className.includes("reasoning")) return "reasoning";
+        if (className.includes("thread-task-card-injected")) return "threadTaskCard";
+        if (className.includes("commandExecution")
+          || className.includes("fileChange")
+          || className.includes("dynamicToolCall")
+          || className.includes("mcpToolCall")
+          || className.includes("collabAgentToolCall")) return "operation";
+        if (className.includes("contextCompaction")) return "contextCompaction";
+        if (className.includes("turnDiagnostic")) return "turnDiagnostic";
+        return "other";
+      };
       const domTurnShapes = turnNodes.slice(-20).map((turnNode, index) => {
         const nodes = itemNodesForTurn(turnNode);
         const timestampRange = timestampRangeForNodes(nodes);
         const usageIndexes = [];
         const userIndexes = [];
+        const itemKindSequence = [];
+        let assistantLikeSeen = false;
+        let userAfterAssistantLikeCount = 0;
         let assistantMessageCount = 0;
         let taskCardUserMessageCount = 0;
         let timestampExpectedItems = 0;
@@ -2396,6 +3322,13 @@ function snapshotExpression(input = {}) {
         const timestampMissingKindCounts = {};
         nodes.forEach((node, itemIndex) => {
           const className = String(node.className || "");
+          const kind = domItemKind(node);
+          itemKindSequence.push(kind);
+          if (kind === "userMessage") {
+            if (assistantLikeSeen) userAfterAssistantLikeCount += 1;
+          } else if (["agentMessage", "plan", "operation", "reasoning", "contextCompaction", "turnUsageSummary"].includes(kind)) {
+            assistantLikeSeen = true;
+          }
           if (className.includes("turnUsageSummary")) usageIndexes.push(itemIndex);
           if (className.includes("userMessage")) userIndexes.push(itemIndex);
           if (className.includes("thread-task-card-injected")) taskCardUserMessageCount += 1;
@@ -2428,6 +3361,9 @@ function snapshotExpression(input = {}) {
           timestampMissingItems,
           timestampMissingKindCounts,
           userAfterUsageCount: lastUsageIndex >= 0 ? userIndexes.filter((itemIndex) => itemIndex > lastUsageIndex).length : 0,
+          userAfterAssistantLikeCount,
+          userAtTail: itemKindSequence.length ? itemKindSequence[itemKindSequence.length - 1] === "userMessage" : false,
+          itemKindSequence: itemKindSequence.slice(0, 60),
         };
       });
       const imageFigures = Array.from(renderRoot.querySelectorAll(".input-image, .image-view, .markdown-image"));
@@ -2492,6 +3428,10 @@ function snapshotExpression(input = {}) {
       const turnTimerDetail = turnTimer ? turnTimer.querySelector(".turn-timer-detail") : null;
       const connectionStateKind = safeStatusKind(connectionState && connectionState.textContent);
       const turnTimerDetailKind = safeStatusKind(turnTimerDetail && turnTimerDetail.textContent);
+      const threadEntryRefreshBanner = window.__codexSelfCheckThreadEntryRefreshBanner
+        && typeof window.__codexSelfCheckThreadEntryRefreshBanner === "object"
+        ? window.__codexSelfCheckThreadEntryRefreshBanner
+        : {};
       const currentLiveTurnValue = (() => {
         try {
           if (typeof currentLiveTurn === "function") return currentLiveTurn();
@@ -2538,6 +3478,15 @@ function snapshotExpression(input = {}) {
       const submittedKey = submittedNode
         ? String(submittedNode.getAttribute("data-client-submission-hash") || "") + "|" + String(submittedNode.getAttribute("data-render-key") || "")
         : "";
+      const bottomThreadTaskCardNodes = latestTurnNode
+        ? Array.from(renderRoot.querySelectorAll(".thread-task-card-stack .thread-task-card[data-task-card]"))
+          .filter((node) => Boolean(latestTurnNode.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING))
+        : [];
+      const bottomThreadTaskCardReturnNodes = bottomThreadTaskCardNodes.filter((node) => {
+        const method = node.querySelector(".approval-method");
+        const text = String(method && method.textContent || "").replace(/\\s+/g, " ").trim();
+        return !node.classList.contains("pending") && /^Return:/i.test(text);
+      });
       return {
         label,
         threadHash,
@@ -2556,6 +3505,8 @@ function snapshotExpression(input = {}) {
         latestTurnMatchesTarget: latestMatches,
         expectedLatestTurnHash,
         connectionStateKind,
+        pluginRefreshBannerSeededForThreadEntry: threadEntryRefreshBanner.seeded === true,
+        pluginRefreshBannerVisibleAfterThreadEntry: threadEntryRefreshBanner.visibleAfterOpen === true,
         turnTimerVisible: Boolean(turnTimer && turnTimer.classList && turnTimer.classList.contains("visible")),
         turnTimerActive: Boolean(turnTimer && turnTimer.classList && turnTimer.classList.contains("active")),
         turnTimerSettled: Boolean(turnTimer && turnTimer.classList && turnTimer.classList.contains("settled")),
@@ -2567,8 +3518,21 @@ function snapshotExpression(input = {}) {
         expectedLatestUsageRequired,
         expectedLatestItemCount,
         expectedLatestUserMessageCount,
+        expectedLatestAssistantMessageCount,
         expectedLatestUserMessageDuplicateCount,
         expectedLatestTaskCardUserMessageCount,
+        expectedReadMode,
+        expectedReadDecision,
+        expectedPerformancePhase,
+        returnLedgerCount,
+        returnLedgerVisibleCount,
+        returnLedgerProjectionFailedCount,
+        returnLedgerDeliveryFailedCount,
+        returnLedgerIssueCodes,
+        returnReceiptVisibleCount: document.querySelectorAll("[data-task-card-return-receipt]").length,
+        returnReceiptTurnVisibleCount: document.querySelectorAll("article.turn[data-task-card-return-turn] [data-task-card-return-receipt]").length,
+        returnReceiptTurnAtDomBottom: actualLatestTurnIsReturnReceipt,
+        returnFollowUpBadgeVisibleCount: document.querySelectorAll(".thread-card-return-badge.follow-up").length,
         dynamicThreadPlan,
         expectedTurnShapes,
         domTurnShapes,
@@ -2590,6 +3554,8 @@ function snapshotExpression(input = {}) {
         latestTurnUserNodeDetails: latestUserNodeDetails,
         latestTurnAssistantTextDuplicateCount: duplicateCount(latestAssistantTextHashes),
         latestTurnUsageCount: latestUsageCount,
+        bottomThreadTaskCardCount: bottomThreadTaskCardNodes.length,
+        bottomThreadTaskCardReturnCount: bottomThreadTaskCardReturnNodes.length,
         latestTimestampExpectedItems: timestampExpectedNodes.length,
         latestTimestampMissingItems: timestampMissingNodes.length,
         latestTimestampMissingKindCounts: countTimestampMissingKinds(timestampMissingNodes),
@@ -2773,6 +3739,28 @@ function applyStartupGateIssues(report, startupSample = {}, staticShell = {}) {
       surface: "browser-runtime",
     });
   }
+  for (const issue of clientVersionSwitchIssueDescriptors(startupSample)) {
+    appendBrowserIssue(report, {
+      surface: "browser-runtime",
+      ...issue,
+    });
+  }
+  if (startupSample && hasClientVersionSwitchProbe(startupSample) && !clientVersionSwitchConfirmed(startupSample)) {
+    appendBrowserIssue(report, {
+      severity: "H2",
+      code: "client_version_switch_not_confirmed",
+      surface: "browser-runtime",
+      statusIdentityPresent: startupSample.updateStatusCurrentBuildIdentityPresent === true,
+      statusClientBuildMatches: startupSample.updateStatusCurrentClientBuildMatches === true,
+      statusShellCacheMatches: startupSample.updateStatusCurrentShellCacheMatches === true,
+      fullVersionPresent: startupSample.updateFullClientVersionPresent === true,
+      fullVersionMatches: startupSample.updateFullClientVersionMatches === true,
+      fullVersionUsesClassicCache: startupSample.updateFullClientVersionUsesClassicCache === true,
+      runtimeUsesClassicCache: startupSample.runtimeClientBuildUsesClassicCache === true,
+      refreshBannerStuck: startupSample.pluginRefreshBannerVisibleAfterBuildSettled === true,
+      reason: boundedToken(startupSample.updateFullClientVersionErrorCode, ""),
+    });
+  }
   const runtimeReady = startupSample
     && startupSample.composerRuntimeReady === true
     && startupSample.threadListRuntimeReady === true
@@ -2849,6 +3837,7 @@ async function run(options = parseArgs(), deps = {}) {
       version: String(config && config.version || "").slice(0, 40),
       clientBuildId: String(config && config.clientBuildId || "").slice(0, 120),
       shellCacheName: String(config && config.shellCacheName || "").slice(0, 120),
+      classicShellCacheName: String(config && config.classicShellCacheName || "").slice(0, 120),
       defaultShellMode: String(config && config.defaultShellMode || "").slice(0, 40),
       authRequired: config && config.authRequired === true,
     },
@@ -2862,11 +3851,22 @@ async function run(options = parseArgs(), deps = {}) {
       expectedLatestUsageRequired: Boolean(entry.expectedLatestUsageRequired),
       expectedLatestItemCount: entry.expectedLatestItemCount,
       expectedLatestUserMessageCount: entry.expectedLatestUserMessageCount,
+      expectedLatestAssistantMessageCount: entry.expectedLatestAssistantMessageCount,
       expectedLatestUserMessageDuplicateCount: entry.expectedLatestUserMessageDuplicateCount,
       expectedLatestTaskCardUserMessageCount: entry.expectedLatestTaskCardUserMessageCount,
       expectedLatestOperationItemCount: entry.expectedLatestOperationItemCount,
       expectedLatestReasoningItemCount: entry.expectedLatestReasoningItemCount,
       expectedLatestTimestampItemCount: entry.expectedLatestTimestampItemCount,
+      returnLedgerCount: entry.returnLedgerCount,
+      returnLedgerVisibleCount: entry.returnLedgerVisibleCount,
+      returnLedgerProjectionFailedCount: entry.returnLedgerProjectionFailedCount,
+      returnLedgerDeliveryFailedCount: entry.returnLedgerDeliveryFailedCount,
+      returnLedgerIssueCodes: Array.isArray(entry.returnLedgerIssueCodes) ? entry.returnLedgerIssueCodes.slice(0, 8) : [],
+      returnReceiptVisibleCount: entry.returnReceiptVisibleCount,
+      returnReceiptTurnVisibleCount: entry.returnReceiptTurnVisibleCount,
+      returnReceiptTurnAtDomBottom: entry.returnReceiptTurnAtDomBottom === true,
+      returnFollowUpTaskCardCount: entry.returnFollowUpTaskCardCount,
+      returnFollowUpBadgeVisibleCount: entry.returnFollowUpBadgeVisibleCount,
     })),
     browserReport: null,
     vitePreview: null,
@@ -2879,6 +3879,8 @@ async function run(options = parseArgs(), deps = {}) {
       ok: false,
       targetThreadHash: "",
       messageHash: shortHash(options.submitMessage),
+      requestedCount: options.submitRepeat,
+      successCount: 0,
       code: "not_run",
     } : null,
   };
@@ -2937,9 +3939,7 @@ async function run(options = parseArgs(), deps = {}) {
           });
         }
       } else if (message.method === "Runtime.exceptionThrown") {
-        exceptions.push({
-          code: safeConsoleText(message.params && message.params.exceptionDetails && message.params.exceptionDetails.text || "exception"),
-        });
+        exceptions.push(boundedException(message.params && message.params.exceptionDetails || {}));
       }
     });
     await cdp.send("Page.enable");
@@ -2995,7 +3995,8 @@ async function run(options = parseArgs(), deps = {}) {
       }));
       if (appPreviewOnly) samples.push(report.viteAppPreview);
     }
-    const startupSample = (options.vitePreviewOnly || appPreviewOnly) ? null : await evaluate(cdp, startupProbeExpression(report.publicConfig), options.timeoutMs).catch((err) => ({
+    const shouldRunStartupProbe = !options.vitePreviewOnly && (!appPreviewOnly || options.startupOnly);
+    const startupSample = !shouldRunStartupProbe ? null : await evaluate(cdp, startupProbeExpression(report.publicConfig), options.timeoutMs).catch((err) => ({
       label: "startup",
       probeKind: "startup",
       appVisible: false,
@@ -3036,6 +4037,20 @@ async function run(options = parseArgs(), deps = {}) {
           && startupSample.threadTileRuntimeReady === true,
         loadThreadReady: startupSample.loadThreadReady === true,
         shellRefreshReady: startupSample.shellRefreshContractReady === true,
+        settingsPanelVisualReadyOnMobile: startupSample.settingsPanelVisualReadyOnMobile === true,
+        settingsRmwPanelReachableOnMobile: startupSample.settingsRmwPanelReachableOnMobile === true,
+        settingsPanelVisibleHeight: Math.max(0, Math.trunc(Number(startupSample.settingsPanelVisibleHeight || 0))),
+        settingsPanelVisibleWidth: Math.max(0, Math.trunc(Number(startupSample.settingsPanelVisibleWidth || 0))),
+        settingsPanelLeft: Math.trunc(Number(startupSample.settingsPanelLeft || 0)),
+        settingsPanelRight: Math.trunc(Number(startupSample.settingsPanelRight || 0)),
+        settingsPanelClientHeight: Math.max(0, Math.trunc(Number(startupSample.settingsPanelClientHeight || 0))),
+        settingsPanelScrollHeight: Math.max(0, Math.trunc(Number(startupSample.settingsPanelScrollHeight || 0))),
+        settingsInitialVisibleTitleCount: Math.max(0, Math.trunc(Number(startupSample.settingsInitialVisibleTitleCount || 0))),
+        settingsPrimarySiblingVisibleCount: Math.max(0, Math.trunc(Number(startupSample.settingsPrimarySiblingVisibleCount || 0))),
+        settingsRmwReachableFieldCount: Math.max(0, Math.trunc(Number(startupSample.settingsRmwReachableFieldCount || 0))),
+        settingsRmwReachableActionCount: Math.max(0, Math.trunc(Number(startupSample.settingsRmwReachableActionCount || 0))),
+        settingsRmwWorkspaceRowCount: Math.max(0, Math.trunc(Number(startupSample.settingsRmwWorkspaceRowCount || 0))),
+        settingsRmwReachableWorkspaceRowCount: Math.max(0, Math.trunc(Number(startupSample.settingsRmwReachableWorkspaceRowCount || 0))),
       };
     }
     if (!browserOnly) {
@@ -3062,7 +4077,7 @@ async function run(options = parseArgs(), deps = {}) {
 
       for (let round = 0; round < options.rounds; round += 1) {
         for (const entry of threadPlan) {
-          await evaluate(cdp, openThreadExpression(entry.id), options.timeoutMs).catch(() => null);
+          await evaluate(cdp, openThreadExpression(entry.id, report.publicConfig), options.timeoutMs).catch(() => null);
           let snapshotPlan = await refreshThreadPlanEntry(options, key, entry);
           for (const delayMs of options.sampleDelaysMs) {
             await sleep(delayMs);
@@ -3099,7 +4114,7 @@ async function run(options = parseArgs(), deps = {}) {
         : null) || threadPlan[0];
       if (submitTarget) {
         report.submitExercise.targetThreadHash = submitTarget.threadHash;
-        await evaluate(cdp, openThreadExpression(submitTarget.id), options.timeoutMs).catch(() => null);
+        await evaluate(cdp, openThreadExpression(submitTarget.id, report.publicConfig), options.timeoutMs).catch(() => null);
         await sleep(500);
         const submitPrePlan = await refreshThreadPlanEntry(options, key, submitTarget);
         samples.push(await evaluate(cdp, snapshotExpression(snapshotInputForPlanEntry(submitPrePlan, {
@@ -3118,13 +4133,44 @@ async function run(options = parseArgs(), deps = {}) {
           appVisible: false,
           errorCode: boundedToken(err && err.message, "snapshot_failed"),
         })));
-        const submitResult = await evaluate(cdp, submitComposerExpression(options.submitMessage), options.timeoutMs).catch((err) => ({
-          ok: false,
-          code: boundedToken(err && err.message, "submit_failed"),
-        }));
-        report.submitExercise.ok = Boolean(submitResult && submitResult.ok);
-        report.submitExercise.code = boundedToken(submitResult && submitResult.code, report.submitExercise.ok ? "submitted" : "submit_failed");
-        report.submitExercise.disabledBeforeSubmit = Boolean(submitResult && submitResult.disabledBeforeSubmit);
+        const submitResults = [];
+        for (let submitIndex = 0; submitIndex < options.submitRepeat; submitIndex += 1) {
+          const submitMessage = options.submitRepeat > 1
+            ? `${options.submitMessage} [${submitIndex + 1}/${options.submitRepeat}]`.slice(0, 500)
+            : options.submitMessage;
+          const submitResult = await evaluate(cdp, submitComposerExpression(submitMessage), options.timeoutMs).catch((err) => ({
+            ok: false,
+            code: boundedToken(err && err.message, "submit_failed"),
+          }));
+          submitResults.push(submitResult);
+          const attemptPhase = `after-${submitIndex + 1}`;
+          const submitAttemptPlan = await refreshThreadPlanEntry(options, key, submitTarget);
+          samples.push(await evaluate(cdp, snapshotExpression(snapshotInputForPlanEntry(submitAttemptPlan, {
+            label: `submit-${attemptPhase}`,
+            delayMs: 0,
+            exerciseSubmit: true,
+            submitPhase: attemptPhase,
+            submitOk: Boolean(submitResult && submitResult.ok),
+          })), options.timeoutMs).catch((err) => ({
+            label: `submit-${attemptPhase}`,
+            threadHash: submitTarget.threadHash,
+            delayMs: 0,
+            exerciseSubmit: true,
+            submitPhase: attemptPhase,
+            submitOk: Boolean(submitResult && submitResult.ok),
+            appVisible: false,
+            errorCode: boundedToken(err && err.message, "snapshot_failed"),
+          })));
+          if (submitIndex + 1 < options.submitRepeat && options.submitIntervalMs > 0) {
+            await sleep(options.submitIntervalMs);
+          }
+        }
+        report.submitExercise.successCount = submitResults.filter((entry) => entry && entry.ok).length;
+        report.submitExercise.ok = report.submitExercise.successCount === options.submitRepeat;
+        report.submitExercise.code = report.submitExercise.ok
+          ? "submitted"
+          : boundedToken(submitResults.find((entry) => entry && !entry.ok) && submitResults.find((entry) => entry && !entry.ok).code, "submit_failed");
+        report.submitExercise.disabledBeforeSubmit = submitResults.some((entry) => entry && entry.disabledBeforeSubmit);
         for (const delayMs of options.submitSampleDelaysMs) {
           await sleep(delayMs);
           const phase = `post-${delayMs}`;
@@ -3134,14 +4180,14 @@ async function run(options = parseArgs(), deps = {}) {
             delayMs,
             exerciseSubmit: true,
             submitPhase: phase,
-            submitOk: Boolean(submitResult && submitResult.ok),
+            submitOk: report.submitExercise.ok,
           })), options.timeoutMs).catch((err) => ({
             label: `submit-${phase}`,
             threadHash: submitTarget.threadHash,
             delayMs,
             exerciseSubmit: true,
             submitPhase: phase,
-            submitOk: Boolean(submitResult && submitResult.ok),
+            submitOk: report.submitExercise.ok,
             appVisible: false,
             errorCode: boundedToken(err && err.message, "snapshot_failed"),
           })));
@@ -3195,6 +4241,12 @@ async function run(options = parseArgs(), deps = {}) {
     exceptions,
     minSettledDelayMs: options.minSettledDelayMs,
   });
+  if (options.diagnosticSamples) {
+    report.browserDiagnostics = {
+      sampleCount: samples.length,
+      samples: boundedDiagnosticSamples(samples),
+    };
+  }
   applyStartupGateIssues(report, samples.find((sample) => sample && sample.probeKind === "startup") || {}, staticShell);
   applyThreadRefreshStatusHintGateIssue(report);
   if (appPreviewRuntime) {
@@ -3269,6 +4321,7 @@ module.exports = {
   snapshotInputForPlanEntry,
   snapshotExpression,
   startupProbeExpression,
+  openThreadExpression,
   submitComposerExpression,
   threadListInteractionProbeExpression,
   threadListStressProbeExpression,

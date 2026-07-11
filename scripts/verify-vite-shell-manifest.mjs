@@ -32,7 +32,15 @@ if (!fs.existsSync(manifestPath)) {
   fail(`missing Vite rollup manifest: ${viteManifestPath}`);
 } else {
   const built = readJson(manifestPath);
-  const current = buildShellAssetManifest(root);
+  const verifiesFinalPublishedIdentity = Boolean(
+    built.viteArtifactCache
+      && built.shellCacheName
+      && built.classicShellCacheName
+      && built.shellCacheName !== built.classicShellCacheName
+  );
+  const current = buildShellAssetManifest(root, {
+    useExistingViteArtifactCache: verifiesFinalPublishedIdentity,
+  });
   const mismatch = [];
   for (const key of ["shellCacheName", "clientBuildId"]) {
     if (built[key] !== current[key]) mismatch.push(key);
@@ -72,7 +80,7 @@ if (!fs.existsSync(manifestPath)) {
     mismatch.push("viteBuildContract");
   } else {
     const viteBuild = built.viteBuild;
-    if (viteBuild.productionExecution !== "classic-script-fallback") {
+    if (viteBuild.productionExecution !== "vite-app-preview-native-esm") {
       mismatch.push("viteBuildProductionExecution");
     }
     if (!viteBuild.viteEntry || viteBuild.viteEntry.source !== "frontend/vite-shell-entry.mjs") {
@@ -166,11 +174,16 @@ if (!fs.existsSync(manifestPath)) {
     const expectedEsmFunctionCount = VITE_ESM_COMPATIBILITY_MODULES.reduce((total, entry) => (
       total + (Array.isArray(entry && entry.expectedFunctions) ? entry.expectedFunctions.length : 0)
     ), 0);
+    const expectedNativeEsmModuleCount = VITE_ESM_COMPATIBILITY_MODULES
+      .filter((entry) => entry && entry.nativeSource).length;
+    const expectedClassicGlobalCompatibilityModuleCount = expectedEsmIds.length - expectedNativeEsmModuleCount;
     if (!esmCompatibility
       || esmCompatibility.owner !== "vite-shell-entry"
       || esmCompatibility.virtualModuleSource !== VITE_ESM_COMPATIBILITY_SOURCE) {
       mismatch.push("viteBuildEsmCompatibility");
     } else if (Number(esmCompatibility.moduleCount) !== expectedEsmIds.length
+      || Number(esmCompatibility.nativeEsmModuleCount || 0) !== expectedNativeEsmModuleCount
+      || Number(esmCompatibility.classicGlobalCompatibilityModuleCount || 0) !== expectedClassicGlobalCompatibilityModuleCount
       || Number(esmCompatibility.hashCount) !== expectedEsmIds.length
       || Number(esmCompatibility.expectedFunctionCount) !== expectedEsmFunctionCount) {
       mismatch.push("viteBuildEsmCompatibilityCount");

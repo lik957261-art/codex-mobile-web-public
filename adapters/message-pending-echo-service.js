@@ -175,6 +175,12 @@ function isDurableUserMessage(item) {
   return Boolean(item && item.type === "userMessage" && !isSyntheticUserMessage(item));
 }
 
+function sameClientSubmission(left, right) {
+  const a = String(left && left.clientSubmissionId || "").trim();
+  const b = String(right && right.clientSubmissionId || "").trim();
+  return Boolean(a && b && a === b);
+}
+
 function statusText(status) {
   if (!status) return "";
   if (typeof status === "string") return status;
@@ -259,6 +265,31 @@ function createPendingSteerEchoStore(options = {}) {
       && (item.id === pendingItem.id || sameUserMessageContent(item, pendingItem)));
   }
 
+  function insertPendingEchoIntoTurn(turn, pendingItem) {
+    if (!turn || !pendingItem) return false;
+    turn.items = Array.isArray(turn.items) ? turn.items : [];
+    const matchingIndex = turn.items.findIndex((item) => item
+      && item.type === "userMessage"
+      && (item.id === pendingItem.id || sameUserMessageContent(item, pendingItem)));
+    if (matchingIndex >= 0) {
+      const firstNonUserIndex = turn.items.findIndex((item) => item && item.type !== "userMessage");
+      if (firstNonUserIndex >= 0 && matchingIndex > firstNonUserIndex) {
+        const [item] = turn.items.splice(matchingIndex, 1);
+        turn.items.splice(firstNonUserIndex, 0, item);
+        return true;
+      }
+      return false;
+    }
+    const insertAt = turn.items.findIndex((item) => item && item.type !== "userMessage");
+    const item = Object.assign({}, pendingItem);
+    if (insertAt < 0) {
+      turn.items.push(item);
+    } else {
+      turn.items.splice(insertAt, 0, item);
+    }
+    return true;
+  }
+
   function turnIndexForId(thread, turnId) {
     const id = String(turnId || "");
     if (!id) return -1;
@@ -274,6 +305,24 @@ function createPendingSteerEchoStore(options = {}) {
       if (items.some((item) => isDurableUserMessage(item) && sameUserMessageContent(item, pendingItem))) return index;
     }
     return -1;
+  }
+
+  function hasDurableSubmissionMatch(thread, pendingItem) {
+    if (!pendingItem || !String(pendingItem.clientSubmissionId || "").trim()) return false;
+    for (const turn of thread.turns || []) {
+      const items = Array.isArray(turn && turn.items) ? turn.items : [];
+      if (items.some((item) => isDurableUserMessage(item) && sameClientSubmission(item, pendingItem))) return true;
+    }
+    return false;
+  }
+
+  function removePendingEchoFromEntireThread(thread, pendingItem) {
+    if (!thread || !Array.isArray(thread.turns) || !pendingItem) return;
+    for (const turn of thread.turns) {
+      if (!turn || !Array.isArray(turn.items)) continue;
+      turn.items = turn.items.filter((item) => !(isSyntheticUserMessage(item)
+        && (item.id === pendingItem.id || sameClientSubmission(item, pendingItem))));
+    }
   }
 
   function removePendingEchoFromThread(thread, pendingItem, pendingTurnId, durableTurnIndex) {
@@ -294,6 +343,11 @@ function createPendingSteerEchoStore(options = {}) {
     if (!threadId) return thread;
     for (const entry of entries.values()) {
       if (entry.threadId !== threadId) continue;
+      if (hasDurableSubmissionMatch(thread, entry.item)) {
+        removePendingEchoFromEntireThread(thread, entry.item);
+        entries.delete(entry.key);
+        continue;
+      }
       const durableTurnIndex = matchingDurableUserMessageTurnIndex(thread, entry.item, entry.turnId);
       if (durableTurnIndex >= 0) {
         removePendingEchoFromThread(thread, entry.item, entry.turnId, durableTurnIndex);
@@ -302,17 +356,7 @@ function createPendingSteerEchoStore(options = {}) {
       }
       const turn = thread.turns.find((candidate) => String(candidate && candidate.id || "") === entry.turnId);
       if (!turn) continue;
-      if (isCompletedTurn(turn)) {
-        const pendingTurnIndex = turnIndexForId(thread, entry.turnId);
-        if (pendingTurnIndex >= 0) {
-          removePendingEchoFromThread(thread, entry.item, entry.turnId, pendingTurnIndex);
-        }
-        entries.delete(entry.key);
-        continue;
-      }
-      turn.items = Array.isArray(turn.items) ? turn.items : [];
-      if (hasMatchingUserMessage(turn, entry.item)) continue;
-      turn.items.push(Object.assign({}, entry.item));
+      insertPendingEchoIntoTurn(turn, entry.item);
     }
     return thread;
   }

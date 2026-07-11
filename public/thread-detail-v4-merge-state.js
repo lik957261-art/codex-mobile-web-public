@@ -48,6 +48,9 @@
     const userMessagesCanShadow = typeof options.userMessagesCanShadow === "function"
       ? options.userMessagesCanShadow
       : () => false;
+    const durableUserMessageSettlesPendingEcho = typeof options.durableUserMessageSettlesPendingEcho === "function"
+      ? options.durableUserMessageSettlesPendingEcho
+      : () => false;
     const isTurnComplete = typeof options.isTurnComplete === "function"
       ? options.isTurnComplete
       : (turn) => /completed|failed|cancel|error|interrupted/i.test(statusText(turn && turn.status));
@@ -92,10 +95,75 @@
         for (const item of Array.isArray(turn && turn.items) ? turn.items : []) {
           if (!item || item.type !== "userMessage") continue;
           if (submissionId && userMessageHasSubmissionId(item, submissionId)) return true;
-          if (!isOptimisticUserMessage(item) && userMessagesCanShadow(item, pendingItem)) return true;
+          if (!isOptimisticUserMessage(item) && durableUserMessageSettlesPendingEcho(item, pendingItem, turn)) return true;
         }
       }
       return false;
+    }
+
+    function v4ThreadHasDurableSubmissionMatch(thread, pendingItem) {
+      if (!pendingItem || pendingItem.type !== "userMessage") return false;
+      const submissionId = String(pendingItem.clientSubmissionId || "").trim();
+      for (const turn of Array.isArray(thread && thread.turns) ? thread.turns : []) {
+        for (const item of Array.isArray(turn && turn.items) ? turn.items : []) {
+          if (!item || item.type !== "userMessage") continue;
+          if (isOptimisticUserMessage(item)) continue;
+          if (submissionId && userMessageHasSubmissionId(item, submissionId)) return true;
+          if (durableUserMessageSettlesPendingEcho(item, pendingItem, turn)) return true;
+        }
+      }
+      return false;
+    }
+
+    function dropSyntheticSubmissionEchoes(thread, pendingItem) {
+      if (!thread || !pendingItem || !Array.isArray(thread.turns)) return false;
+      const submissionId = String(pendingItem.clientSubmissionId || "").trim();
+      if (!submissionId) return false;
+      let changed = false;
+      for (const turn of thread.turns) {
+        if (!turn || !Array.isArray(turn.items)) continue;
+        const nextItems = turn.items.filter((item) => !(item
+          && item.type === "userMessage"
+          && isOptimisticUserMessage(item)
+          && userMessageHasSubmissionId(item, submissionId)));
+        if (nextItems.length !== turn.items.length) {
+          turn.items = nextItems;
+          changed = true;
+        }
+      }
+      return changed;
+    }
+
+    function timestampMsFromValue(value) {
+      if (value === undefined || value === null || value === "") return 0;
+      const number = Number(value);
+      if (Number.isFinite(number) && number > 0) {
+        return number > 1_000_000_000 && number < 1_000_000_000_000
+          ? Math.trunc(number * 1000)
+          : Math.trunc(number);
+      }
+      const parsed = Date.parse(String(value || ""));
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    }
+
+    function itemOrderMs(item) {
+      if (!item || typeof item !== "object") return 0;
+      for (const field of [
+        "mobileDisplayTimestampMs",
+        "startedAtMs",
+        "createdAtMs",
+        "updatedAtMs",
+        "timestampMs",
+        "mobileDisplayTimestamp",
+        "startedAt",
+        "createdAt",
+        "updatedAt",
+        "timestamp",
+      ]) {
+        const value = timestampMsFromValue(item[field]);
+        if (value > 0) return value;
+      }
+      return 0;
     }
 
     function appendV4PendingOverlayItem(turn, item) {
@@ -107,12 +175,49 @@
         || existing.id === item.id
         || userMessagesCanShadow(existing, item)
       ));
-      if (!alreadyPresent) turn.items.push(item);
+      if (alreadyPresent) return;
+      const pendingOrder = itemOrderMs(item);
+      const insertAt = pendingOrder > 0
+        ? turn.items.findIndex((existing) => {
+          const existingOrder = itemOrderMs(existing);
+          return existingOrder > 0 && existingOrder > pendingOrder;
+        })
+        : -1;
+      if (insertAt < 0) {
+        turn.items.push(item);
+      } else {
+        turn.items.splice(insertAt, 0, item);
+      }
     }
 
     function copyTurnWithOnlyItems(turn, items) {
       return Object.assign({}, turn || {}, {
         items: (items || []).slice(),
+      });
+    }
+
+    function visibleNonReasoningItems(turn) {
+      return (Array.isArray(turn && turn.items) ? turn.items : [])
+        .filter((item) => item && turnVisibleWeight({ items: [item] }) > 0 && !isReasoningItem(item));
+    }
+
+    function existingV4TurnHasOnlyPendingOverlayItems(existingTurn) {
+      const visibleItems = visibleNonReasoningItems(existingTurn);
+      return Boolean(visibleItems.length && visibleItems.every(shouldPreserveV4PendingOverlayItem));
+    }
+
+    function turnHasNonUserAuthority(turn) {
+      return visibleNonReasoningItems(turn).some((item) => item && item.type !== "userMessage");
+    }
+
+    function incomingTurnsHaveNewerNonUserAuthority(existingTurn, incomingTurns = []) {
+      const existingOrder = turnOrderMs(existingTurn);
+      if (!existingOrder) return false;
+      return (incomingTurns || []).some((incomingTurn) => {
+        if (!incomingTurn || String(incomingTurn.id || "") === String(existingTurn && existingTurn.id || "")) return false;
+        if (!turnHasNonUserAuthority(incomingTurn)) return false;
+        const incomingOrder = turnOrderMs(incomingTurn);
+        return Boolean(incomingOrder && incomingOrder > existingOrder);
       });
     }
 
@@ -125,12 +230,22 @@
           .filter((item) => shouldPreserveV4PendingOverlayItem(item)
             && !v4ThreadHasPendingMatch(mergedThread, item));
         if (!pendingItems.length) continue;
+        const unresolvedPendingItems = pendingItems.filter((item) => {
+          if (!v4ThreadHasDurableSubmissionMatch(mergedThread, item)) return true;
+          dropSyntheticSubmissionEchoes(mergedThread, item);
+          return false;
+        });
+        if (!unresolvedPendingItems.length) continue;
         const targetTurn = turnsById.get(String(existingTurn.id || ""));
         if (targetTurn) {
-          pendingItems.forEach((item) => appendV4PendingOverlayItem(targetTurn, item));
+          unresolvedPendingItems.forEach((item) => appendV4PendingOverlayItem(targetTurn, item));
           continue;
         }
-        const overlayTurn = copyTurnWithOnlyItems(existingTurn, pendingItems);
+        if (existingV4TurnHasOnlyPendingOverlayItems(existingTurn)
+          && incomingTurnsHaveNewerNonUserAuthority(existingTurn, mergedThread.turns)) {
+          continue;
+        }
+        const overlayTurn = copyTurnWithOnlyItems(existingTurn, unresolvedPendingItems);
         overlayTurn.mobilePendingOverlay = true;
         mergedThread.turns.push(overlayTurn);
         if (overlayTurn.id) turnsById.set(String(overlayTurn.id), overlayTurn);
@@ -151,6 +266,35 @@
       return Boolean(existingRevision && incomingRevision && incomingRevision < existingRevision);
     }
 
+    function threadVisibleWeight(turns = []) {
+      return (Array.isArray(turns) ? turns : []).reduce((total, turn) => total + turnVisibleWeight(turn), 0);
+    }
+
+    function incomingTurnsHaveNewerVisibleEvidence(existingTurns = [], incomingTurns = []) {
+      const existingIds = new Set((existingTurns || []).map((turn) => String(turn && turn.id || "")).filter(Boolean));
+      const existingMaxOrder = (existingTurns || []).reduce((max, turn) => Math.max(max, turnOrderMs(turn) || 0), 0);
+      return (incomingTurns || []).some((turn) => {
+        const id = String(turn && turn.id || "");
+        if (id && existingIds.has(id)) return false;
+        if (turnVisibleWeight(turn) <= 0) return false;
+        const order = turnOrderMs(turn);
+        return Boolean(order && existingMaxOrder && order > existingMaxOrder);
+      });
+    }
+
+    function isV4ProjectionVisibleWindowRegressive(existingThread, incomingThread) {
+      const existingTurns = Array.isArray(existingThread && existingThread.turns) ? existingThread.turns : [];
+      const incomingTurns = Array.isArray(incomingThread && incomingThread.turns) ? incomingThread.turns : [];
+      if (!existingTurns.length || !incomingTurns.length) return false;
+      if (Math.min(existingTurns.length, incomingTurns.length) < 3) return false;
+      if (existingTurns.some(isActiveLikeProjectionTurn) || incomingTurns.some(isActiveLikeProjectionTurn)) return false;
+      if (incomingTurnsHaveNewerVisibleEvidence(existingTurns, incomingTurns)) return false;
+      const existingWeight = threadVisibleWeight(existingTurns);
+      const incomingWeight = threadVisibleWeight(incomingTurns);
+      if (existingWeight <= 0 || incomingWeight <= 0 || incomingWeight >= existingWeight) return false;
+      return incomingWeight < Math.max(1, Math.floor(existingWeight * 0.55));
+    }
+
     function isActiveLikeProjectionTurn(turn) {
       return Boolean(turn
         && !isTurnComplete(turn)
@@ -162,6 +306,29 @@
       if (!existingOrder) return false;
       return (incomingTurns || []).some((incomingTurn) => {
         if (!incomingTurn || String(incomingTurn.id || "") === String(existingTurn && existingTurn.id || "")) return false;
+        const incomingOrder = turnOrderMs(incomingTurn);
+        return Boolean(incomingOrder && incomingOrder > existingOrder);
+      });
+    }
+
+    function incomingThreadIsPartialActiveRefresh(incomingThread, incomingTurns = []) {
+      if (!incomingThread) return false;
+      const readMode = String(incomingThread.mobileReadMode || "");
+      const projection = incomingThread.mobileProjection && typeof incomingThread.mobileProjection === "object"
+        ? incomingThread.mobileProjection
+        : {};
+      const partialLike = /projection-v4-partial/i.test(readMode)
+        || projection.partial === true
+        || /partial/i.test(String(projection.source || ""));
+      return Boolean(partialLike && (incomingTurns || []).some(isActiveLikeProjectionTurn));
+    }
+
+    function incomingTurnsHaveNewerCompletedVisibleTurn(existingTurn, incomingTurns = []) {
+      const existingOrder = turnOrderMs(existingTurn);
+      if (!existingOrder) return false;
+      return (incomingTurns || []).some((incomingTurn) => {
+        if (!incomingTurn || String(incomingTurn.id || "") === String(existingTurn && existingTurn.id || "")) return false;
+        if (!isTurnComplete(incomingTurn) || turnVisibleWeight(incomingTurn) <= 0) return false;
         const incomingOrder = turnOrderMs(incomingTurn);
         return Boolean(incomingOrder && incomingOrder > existingOrder);
       });
@@ -181,6 +348,13 @@
       if (existingV4TurnHasOnlyMatchedPendingItems(existingTurn, incomingTurns)) return false;
       const activeLike = isActiveLikeProjectionTurn(existingTurn);
       const regressiveRefresh = isV4ProjectionRefreshRegressive(existingThread, incomingThread);
+      if (!activeLike
+        && !regressiveRefresh
+        && isTurnComplete(existingTurn)
+        && incomingThreadIsPartialActiveRefresh(incomingThread, incomingTurns)
+        && !incomingTurnsHaveNewerCompletedVisibleTurn(existingTurn, incomingTurns)) {
+        return true;
+      }
       if (!activeLike && !regressiveRefresh) return false;
       return !incomingTurnsClearlySupersedeExistingTurn(existingTurn, incomingTurns);
     }
@@ -199,6 +373,10 @@
         const existingVisibleWeight = existingTurns.reduce((total, turn) => total + turnVisibleWeight(turn), 0);
         const incomingVisibleWeight = incomingTurns.reduce((total, turn) => total + turnVisibleWeight(turn), 0);
         if (!incomingTurns.length && existingTurns.length && existingVisibleWeight > 0 && incomingVisibleWeight === 0) {
+          merged.turns = existingTurns;
+          return normalizeThreadVisibleUserMessages(merged);
+        }
+        if (isV4ProjectionVisibleWindowRegressive(existingThread, incomingThread)) {
           merged.turns = existingTurns;
           return normalizeThreadVisibleUserMessages(merged);
         }
@@ -230,9 +408,11 @@
     return {
       applyV4PendingOverlay,
       isV4ProjectionRefreshRegressive,
+      isV4ProjectionVisibleWindowRegressive,
       isV4ProjectionThread,
       mergeV4ProjectionThread,
       shouldPreserveExistingV4ProjectionTurn,
+      threadVisibleWeight,
       v4ProjectionRevisionValue,
     };
   }

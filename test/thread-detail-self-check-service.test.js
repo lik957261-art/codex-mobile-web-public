@@ -63,6 +63,24 @@ test("thread detail self check accepts healthy latest completed replay", () => {
   assert.equal(report.budget.latestCompletedReplayOmittedAssistantItems, 0);
 });
 
+test("thread detail self check blocks stale-active downgraded tail turns", () => {
+  const detail = healthyDetail();
+  detail.thread.turns[0].status = {
+    type: "completed",
+    mobileStaleActiveTurn: true,
+    previousType: "active",
+    reason: "summary-resting-active-window",
+  };
+  detail.thread.turns[0].mobileStaleActiveTurn = true;
+
+  const report = analyzeThreadDetail(detail);
+  const issue = report.issues.find((entry) => entry.code === "thread_detail_stale_active_turn_downgraded");
+
+  assert.equal(report.ok, false);
+  assert.equal(issue && issue.severity, "H2");
+  assert.equal(issue && issue.reason, "summary-resting-active-window");
+});
+
 test("thread detail self check accepts repeated operation groups with unique client render keys", () => {
   const detail = healthyDetail();
   detail.thread.activeTurnId = "turn-active";
@@ -290,6 +308,31 @@ test("thread detail self check detects terminal list rows that still carry activ
   assert.ok(report.issues.some((issue) => issue.code === "thread_list_rest_status_has_active_turn"));
 });
 
+test("thread detail self check detects detail active status when list dropped running state", () => {
+  const detail = healthyDetail();
+  detail.thread.status = { type: "active" };
+  detail.thread.activeTurnId = "turn-active";
+  detail.thread.turns.push({
+    id: "turn-active",
+    status: "inProgress",
+    items: [
+      { id: "user-active", type: "userMessage" },
+      { id: "agent-active", type: "agentMessage" },
+    ],
+  });
+
+  for (const listStatus of ["completed", "idle", "notLoaded"]) {
+    const report = compareThreadListRowToDetail({
+      id: "thread-1",
+      status: { type: listStatus },
+    }, detail);
+
+    assert.equal(report.ok, false);
+    assert.equal(report.detailIsActive, true);
+    assert.ok(report.issues.some((issue) => issue.code === "thread_list_missing_active_detail_active_mismatch"));
+  }
+});
+
 test("thread detail self check warns when latest completed replay assistant progress was budgeted away", () => {
   const detail = healthyDetail();
   detail.thread.mobileVisibleItemKeys = ["u1", "a1", "usage1"];
@@ -462,9 +505,9 @@ test("thread detail self check accepts active assistant overlay explained by syn
   assert.ok(!codes.includes("active_overlay_assistant_projection_gap"));
 });
 
-test("thread detail self check ignores stale active completion shell as latest completed replay", () => {
+test("thread detail self check ignores non-tail stale active completion shell as latest completed replay", () => {
   const detail = healthyDetail();
-  detail.thread.turns.push({
+  detail.thread.turns.unshift({
     id: "stale-active-shell",
     status: {
       type: "completed",
@@ -585,6 +628,185 @@ test("thread detail self check detects refresh downgrade", () => {
   assert.ok(codes.includes("thread_detail_refresh_lost_usage"));
 });
 
+test("thread detail self check does not treat submitted user echo collapse as lost input", () => {
+  const first = healthyDetail();
+  first.thread.turns[0].items = [
+    { id: "local-user-submit", type: "userMessage", mobilePendingSubmission: true, content: [{ type: "input_text", text: "publish it" }] },
+    { id: "durable-user-submit", type: "userMessage", content: [{ type: "text", text: "publish it" }] },
+    { id: "a1", type: "agentMessage" },
+    { id: "usage1", type: "turnUsageSummary" },
+  ];
+  const second = healthyDetail();
+  second.thread.turns[0].items = [
+    { id: "durable-user-submit", type: "userMessage", content: [{ type: "text", text: "publish it" }] },
+    { id: "a1", type: "agentMessage" },
+    { id: "usage1", type: "turnUsageSummary" },
+  ];
+
+  const report = compareDetailReadbacks(first, second);
+  const codes = report.issues.map((issue) => issue.code);
+
+  assert.equal(report.ok, true);
+  assert.equal(report.before.userInputItems, 2);
+  assert.equal(report.before.uniqueUserInputItems, 1);
+  assert.equal(report.after.userInputItems, 1);
+  assert.equal(report.after.uniqueUserInputItems, 1);
+  assert.ok(!codes.includes("thread_detail_refresh_lost_user_input"));
+});
+
+test("thread detail self check does not treat raw-proven projection user overcount collapse as lost input", () => {
+  const first = healthyDetail();
+  first.thread.turns[0].items = [
+    { id: "u1", type: "userMessage", content: [{ type: "text", text: "publish it" }] },
+    { id: "u-anchor", type: "userMessage", content: [{ type: "text", text: "projection anchor overcount" }] },
+    { id: "a1", type: "agentMessage" },
+    { id: "usage1", type: "turnUsageSummary" },
+  ];
+  const second = healthyDetail();
+  second.thread.turns[0].items = [
+    { id: "u1", type: "userMessage", content: [{ type: "text", text: "publish it" }] },
+    { id: "a1", type: "agentMessage" },
+    { id: "usage1", type: "turnUsageSummary" },
+  ];
+
+  const report = compareDetailReadbacks(first, second, {
+    rawLatestCompletedCounts: {
+      checked: true,
+      found: true,
+      turnHash: "unused",
+      rawUserItems: 1,
+      rawUserLikeEvents: 2,
+    },
+  });
+  const codes = report.issues.map((issue) => issue.code);
+
+  assert.equal(report.ok, true);
+  assert.ok(!codes.includes("thread_detail_refresh_lost_user_input"));
+  assert.ok(!codes.includes("thread_detail_refresh_item_downgrade"));
+  assert.ok(codes.includes("thread_detail_refresh_collapsed_user_input_projection_overcount"));
+  const advisory = report.issues.find((issue) => issue.code === "thread_detail_refresh_collapsed_user_input_projection_overcount");
+  assert.equal(advisory.severity, "H3");
+  assert.equal(advisory.rawUserItems, 1);
+  assert.equal(advisory.beforeItems, 2);
+  assert.equal(advisory.afterItems, 1);
+});
+
+test("thread detail self check still blocks real raw-proven user input loss", () => {
+  const first = healthyDetail();
+  first.thread.turns[0].items = [
+    { id: "u1", type: "userMessage", content: [{ type: "text", text: "first" }] },
+    { id: "u2", type: "userMessage", content: [{ type: "text", text: "second" }] },
+    { id: "a1", type: "agentMessage" },
+    { id: "usage1", type: "turnUsageSummary" },
+  ];
+  const second = healthyDetail();
+  second.thread.turns[0].items = [
+    { id: "u1", type: "userMessage", content: [{ type: "text", text: "first" }] },
+    { id: "a1", type: "agentMessage" },
+    { id: "usage1", type: "turnUsageSummary" },
+  ];
+
+  const report = compareDetailReadbacks(first, second, {
+    rawLatestCompletedCounts: {
+      checked: true,
+      found: true,
+      rawUserItems: 2,
+      rawUserLikeEvents: 2,
+    },
+  });
+  const codes = report.issues.map((issue) => issue.code);
+
+  assert.equal(report.ok, false);
+  assert.ok(codes.includes("thread_detail_refresh_lost_user_input"));
+});
+
+test("thread detail self check does not treat assistant progress consolidation as lost assistant output", () => {
+  const first = healthyDetail();
+  first.thread.turns[0].items = [
+    { id: "u1", type: "userMessage", content: [{ type: "text", text: "publish it" }] },
+    { id: "a-progress", type: "agentMessage", text: "I checked the production behavior gate and" },
+    { id: "a-final", type: "agentMessage", text: "I checked the production behavior gate and it is ready." },
+    { id: "usage1", type: "turnUsageSummary" },
+  ];
+  const second = healthyDetail();
+  second.thread.turns[0].items = [
+    { id: "u1", type: "userMessage", content: [{ type: "text", text: "publish it" }] },
+    { id: "a-final", type: "agentMessage", text: "I checked the production behavior gate and it is ready." },
+    { id: "usage1", type: "turnUsageSummary" },
+  ];
+
+  const report = compareDetailReadbacks(first, second);
+  const codes = report.issues.map((issue) => issue.code);
+
+  assert.equal(report.ok, true);
+  assert.equal(report.before.assistantItems, 2);
+  assert.equal(report.before.uniqueAssistantItems, 1);
+  assert.equal(report.after.assistantItems, 1);
+  assert.equal(report.after.uniqueAssistantItems, 1);
+  assert.ok(!codes.includes("thread_detail_refresh_lost_assistant_items"));
+  assert.ok(!codes.includes("thread_detail_refresh_item_downgrade"));
+});
+
+test("thread detail self check detects active turn downgraded to stale completed partial", () => {
+  const first = {
+    thread: {
+      id: "thread-1",
+      status: { type: "active", turnId: TURN_ID },
+      activeTurnId: TURN_ID,
+      turns: [{
+        id: TURN_ID,
+        status: { type: "active" },
+        startedAt: "2026-07-05T01:09:15.000Z",
+        items: [
+          { id: "u1", type: "userMessage" },
+          { id: "u2", type: "userMessage" },
+          { id: "a1", type: "agentMessage" },
+          { id: "a2", type: "agentMessage" },
+        ],
+      }],
+    },
+  };
+  const second = {
+    thread: {
+      id: "thread-1",
+      status: {
+        type: "completed",
+        mobileClearedStaleActiveSummary: true,
+        previousType: "active",
+      },
+      mobileReadMode: "projection-v4-partial",
+      mobileStaleActiveTurn: {
+        count: 1,
+        reason: "summary-resting-active-window",
+      },
+      turns: [{
+        id: TURN_ID,
+        status: {
+          type: "completed",
+          mobileStaleActiveTurn: true,
+          previousType: "active",
+          reason: "summary-resting-active-window",
+        },
+        startedAt: "2026-07-05T01:09:15.000Z",
+        items: [
+          { id: "u1", type: "userMessage" },
+          { id: "a1", type: "agentMessage" },
+          { id: "usage1", type: "turnUsageSummary" },
+        ],
+      }],
+    },
+  };
+
+  const report = compareDetailReadbacks(first, second);
+  const codes = report.issues.map((issue) => issue.code);
+
+  assert.equal(report.ok, false);
+  assert.ok(codes.includes("thread_detail_refresh_active_status_downgrade"));
+  assert.ok(codes.includes("thread_detail_refresh_item_downgrade"));
+  assert.ok(codes.includes("thread_detail_refresh_lost_user_input"));
+  assert.ok(codes.includes("thread_detail_refresh_lost_assistant_items"));
+});
+
 test("thread detail self check names user and assistant refresh downgrades", () => {
   const first = healthyDetail();
   first.thread.turns[0].items = [
@@ -620,6 +842,18 @@ test("thread list self check detects duplicate ids and order mismatch", () => {
   assert.equal(report.ok, false);
   assert.ok(codes.includes("thread_list_duplicate_ids"));
   assert.ok(codes.includes("thread_list_updated_order_mismatch"));
+});
+
+test("thread list self check uses projected route ordering timestamps", () => {
+  const report = analyzeThreadList({
+    data: [
+      { id: "thread-a", name: "Thread A", preview: "ready", status: "completed", updatedAt: 1000, mobileListUpdatedAtMs: 1783000000000 },
+      { id: "thread-b", name: "Thread B", preview: "ready", status: "completed", updatedAt: 2000, mobileListUpdatedAtMs: 1782000000000 },
+    ],
+  });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.issues.some((issue) => issue.code === "thread_list_updated_order_mismatch"), false);
 });
 
 test("thread list self check detects unmaterialized id-title placeholders", () => {

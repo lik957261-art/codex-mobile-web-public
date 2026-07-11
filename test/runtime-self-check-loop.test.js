@@ -15,7 +15,7 @@ function fakeProcessPressureDeps() {
   ].join("\n");
   const lsofText = [
     "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
-    "node    33840 example 20u  IPv4 0x1      0t0  TCP 127.0.0.1:8787 (LISTEN)",
+    "node    33840 example  20u  IPv4 0x1      0t0  TCP 127.0.0.1:8787 (LISTEN)",
   ].join("\n");
   return {
     fetchJson: fakeHermesManifestFetchJson,
@@ -58,6 +58,27 @@ async function fakeHermesManifestFetchJson(url) {
         buildId: "build-test",
         clientBuildId: "client-test",
         shellCacheName: "shell-test",
+        classicShellCacheName: "shell-classic",
+      },
+    };
+  }
+  if (String(url || "").includes("/api/app-update/status")) {
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        currentBuild: {
+          buildId: "build-test",
+          clientBuildId: "client-test",
+          shellCacheName: "shell-test",
+          classicShellCacheName: "shell-classic",
+          ok: true,
+          issueCodes: [],
+        },
+        clientBuildId: "client-test",
+        shellCacheName: "shell-test",
+        classicShellCacheName: "shell-classic",
+        currentBuildIssueCodes: [],
       },
     };
   }
@@ -69,6 +90,7 @@ async function fakeHermesManifestFetchJson(url) {
         buildId: "build-test",
         clientBuildId: "client-test",
         shellCacheName: "shell-test",
+        classicShellCacheName: "shell-classic",
         build: { identity: "client-test" },
         entry: {
           url: "http://127.0.0.1:8790/?embed=hermes&codexMobileBuild=client-test",
@@ -124,6 +146,8 @@ test("runtime self-check loop parses one-shot and periodic options", () => {
     "50",
     "--client-event-window-ms",
     "120000",
+    "--key-file",
+    "/tmp/codex-mobile-access-key",
     "--gate-mode",
     "deploy",
   ]);
@@ -145,6 +169,7 @@ test("runtime self-check loop parses one-shot and periodic options", () => {
   assert.equal(loop.clientEventTailBytes, 4096);
   assert.equal(loop.clientEventMaxLines, 50);
   assert.equal(loop.clientEventWindowMs, 120000);
+  assert.equal(loop.keyFile, "/tmp/codex-mobile-access-key");
   assert.equal(loop.gateMode, "deploy");
   assert.equal(loop.browserMode, "full");
   assert.equal(loop.skipBrowser, false);
@@ -255,6 +280,27 @@ test("Hermes manifest self-check fetches public config and manifest", async () =
             buildId: "build-test",
             clientBuildId: "client-test",
             shellCacheName: "shell-test",
+            classicShellCacheName: "shell-classic",
+          },
+        };
+      }
+      if (url.includes("/api/app-update/status")) {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            currentBuild: {
+              buildId: "build-test",
+              clientBuildId: "client-test",
+              shellCacheName: "shell-test",
+              classicShellCacheName: "shell-classic",
+              ok: true,
+              issueCodes: [],
+            },
+            clientBuildId: "client-test",
+            shellCacheName: "shell-test",
+            classicShellCacheName: "shell-classic",
+            currentBuildIssueCodes: [],
           },
         };
       }
@@ -284,7 +330,206 @@ test("Hermes manifest self-check fetches public config and manifest", async () =
   assert.deepEqual(calls, [
     "http://127.0.0.1:8790/api/public-config",
     "http://127.0.0.1:8790/api/v1/hermes/plugin/manifest",
+    "http://127.0.0.1:8790/api/app-update/status?force=1",
   ]);
+});
+
+test("Hermes manifest self-check authorizes app-update status readback", async () => {
+  const calls = [];
+  const keyFile = path.join(os.tmpdir(), "codex-mobile-runtime-loop-key");
+  const check = await runtimeLoop.checkHermesManifestBuildRefresh({
+    server: "http://127.0.0.1:8790",
+    keyFile,
+  }, {
+    env: {},
+    readFileSync(filePath, encoding) {
+      assert.equal(filePath, keyFile);
+      assert.equal(encoding, "utf8");
+      return "bounded-test-key\n";
+    },
+    fetchJson: async (url, request = {}) => {
+      calls.push({
+        url,
+        authorizationPresent: Boolean(request.headers && request.headers.Authorization),
+      });
+      if (url.endsWith("/api/public-config")) {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            buildId: "build-test",
+            clientBuildId: "client-test",
+            shellCacheName: "shell-test",
+            classicShellCacheName: "shell-classic",
+          },
+        };
+      }
+      if (url.includes("/api/app-update/status")) {
+        assert.equal(request.headers.Authorization, "Bearer bounded-test-key");
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            currentBuild: {
+              buildId: "build-test",
+              clientBuildId: "client-test",
+              shellCacheName: "shell-test",
+              classicShellCacheName: "shell-classic",
+              ok: true,
+              issueCodes: [],
+            },
+            clientBuildId: "client-test",
+            shellCacheName: "shell-test",
+            classicShellCacheName: "shell-classic",
+            currentBuildIssueCodes: [],
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          buildId: "build-test",
+          clientBuildId: "client-test",
+          shellCacheName: "shell-test",
+          build: { identity: "client-test" },
+          entry: {
+            url: "http://127.0.0.1:8790/?embed=hermes&codexMobileBuild=client-test",
+            required_query: {
+              embed: "hermes",
+              codexMobileBuild: "client-test",
+            },
+          },
+          embedding: { refreshOnVersionChange: true, version: "client-test" },
+          embed: { refreshOnVersionChange: true, version: "client-test" },
+        },
+      };
+    },
+  });
+
+  assert.equal(check.ok, true);
+  assert.deepEqual(calls.map((entry) => entry.authorizationPresent), [false, false, true]);
+  assert.doesNotMatch(JSON.stringify(check), /bounded-test-key|Authorization/i);
+});
+
+test("Hermes manifest self-check reports app-update auth gap without identity-empty false positive", async () => {
+  const check = await runtimeLoop.checkHermesManifestBuildRefresh({
+    server: "http://127.0.0.1:8790",
+    keyFile: "",
+  }, {
+    env: {},
+    fetchJson: async (url) => {
+      if (url.endsWith("/api/public-config")) {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            buildId: "build-test",
+            clientBuildId: "client-test",
+            shellCacheName: "shell-test",
+            classicShellCacheName: "shell-classic",
+          },
+        };
+      }
+      if (url.includes("/api/app-update/status")) {
+        return {
+          ok: false,
+          status: 401,
+          body: {},
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          buildId: "build-test",
+          clientBuildId: "client-test",
+          shellCacheName: "shell-test",
+          build: { identity: "client-test" },
+          entry: {
+            url: "http://127.0.0.1:8790/?embed=hermes&codexMobileBuild=client-test",
+            required_query: {
+              embed: "hermes",
+              codexMobileBuild: "client-test",
+            },
+          },
+          embedding: { refreshOnVersionChange: true, version: "client-test" },
+          embed: { refreshOnVersionChange: true, version: "client-test" },
+        },
+      };
+    },
+  });
+
+  const codes = check.issues.map((issue) => issue.code);
+  assert.equal(check.ok, false);
+  assert.ok(codes.includes("post_deploy_harness_app_update_status_auth_gap"));
+  assert.equal(codes.includes("app_update_status_unavailable"), false);
+  assert.equal(codes.includes("app_update_current_build_identity_empty"), false);
+});
+
+test("Hermes manifest self-check fails closed when app-update current build is empty", async () => {
+  const check = await runtimeLoop.checkHermesManifestBuildRefresh({
+    server: "http://127.0.0.1:8790",
+  }, {
+    fetchJson: async (url) => {
+      if (url.endsWith("/api/public-config")) {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            buildId: "build-test",
+            clientBuildId: "client-test",
+            shellCacheName: "shell-test",
+            classicShellCacheName: "shell-classic",
+          },
+        };
+      }
+      if (url.includes("/api/app-update/status")) {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            currentBuild: {
+              buildId: "",
+              clientBuildId: "",
+              shellCacheName: "",
+              classicShellCacheName: "",
+              ok: false,
+              issueCodes: ["app_update_current_build_identity_empty"],
+            },
+            clientBuildId: "",
+            shellCacheName: "",
+            classicShellCacheName: "",
+            currentBuildIssueCodes: ["app_update_current_build_identity_empty"],
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          buildId: "build-test",
+          clientBuildId: "client-test",
+          shellCacheName: "shell-test",
+          build: { identity: "client-test" },
+          entry: {
+            url: "http://127.0.0.1:8790/?embed=hermes&codexMobileBuild=client-test",
+            required_query: {
+              embed: "hermes",
+              codexMobileBuild: "client-test",
+            },
+          },
+          embedding: { refreshOnVersionChange: true, version: "client-test" },
+          embed: { refreshOnVersionChange: true, version: "client-test" },
+        },
+      };
+    },
+  });
+
+  assert.equal(check.ok, false);
+  assert.ok(check.issues.some((issue) => issue.code === "app_update_current_build_identity_empty"));
+  assert.equal(check.appUpdateClientBuildId, "");
+  assert.deepEqual(check.appUpdateCurrentBuildIssueCodes, ["app_update_current_build_identity_empty"]);
 });
 
 test("runtime self-check one-shot writes metadata-only JSONL", async () => {
@@ -339,6 +584,15 @@ test("runtime self-check one-shot writes metadata-only JSONL", async () => {
           "http://127.0.0.1:8790",
           "--json",
           "--vite-preview-only",
+        ]);
+      }
+      if (isViteAppPreviewOnly) {
+        assert.deepEqual(args, [
+          String(args[0]),
+          "--server",
+          "http://127.0.0.1:8790",
+          "--json",
+          "--vite-app-preview-only",
         ]);
       }
       if (isViteAppPreviewRuntime) {
@@ -457,20 +711,18 @@ test("runtime self-check loop can run explicit Vite app-preview default-root gat
       calls.push(args.slice());
       const isDefaultRoot = args.includes("--vite-app-preview-default-root");
       if (isDefaultRoot) {
-        assert.ok(args.includes("--vite-app-preview-runtime"));
-        assert.doesNotMatch(args.join(" "), /--vite-app-preview-root|--vite-app-preview-only/);
-        assert.ok(args.includes("--sample-threads"));
-        assert.equal(args[args.indexOf("--sample-threads") + 1], "1");
-        assert.ok(args.includes("--rounds"));
-        assert.equal(args[args.indexOf("--rounds") + 1], "2");
-        assert.ok(args.includes("--sample-delays-ms"));
-        assert.equal(args[args.indexOf("--sample-delays-ms") + 1], "100,900");
-        assert.ok(args.includes("--min-settled-delay-ms"));
-        assert.equal(args[args.indexOf("--min-settled-delay-ms") + 1], "900");
+        assert.deepEqual(args, [
+          String(args[0]),
+          "--server",
+          "http://127.0.0.1:8790",
+          "--json",
+          "--vite-app-preview-only",
+          "--vite-app-preview-default-root",
+        ]);
       }
       callback(null, JSON.stringify({
         ok: true,
-        mode: isDefaultRoot ? "vite-app-preview-default-root-runtime" : "ok",
+        mode: isDefaultRoot ? "vite-app-preview-default-root" : "ok",
         publicConfig: { clientBuildId: "build", shellCacheName: "shell" },
         browserReport: { issueCount: 0, blockingIssueCount: 0 },
       }), "");
@@ -505,12 +757,18 @@ test("runtime self-check loop auto-runs default-root gate when public config rep
       const isDefaultRoot = args.includes("--vite-app-preview-default-root");
       const isBrowserRuntime = !/--vite-preview-only|--vite-app-preview/.test(argText);
       if (isDefaultRoot) {
-        assert.ok(args.includes("--vite-app-preview-runtime"));
-        assert.doesNotMatch(argText, /--vite-app-preview-root|--vite-app-preview-only/);
+        assert.deepEqual(args, [
+          String(args[0]),
+          "--server",
+          "http://127.0.0.1:8790",
+          "--json",
+          "--vite-app-preview-only",
+          "--vite-app-preview-default-root",
+        ]);
       }
       callback(null, JSON.stringify({
         ok: true,
-        mode: isDefaultRoot ? "vite-app-preview-default-root-runtime" : "ok",
+        mode: isDefaultRoot ? "vite-app-preview-default-root" : "ok",
         publicConfig: {
           clientBuildId: "build",
           shellCacheName: "shell",
@@ -736,6 +994,163 @@ test("runtime self-check gate blocks actionable browser regressions", async () =
   assert.deepEqual(result.gate.actionableIssueCodes, ["browser_pending_user_message_disappeared"]);
 });
 
+test("runtime self-check deploy gate accepts healthy authorized app-update status", async () => {
+  const baseDeps = fakeProcessPressureDeps();
+  const keyFile = path.join(os.tmpdir(), "codex-mobile-runtime-loop-deploy-key");
+  const result = await runtimeLoop.runOnce({
+    server: "http://127.0.0.1:8790",
+    threadIds: [],
+    sampleThreads: 1,
+    browserRounds: 1,
+    browserSampleDelaysMs: "100",
+    browserMinSettledDelayMs: 1000,
+    keyFile,
+    skipClientEvents: true,
+    skipApi: true,
+    skipBrowser: true,
+    output: "",
+    gateMode: "deploy",
+  }, {
+    ...baseDeps,
+    readFileSync(filePath, ...args) {
+      if (filePath === keyFile) return "bounded-test-key\n";
+      return baseDeps.readFileSync(filePath, ...args);
+    },
+    fetchJson: async (url, request = {}) => {
+      if (url.endsWith("/api/public-config")) {
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            buildId: "build-test",
+            clientBuildId: "client-test",
+            shellCacheName: "shell-test",
+            classicShellCacheName: "shell-classic",
+          },
+        };
+      }
+      if (url.includes("/api/app-update/status")) {
+        assert.equal(request.headers.Authorization, "Bearer bounded-test-key");
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            currentBuild: {
+              buildId: "build-test",
+              clientBuildId: "client-test",
+              shellCacheName: "shell-test",
+              classicShellCacheName: "shell-classic",
+              ok: true,
+              issueCodes: [],
+            },
+            clientBuildId: "client-test",
+            shellCacheName: "shell-test",
+            classicShellCacheName: "shell-classic",
+            currentBuildIssueCodes: [],
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          buildId: "build-test",
+          clientBuildId: "client-test",
+          shellCacheName: "shell-test",
+          build: { identity: "client-test" },
+          entry: {
+            url: "http://127.0.0.1:8790/?embed=hermes&codexMobileBuild=client-test",
+            required_query: {
+              embed: "hermes",
+              codexMobileBuild: "client-test",
+            },
+          },
+          embedding: { refreshOnVersionChange: true, version: "client-test" },
+          embed: { refreshOnVersionChange: true, version: "client-test" },
+        },
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.gate.deployPass, true);
+  assert.deepEqual(result.gate.actionableIssueCodes, []);
+  assert.doesNotMatch(JSON.stringify(result), /bounded-test-key|Authorization/i);
+});
+
+test("runtime self-check deploy gate preflights process pressure before browser jobs", async () => {
+  let browserJobStarted = false;
+  const result = await runtimeLoop.runOnce({
+    server: "http://127.0.0.1:8790",
+    threadIds: ["private-thread-id"],
+    sampleThreads: 1,
+    browserRounds: 1,
+    browserSampleDelaysMs: "100",
+    browserMinSettledDelayMs: 1000,
+    skipClientEvents: true,
+    skipApi: true,
+    skipBrowser: false,
+    output: "",
+    gateMode: "deploy",
+  }, {
+    fetchJson: fakeHermesManifestFetchJson,
+    execFile(_node, _args, _options, callback) {
+      browserJobStarted = true;
+      callback(null, JSON.stringify({
+        ok: true,
+        publicConfig: { clientBuildId: "build", shellCacheName: "shell" },
+        browserReport: { issueCount: 0, blockingIssueCount: 0, issues: [] },
+      }), "");
+    },
+    execFileSync(command, args) {
+      if (command === "ps") {
+        return [
+          "33840 1 hermes-host 1.5 204800 00:10:00 Ss /runtime/node server.js",
+          "200 1 example 0.0 181424 00:20:00 S /prod/codex-mobile-web/codex-app-server-mux.js app-server",
+          "201 200 example 0.0 400080 00:20:00 S /Users/example/.local/bin/codex app-server",
+          "300 1 example 0.0 310912 02:20:00 S /prod/codex-mobile-web/codex-app-server-mux.js app-server",
+          "301 300 example 0.0 4194304 02:20:00 S /Users/example/.local/bin/codex app-server",
+        ].join("\n");
+      }
+      if (command === "lsof" && args.includes("-iTCP")) {
+        return [
+          "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
+          "node    33840 example  20u  IPv4 0x1      0t0  TCP *:8787 (LISTEN)",
+          "node    200 example  21u  IPv4 0x2      0t0  TCP 127.0.0.1:50000 (LISTEN)",
+          "node    300 example  22u  IPv4 0x3      0t0  TCP 127.0.0.1:49366 (LISTEN)",
+        ].join("\n");
+      }
+      if (command === "lsof" && args.includes("-p")) {
+        return "p0\nfcwd\nn/Users/hermes-host/HermesMobile/plugins/codex-mobile-web\n";
+      }
+      if (command === "launchctl") {
+        return [
+          "system/com.hermesmobile.plugin.codex-mobile = {",
+          "\tactive count = 1",
+          "\tstate = running",
+          "\tworking directory = /Users/hermes-host/HermesMobile/plugins/codex-mobile-web",
+          "\tusername = hermes-host",
+          "\tpid = 33840",
+          "}",
+        ].join("\n");
+      }
+      return "";
+    },
+    readFileSync() {
+      return JSON.stringify({ pid: 200, host: "127.0.0.1", port: 50000, protocol: "jsonl-tcp" });
+    },
+  });
+
+  assert.equal(browserJobStarted, false);
+  assert.equal(result.ok, false);
+  assert.equal(result.gate.deployPass, false);
+  assert.deepEqual(result.gate.actionableIssueCodes, ["stale_codex_app_server_pressure"]);
+  assert.equal(result.checks.some((check) => check.name === "browser-runtime"), false);
+  const preflight = result.checks.find((check) => check.name === "process-pressure-preflight");
+  assert.equal(preflight.ok, false);
+  assert.equal(preflight.blockingIssueCount, 1);
+});
+
 test("runtime self-check gate blocks production listener owner mismatch", async () => {
   const result = await runtimeLoop.runOnce({
     server: "http://127.0.0.1:8790",
@@ -767,7 +1182,7 @@ test("runtime self-check gate blocks production listener owner mismatch", async 
       if (command === "lsof" && args.includes("-iTCP")) {
         return [
           "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
-          "node    33840 example 20u  IPv4 0x1      0t0  TCP 127.0.0.1:8787 (LISTEN)",
+          "node    33840 example  20u  IPv4 0x1      0t0  TCP 127.0.0.1:8787 (LISTEN)",
         ].join("\n");
       }
       if (command === "lsof" && args.includes("-p")) {
@@ -917,7 +1332,7 @@ test("runtime self-check loop includes recent client-event stall summary", async
     '[client-event] thread_list_runtime_stall {"ts":"2026-06-29T17:40:00.000Z","threadId":"private-thread","path":"/private","details":{"maxRafDelayMs":3200,"maxScrollApplyMs":7,"threadListCount":12},"userAgent":"private UA"}',
   ].join("\n"), "utf8");
   const realDateNow = Date.now;
-  Date.now = () => Date.parse("2026-06-29T17:40:10.000Z");
+  Date.now = () => Date.parse("2026-06-29T17:39:50.000Z");
 
   let result;
   try {

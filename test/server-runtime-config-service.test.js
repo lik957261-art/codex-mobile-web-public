@@ -9,7 +9,7 @@ const { createServerRuntimeConfigService } = require("../services/runtime/server
 function createConfig(overrides = {}) {
   const env = Object.assign({}, overrides.env || {});
   const appRoot = overrides.appRoot || "/repo/codex-mobile-web";
-  const userHome = overrides.userHome || "/home/example/tester";
+  const userHome = overrides.userHome || "/home/tester";
   const serverRuntimeUtils = {
     readPackageVersion: () => overrides.appVersion || "9.8.7",
     resolveDefaultCodexExecutable: () => overrides.codexExe || "/bin/codex",
@@ -45,16 +45,27 @@ test("server runtime config resolves default runtime paths and bounded ids", () 
 
   assert.equal(config.APP_ROOT, "/repo/codex-mobile-web");
   assert.equal(config.PUBLIC_ROOT, "/repo/codex-mobile-web/public");
-  assert.equal(config.RUNTIME_ROOT, "/home/example/tester/.codex-mobile-web");
-  assert.equal(config.CODEX_HOME, "/home/example/tester/.codex");
-  assert.equal(config.STATE_DB, "/home/example/tester/.codex/state_5.sqlite");
-  assert.equal(config.MUX_ENDPOINT_FILE, "/home/example/tester/.codex/mux/endpoint.json");
+  assert.equal(config.RUNTIME_ROOT, "/home/tester/.codex-mobile-web");
+  assert.equal(config.CODEX_HOME, "/home/tester/.codex");
+  assert.equal(config.STATE_DB, "/home/tester/.codex/state_5.sqlite");
+  assert.equal(config.MUX_ENDPOINT_FILE, "/home/tester/.codex/mux/endpoint.json");
   assert.equal(config.APP_VERSION, "9.8.7");
   assert.equal(config.THREAD_SIDE_CHAT_SCOPE_ID, "profile-main");
-  assert.equal(config.WORKSPACE_DELEGATION_TOOL_FULL_NAME, "codex_mobile.delegate_to_thread");
-  assert.equal(config.TASK_CARD_RETURN_TOOL_FULL_NAME, "codex_mobile.return_to_source");
+  assert.equal(config.WORKSPACE_DELEGATION_TOOL_FULL_NAME, "mcp__codex_mobile.delegate_to_thread");
+  assert.equal(config.TASK_CARD_RETURN_TOOL_FULL_NAME, "mcp__codex_mobile.return_to_source");
   assert.equal(config.HOME_AI_SECRET_REF_CONSUME_PATH, "/api/secret-refs/consume");
   assert.equal(config.HOME_AI_SECRET_REF_TIMEOUT_MS, 12000);
+  assert.equal(config.THREAD_TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS, 30 * 60 * 1000);
+  assert.equal(config.THREAD_TASK_CARD_EXECUTION_WATCHDOG_STALE_MS, 30 * 60 * 1000);
+  assert.equal(config.THREAD_TASK_CARD_EXECUTION_WATCHDOG_LIMIT, 8);
+  assert.equal(config.MOBILE_WEB_LOG_MAX_BYTES, 512 * 1024);
+  assert.equal(config.MOBILE_WEB_LOG_KEEP_BYTES, 128 * 1024);
+  assert.equal(config.MOBILE_WEB_LOG_EVENT_MIN_INTERVAL_MS, 30000);
+  assert.equal(config.USER_BEHAVIOR_REPAIR_CARDS_DISABLED, false);
+  assert.equal(config.USER_BEHAVIOR_REPAIR_TARGET_THREAD_ID, "");
+  assert.equal(config.USER_BEHAVIOR_REPAIR_TARGET_ROLE, "plugin_worker");
+  assert.equal(config.USER_BEHAVIOR_REPAIR_TARGET_WORKSPACE, "");
+  assert.equal(config.USER_BEHAVIOR_REPAIR_DEDUPE_WINDOW_MS, 60 * 60 * 1000);
 });
 
 test("server runtime config applies env overrides and clamps hot-path limits", () => {
@@ -75,6 +86,17 @@ test("server runtime config applies env overrides and clamps hot-path limits", (
       CODEX_MOBILE_HOME_AI_SECRET_REF_KEY_FILE: "/runtime/secret-ref-key",
       CODEX_MOBILE_HOME_AI_SECRET_REF_CONSUME_PATH: "/api/native/secret-ref/consume",
       CODEX_MOBILE_HOME_AI_SECRET_REF_TIMEOUT_MS: "2500",
+      CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS: "0",
+      CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_STALE_MS: "10000",
+      CODEX_MOBILE_TASK_CARD_EXECUTION_WATCHDOG_LIMIT: "99",
+      CODEX_MOBILE_WEB_LOG_MAX_BYTES: "32768",
+      CODEX_MOBILE_WEB_LOG_KEEP_BYTES: "8192",
+      CODEX_MOBILE_WEB_LOG_EVENT_MIN_INTERVAL_MS: "90000",
+      CODEX_MOBILE_USER_BEHAVIOR_REPAIR_CARDS: "off",
+      CODEX_MOBILE_USER_BEHAVIOR_REPAIR_TARGET_THREAD_ID: "019f3181-4f2f-7aa3-8ae8-d12f6e23e7a5",
+      CODEX_MOBILE_USER_BEHAVIOR_REPAIR_TARGET_ROLE: "plugin_worker",
+      CODEX_MOBILE_USER_BEHAVIOR_REPAIR_TARGET_WORKSPACE: "/repo/codex-mobile-web",
+      CODEX_MOBILE_USER_BEHAVIOR_REPAIR_DEDUPE_WINDOW_MS: "120000",
     },
     codexHome: "/codex/home",
   });
@@ -95,18 +117,48 @@ test("server runtime config applies env overrides and clamps hot-path limits", (
   assert.equal(config.HOME_AI_SECRET_REF_KEY_FILE, "/runtime/secret-ref-key");
   assert.equal(config.HOME_AI_SECRET_REF_CONSUME_PATH, "/api/native/secret-ref/consume");
   assert.equal(config.HOME_AI_SECRET_REF_TIMEOUT_MS, 2500);
+  assert.equal(config.THREAD_TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS, 30000);
+  assert.equal(config.THREAD_TASK_CARD_EXECUTION_WATCHDOG_STALE_MS, 30000);
+  assert.equal(config.THREAD_TASK_CARD_EXECUTION_WATCHDOG_LIMIT, 8);
+  assert.equal(config.MOBILE_WEB_LOG_MAX_BYTES, 64 * 1024);
+  assert.equal(config.MOBILE_WEB_LOG_KEEP_BYTES, 16 * 1024);
+  assert.equal(config.MOBILE_WEB_LOG_EVENT_MIN_INTERVAL_MS, 60 * 1000);
+  assert.equal(config.USER_BEHAVIOR_REPAIR_CARDS_DISABLED, true);
+  assert.equal(config.USER_BEHAVIOR_REPAIR_TARGET_THREAD_ID, "019f3181-4f2f-7aa3-8ae8-d12f6e23e7a5");
+  assert.equal(config.USER_BEHAVIOR_REPAIR_TARGET_ROLE, "plugin_worker");
+  assert.equal(config.USER_BEHAVIOR_REPAIR_TARGET_WORKSPACE, "/repo/codex-mobile-web");
+  assert.equal(config.USER_BEHAVIOR_REPAIR_DEDUPE_WINDOW_MS, 120000);
 });
 
 test("server runtime config keeps duplicate desktop global state files unique", () => {
   const config = createConfig({
     env: {
       CODEX_MOBILE_SYNC_DESKTOP_WORKSPACES: "true",
-      CODEX_MOBILE_DESKTOP_GLOBAL_STATE_FILE: "/home/example/tester/.codex/.codex-global-state.json",
+      CODEX_MOBILE_DESKTOP_GLOBAL_STATE_FILE: "/home/tester/.codex/.codex-global-state.json",
     },
-    codexHome: "/home/example/tester/.codex",
+    codexHome: "/home/tester/.codex",
   });
 
-  assert.deepEqual(config.DESKTOP_GLOBAL_STATE_FILES, [
-    "/home/example/tester/.codex/.codex-global-state.json",
+  assert.deepEqual(config.DESKTOP_GLOBAL_STATE_READ_FILES, [
+    "/home/tester/.codex/.codex-global-state.json",
   ]);
+  assert.deepEqual(config.DESKTOP_GLOBAL_STATE_FILES, [
+    "/home/tester/.codex/.codex-global-state.json",
+  ]);
+});
+
+test("server runtime config reads current-user desktop global state without enabling sync writes", () => {
+  const config = createConfig({
+    env: {
+      CODEX_MOBILE_DESKTOP_GLOBAL_STATE_FILE: "/home/tester/.codex-desktop/.codex-global-state.json",
+    },
+    codexHome: "/runtime/active-codex",
+  });
+
+  assert.deepEqual(config.DESKTOP_GLOBAL_STATE_READ_FILES, [
+    "/home/tester/.codex-desktop/.codex-global-state.json",
+    "/home/tester/.codex/.codex-global-state.json",
+    "/runtime/active-codex/.codex-global-state.json",
+  ]);
+  assert.deepEqual(config.DESKTOP_GLOBAL_STATE_FILES, []);
 });

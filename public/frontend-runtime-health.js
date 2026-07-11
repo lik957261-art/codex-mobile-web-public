@@ -131,6 +131,52 @@
     }));
   }
 
+  function submittedMessageDomDuplicateEvent(input = {}) {
+    const elapsedMs = boundedCount(input.elapsedMs || input.elapsed_ms);
+    const domCount = boundedCount(input.domCount || input.dom_count);
+    const visibleCount = boundedCount(input.visibleCount || input.visible_count);
+    const duplicateUserMessageCount = boundedCount(input.duplicateUserMessageCount || input.duplicate_user_message_count);
+    const expectedDuplicateUserMessageCount = boundedCount(input.expectedDuplicateUserMessageCount || input.expected_duplicate_user_message_count);
+    const excessiveDuplicateUserMessageCount = Math.max(0, duplicateUserMessageCount - expectedDuplicateUserMessageCount);
+    const context = baseContext(Object.assign({}, input, {
+      surface: "user-operation",
+      action: input.action || "message-submit",
+    }));
+    return runtimeEvent({
+      diagnosticType: "submitted_message_dom_duplicate",
+      severityHint: "H2",
+      evidenceConfidence: 0.86,
+      errorCode: "submitted_message_dom_duplicate",
+      context,
+      counts: {
+        elapsed_ms: elapsedMs,
+        dom_count: domCount,
+        visible_count: visibleCount,
+        duplicate_user_message_count: duplicateUserMessageCount,
+        expected_duplicate_user_message_count: expectedDuplicateUserMessageCount,
+        excessive_duplicate_user_message_count: excessiveDuplicateUserMessageCount,
+        current_thread_match: boolCount(input.currentThreadMatch),
+        has_thread_submission: boolCount(input.hasThreadSubmission),
+        dom_has_submission: boolCount(input.domHasSubmission),
+        composer_busy: boolCount(input.composerBusy),
+      },
+      breadcrumbs: [{
+        kind: "user-operation",
+        code: "submitted-message-dom-duplicate",
+        status: "failed",
+        fields: {
+          elapsed_ms: elapsedMs,
+          dom_count: domCount,
+          visible_count: visibleCount,
+          duplicate_user_message_count: duplicateUserMessageCount,
+          expected_duplicate_user_message_count: expectedDuplicateUserMessageCount,
+          thread_hash: context.thread_hash || "",
+          item_hash: context.item_hash || "",
+        },
+      }],
+    });
+  }
+
   function submittedMessageDomProbeEffects(input = {}) {
     const elapsedMs = boundedCount(input.elapsedMs || input.elapsed_ms);
     const minElapsedMs = boundedCount(input.minElapsedMs || input.min_elapsed_ms || DEFAULT_SUBMISSION_PROBE_MIN_MS);
@@ -138,6 +184,27 @@
     if (!input.currentThreadMatch) return { effects: [], reason: "different-thread" };
     if (!input.hasThreadSubmission) return { effects: [], reason: "no-thread-submission" };
     const missing = !input.domHasSubmission;
+    const duplicateUserMessageCount = boundedCount(input.duplicateUserMessageCount || input.duplicate_user_message_count);
+    const expectedDuplicateUserMessageCount = boundedCount(input.expectedDuplicateUserMessageCount || input.expected_duplicate_user_message_count);
+    const excessiveDuplicateUserMessages = Math.max(0, duplicateUserMessageCount - expectedDuplicateUserMessageCount);
+    if (!missing && excessiveDuplicateUserMessages > 0) {
+      return {
+        effects: [
+          {
+            type: "diagnostic-failure",
+            diagnostic: submittedMessageDomDuplicateEvent(input),
+            diagnosticType: "submitted_message_dom_duplicate",
+            reason: "submitted-message-dom-duplicate",
+          },
+          {
+            type: "render-current-thread",
+            reason: "submitted-message-dom-duplicate",
+            stickToBottom: true,
+          },
+        ],
+        reason: "submitted-message-dom-duplicate",
+      };
+    }
     return {
       effects: [{
         type: missing ? "diagnostic-failure" : "diagnostic-success",
@@ -234,6 +301,7 @@
   }
 
   function threadListInteractionStallEvent(input = {}) {
+    const action = compactToken(input.action || input.action_name, "thread-list-interaction", 80);
     const maxRafDelayMs = boundedCount(input.maxRafDelayMs || input.max_raf_delay_ms);
     const maxScrollApplyMs = boundedCount(input.maxScrollApplyMs || input.max_scroll_apply_ms);
     const maxLongTaskMs = boundedCount(input.maxLongTaskMs || input.max_long_task_ms);
@@ -241,15 +309,27 @@
     const maxDelayMs = Math.max(maxRafDelayMs, maxScrollApplyMs, maxLongTaskMs, elapsedMs);
     const context = baseContext(Object.assign({}, input, {
       surface: "thread-list-runtime",
-      action: input.action || "thread-list-interaction",
+      action,
     }));
-    const errorCode = maxLongTaskMs >= Math.max(maxRafDelayMs, maxScrollApplyMs)
+    const recentThreadListInput = input.recentThreadListInput === true || input.recent_thread_list_input === true;
+    const passiveHeartbeatOnly = action === "thread-list-heartbeat"
+      && !recentThreadListInput
+      && maxLongTaskMs <= 0
+      && maxScrollApplyMs <= 0;
+    const errorCode = passiveHeartbeatOnly
+      ? "browser_thread_list_runtime_heartbeat_delayed"
+      : maxLongTaskMs >= Math.max(maxRafDelayMs, maxScrollApplyMs)
       ? "browser_main_thread_long_task"
       : "browser_thread_list_interaction_blocked";
+    const severityHint = passiveHeartbeatOnly
+      ? "H3"
+      : maxDelayMs >= boundedCount(input.h2ThresholdMs || input.h2_threshold_ms || 3000)
+        ? "H2"
+        : "H3";
     return runtimeEvent({
       diagnosticType: "thread_list_interaction_stall",
-      severityHint: maxDelayMs >= boundedCount(input.h2ThresholdMs || input.h2_threshold_ms || 3000) ? "H2" : "H3",
-      evidenceConfidence: maxDelayMs >= 3000 ? 0.86 : 0.74,
+      severityHint,
+      evidenceConfidence: severityHint === "H2" ? 0.86 : 0.74,
       errorCode,
       context,
       counts: {
@@ -261,6 +341,9 @@
         thread_list_count: boundedCount(input.threadListCount || input.thread_list_count),
         thread_list_visible: boolCount(input.threadListVisible || input.thread_list_visible),
         thread_list_monitorable: boolCount(input.threadListMonitorable || input.thread_list_monitorable),
+        passive_heartbeat: boolCount(passiveHeartbeatOnly),
+        recent_thread_list_input: boolCount(recentThreadListInput),
+        recent_input_age_ms: boundedCount(input.recentInputAgeMs || input.recent_input_age_ms),
         scroll_top: boundedCount(input.scrollTop || input.scroll_top),
         scroll_height: boundedCount(input.scrollHeight || input.scroll_height),
       },
@@ -333,8 +416,16 @@
       const visibleCount = boundedCount(source.visibleCount || source.visible_count);
       const duplicateCount = boundedCount(source.duplicateCount || source.duplicate_count);
       const effects = [];
+      const sameThreadRender = source.sameThreadRender === true || source.same_thread_render === true;
 
-      if (previousCount >= 2 && visibleCount >= 2 && domCount <= 1 && domCount < previousCount) {
+      const priorNonEmptyDomDropped = previousCount >= 2 && domCount <= 1 && domCount < previousCount;
+      const expectedNonEmptyDomDropped = visibleCount >= 2 && priorNonEmptyDomDropped;
+      const shellOrUnknownVisibleDrop = sameThreadRender && visibleCount <= 1 && priorNonEmptyDomDropped && /(?:early-shell|loading|shell)/i.test([
+        source.action,
+        source.renderMode || source.render_mode,
+        source.renderPlanReason || source.render_plan_reason,
+      ].filter(Boolean).join("|"));
+      if (expectedNonEmptyDomDropped || shellOrUnknownVisibleDrop) {
         effects.push({
           type: "diagnostic-failure",
           diagnostic: domDropEvent(Object.assign({}, source, { renderCount, fullRenderCount, fallbackCount })),

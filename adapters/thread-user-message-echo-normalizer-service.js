@@ -5,6 +5,7 @@ const {
 } = require("./message-pending-echo-service");
 
 const PROJECTION_INDEX_DUPLICATE_WINDOW_MS = 5_000;
+const SAME_TURN_DURABLE_DUPLICATE_WINDOW_MS = 5_000;
 
 function text(value) {
   return String(value || "").trim();
@@ -61,16 +62,32 @@ function hasDurableNonIndexId(item) {
 function userMessagePreferenceScore(item) {
   if (!isUserMessage(item)) return 0;
   let score = isSyntheticUserMessage(item) ? 0 : isProjectionIndexUserMessage(item) ? 20 : 100;
-  if (item.clientSubmissionId) score += 10;
+  if (userMessageSubmissionIds(item).length) score += 10;
   if (itemId(item)) score += 2;
   if (item.mobileVisibleKey || item.visibleKey) score += 1;
   return score;
 }
 
+function userMessageSubmissionIds(item) {
+  if (!isUserMessage(item)) return [];
+  const local = itemId(item).match(/^local-user-(.+)$/);
+  return [
+    item.clientSubmissionId,
+    item.clientId,
+    item.client_id,
+    item.submissionId,
+    item.submission_id,
+    item.mobileSubmissionId,
+    item.mobile_submission_id,
+    local && local[1],
+  ].map((value) => text(value)).filter(Boolean)
+    .filter((value, index, values) => values.indexOf(value) === index);
+}
+
 function sameClientSubmission(left, right) {
-  const a = text(left && left.clientSubmissionId);
-  const b = text(right && right.clientSubmissionId);
-  return Boolean(a && b && a === b);
+  const leftIds = userMessageSubmissionIds(left);
+  const rightIds = userMessageSubmissionIds(right);
+  return leftIds.some((value) => rightIds.includes(value));
 }
 
 function timestampMs(value) {
@@ -114,6 +131,12 @@ function nearProjectionIndexTimestamp(left, right) {
   return Boolean(a && b && Math.abs(a - b) <= PROJECTION_INDEX_DUPLICATE_WINDOW_MS);
 }
 
+function nearSameTurnDurableTimestamp(left, right) {
+  const a = itemTimestampMs(left);
+  const b = itemTimestampMs(right);
+  return Boolean(a && b && Math.abs(a - b) <= SAME_TURN_DURABLE_DUPLICATE_WINDOW_MS);
+}
+
 function userMessagesMayBeSameEvent(left, right) {
   if (!isUserMessage(left) || !isUserMessage(right)) return false;
   if (sameClientSubmission(left, right)) return true;
@@ -124,13 +147,18 @@ function userMessagesMayBeSameEvent(left, right) {
   if (leftProjectionIndex !== rightProjectionIndex) {
     return leftProjectionIndex ? hasDurableNonIndexId(right) : hasDurableNonIndexId(left);
   }
+  if (hasDurableNonIndexId(left) && hasDurableNonIndexId(right)) {
+    return nearSameTurnDurableTimestamp(left, right);
+  }
   return false;
 }
 
 function userMessagesAreSameEvent(left, right) {
   if (!isUserMessage(left) || !isUserMessage(right)) return false;
   if (!userMessagesMayBeSameEvent(left, right)) return false;
+  if (sameClientSubmission(left, right)) return true;
   if (!sameUserMessageContent(left, right)) return false;
+  if (isSyntheticUserMessage(left) || isSyntheticUserMessage(right)) return true;
   const leftProjectionIndex = isProjectionIndexUserMessage(left);
   const rightProjectionIndex = isProjectionIndexUserMessage(right);
   if (leftProjectionIndex && rightProjectionIndex) {
@@ -139,9 +167,11 @@ function userMessagesAreSameEvent(left, right) {
   if (leftProjectionIndex !== rightProjectionIndex) {
     return leftProjectionIndex ? hasDurableNonIndexId(right) : hasDurableNonIndexId(left);
   }
-  return sameClientSubmission(left, right)
-    || isSyntheticUserMessage(left)
-    || isSyntheticUserMessage(right);
+  if (!isSyntheticUserMessage(left) && !isSyntheticUserMessage(right)
+    && hasDurableNonIndexId(left) && hasDurableNonIndexId(right)) {
+    return nearSameTurnDurableTimestamp(left, right);
+  }
+  return false;
 }
 
 function findMatchingUserMessageIndex(items, candidate) {

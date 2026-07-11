@@ -84,6 +84,6 @@ test("client render stability guard is part of the static shell", () => {
   assert.ok(shellManifest.hashAssets.includes("/composer-runtime.js"));
   assert.match(swJs, /shell-asset-manifest\.js/);
   assert.match(serverRuntimeUtilsJs, /shell-asset-manifest\.json/);
-  assert.match(shellManifest.clientBuildId, /^0\.1\.12\|codex-mobile-shell-v628-[a-f0-9]{12}$/);
-  assert.match(shellManifest.shellCacheName, /^codex-mobile-shell-v628-[a-f0-9]{12}$/);
+  assert.match(shellManifest.clientBuildId, /^0\.1\.13\|codex-mobile-shell-v629-[a-f0-9]{12}$/);
+  assert.match(shellManifest.shellCacheName, /^codex-mobile-shell-v629-[a-f0-9]{12}$/);
 });

@@ -279,7 +279,33 @@ function createThreadDetailRuntime(deps = {}) {
       }
       visible.push({ item, sourceIndex: index });
     });
-    const filtered = visible.filter(Boolean);
+    const filtered = [];
+    for (const entry of visible.filter(Boolean)) {
+      const item = entry && entry.item;
+      if (item && item.type === "userMessage") {
+        const existingIndex = filtered.findIndex((candidate) => candidate
+          && candidate.item
+          && candidate.item.type === "userMessage"
+          && userMessagesAreSameTurnDuplicateEvent(candidate.item, item));
+        if (existingIndex >= 0) {
+          const existingEntry = filtered[existingIndex];
+          const existingPriority = userMessageShadowPriority(existingEntry && existingEntry.item);
+          const incomingPriority = userMessageShadowPriority(item);
+          const preferredEntry = incomingPriority >= existingPriority ? entry : existingEntry;
+          const sourceIndex = Number.isInteger(preferredEntry && preferredEntry.sourceIndex)
+            ? preferredEntry.sourceIndex
+            : Number.isInteger(existingEntry && existingEntry.sourceIndex)
+              ? existingEntry.sourceIndex
+              : entry.sourceIndex;
+          filtered[existingIndex] = {
+            item: mergeLikelySameUserMessage(existingEntry && existingEntry.item, item),
+            sourceIndex,
+          };
+          continue;
+        }
+      }
+      filtered.push(entry);
+    }
     const supersededLive = isSupersededLiveTurn(turn);
     if (supersededLive && filtered.length && filtered.every((entry) => isTurnUsageSummaryItem(entry.item))) return [];
     return limitRawThreadVisibleEntries(filtered, thread);
@@ -489,10 +515,19 @@ function createThreadDetailRuntime(deps = {}) {
   function userMessageSubmissionIdCandidates(item) {
     if (!item || item.type !== "userMessage") return [];
     const values = [];
-    const explicit = String(item.clientSubmissionId || "").trim();
-    if (explicit) values.push(explicit);
+    const pushCandidate = (value) => {
+      const text = String(value || "").trim();
+      if (text) values.push(text);
+    };
+    pushCandidate(item.clientSubmissionId);
+    pushCandidate(item.clientId);
+    pushCandidate(item.client_id);
+    pushCandidate(item.submissionId);
+    pushCandidate(item.submission_id);
+    pushCandidate(item.mobileSubmissionId);
+    pushCandidate(item.mobile_submission_id);
     const local = String(item.id || "").match(/^local-user-(.+)$/);
-    if (local && local[1]) values.push(local[1]);
+    if (local && local[1]) pushCandidate(local[1]);
     return [...new Set(values)];
   }
 
@@ -669,6 +704,10 @@ function createThreadDetailRuntime(deps = {}) {
   }
 
   function userMessagesCanShadow(left, right) {
+    if (left && right && left.type === "userMessage" && right.type === "userMessage"
+      && userMessagesShareSubmissionId(left, right)) {
+      return true;
+    }
     const leftSubmittedEcho = Boolean(String(left && left.clientSubmissionId || "").trim() && !(left && left.mobileSendError));
     const rightSubmittedEcho = Boolean(String(right && right.clientSubmissionId || "").trim() && !(right && right.mobileSendError));
     const projectionIndexId = (item) => String(item && (item.id || item.itemId || item.item_id) || "").trim().match(/^item-(\d+)$/i);
@@ -704,6 +743,16 @@ function createThreadDetailRuntime(deps = {}) {
       && right.type === "userMessage"
       && (isOptimisticUserMessage(left) || isOptimisticUserMessage(right) || leftSubmittedEcho || rightSubmittedEcho || projectionIndexEcho)
       && userMessagesLikelySame(left, right));
+  }
+
+  function userMessagesAreSameTurnDuplicateEvent(left, right) {
+    if (!left || !right || left.type !== "userMessage" || right.type !== "userMessage") return false;
+    if (userMessagesCanShadow(left, right)) return true;
+    if (!userMessagesLikelySame(left, right)) return false;
+    const leftTime = userMessageTimestampMs(left);
+    const rightTime = userMessageTimestampMs(right);
+    if (!leftTime || !rightTime || Math.abs(leftTime - rightTime) > 5000) return false;
+    return true;
   }
 
   function userMessageTimestampMs(item) {
@@ -764,19 +813,77 @@ function createThreadDetailRuntime(deps = {}) {
     return Boolean(turn.live || turn.mobileLive || turn.mobileActiveLiveTurn || turn.mobilePendingOverlay);
   }
 
+  function isLocalPendingSubmissionEcho(item) {
+    return Boolean(
+      item
+      && item.type === "userMessage"
+      && item.mobilePendingSubmission
+      && String(item.clientSubmissionId || "").trim()
+      && /^local-user-/.test(String(item.id || "")),
+    );
+  }
+
+  function completedDurableTurnSettlesOptimisticEcho(durableItem, optimisticItem, durableTurn = null) {
+    if (!durableTurn) return false;
+    const status = durableTurn.status;
+    const statusType = status && typeof status === "object"
+      ? String(status.type || status.status || status.state || "")
+      : String(status || "");
+    const timestampMs = (value) => {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+      if (typeof value === "string" && value.trim()) {
+        const numeric = Number(value);
+        if (Number.isFinite(numeric) && numeric > 0) return numeric;
+        const parsed = Date.parse(value);
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+      }
+      return 0;
+    };
+    const durableCompletedMs = [
+      "completedAtMs",
+      "completedAt",
+      "completed_at_ms",
+      "completed_at",
+      "updatedAtMs",
+      "updatedAt",
+      "updated_at_ms",
+      "updated_at",
+    ].reduce((value, field) => value || timestampMs(durableTurn[field]), 0);
+    if (!durableCompletedMs && !/completed|failed|cancel|error|interrupted/i.test(statusType)) return false;
+    if (!isLocalPendingSubmissionEcho(optimisticItem)) return false;
+    if (!userMessagesLikelySame(durableItem, optimisticItem)) return false;
+    const optimisticMs = userMessageTimestampMs(optimisticItem);
+    if (!optimisticMs) return Boolean(durableCompletedMs);
+    return Boolean(durableCompletedMs && optimisticMs <= durableCompletedMs);
+  }
+
   function optimisticEchoCanMatchEarlierDurable(durableItem, optimisticItem, durableTurn = null) {
     if (!durableItem || !optimisticItem) return false;
     if (durableItem.type !== "userMessage" || optimisticItem.type !== "userMessage") return false;
     if (isOptimisticUserMessage(durableItem) || !isOptimisticUserMessage(optimisticItem)) return false;
     if (userMessagesShareSubmissionId(durableItem, optimisticItem)) return true;
+    const durableTurnSubmissionKey = String(durableTurn && durableTurn.mobileLocalSubmissionRenderKey || "").trim();
+    if (durableTurnSubmissionKey) {
+      const localSubmissionRenderKey = (clientSubmissionId) => {
+        const text = String(clientSubmissionId || "").trim();
+        if (!text) return "";
+        let hash = 2166136261;
+        for (let index = 0; index < text.length; index += 1) {
+          hash ^= text.charCodeAt(index);
+          hash = Math.imul(hash, 16777619);
+        }
+        return `submitted:${(hash >>> 0).toString(36)}`;
+      };
+      if (userMessageSubmissionIdCandidates(optimisticItem)
+        .some((submissionId) => durableTurnSubmissionKey === localSubmissionRenderKey(submissionId))) {
+        return userMessagesLikelySame(durableItem, optimisticItem);
+      }
+    }
+    if (completedDurableTurnSettlesOptimisticEcho(durableItem, optimisticItem, durableTurn)) return true;
     const likelySameNearby = userMessagesLikelySame(durableItem, optimisticItem)
       && userMessagesHaveNearbyTimestamps(durableItem, optimisticItem);
     if (optimisticItem.mobileSendError) return likelySameNearby;
-    const localPendingEcho = Boolean(
-      optimisticItem.mobilePendingSubmission
-      && String(optimisticItem.clientSubmissionId || "").trim()
-      && /^local-user-/.test(String(optimisticItem.id || "")),
-    );
+    const localPendingEcho = isLocalPendingSubmissionEcho(optimisticItem);
     if (!localPendingEcho || !durableTurnCanReceivePendingEcho(durableTurn)) return false;
     return likelySameNearby;
   }
@@ -843,7 +950,7 @@ function createThreadDetailRuntime(deps = {}) {
     const out = [];
     for (const item of items || []) {
       if (item && item.type === "userMessage") {
-        const existingIndex = out.findIndex((candidate) => userMessagesCanShadow(candidate, item));
+        const existingIndex = out.findIndex((candidate) => userMessagesAreSameTurnDuplicateEvent(candidate, item));
         if (existingIndex >= 0) {
           out[existingIndex] = mergeLikelySameUserMessage(out[existingIndex], item);
           continue;
@@ -898,6 +1005,7 @@ function createThreadDetailRuntime(deps = {}) {
     if (!isOptimisticUserMessage(item) || !Array.isArray(durableUserMessages)) return false;
     return durableUserMessages.some((real) => {
       if (!real || !real.item || real.item.id === item.id) return false;
+      if (userMessagesShareSubmissionId(real.item, item)) return true;
       if (!userMessagesCanShadow(real.item, item)) return false;
       if (real.turnIndex >= turnIndex) return true;
       if (optimisticEchoCanMatchEarlierDurable(real.item, item, real.turn)) return true;
@@ -1067,7 +1175,22 @@ function createThreadDetailRuntime(deps = {}) {
   function insertLocalOnlyItemByExistingOrder(merged, item, existingIndex, existingIndexToMergedIndex) {
     if (!item) return;
     let insertAt = -1;
+    if (isLocalPendingSubmissionEcho(item)) {
+      const itemTime = userMessageTimestampMs(item);
+      if (itemTime) {
+        for (let index = 0; index < merged.length; index += 1) {
+          const candidateTime = userMessageTimestampMs(merged[index]);
+          if (!candidateTime) continue;
+          if (candidateTime > itemTime) {
+            insertAt = index;
+            break;
+          }
+          insertAt = index + 1;
+        }
+      }
+    }
     for (let index = existingIndex - 1; index >= 0; index -= 1) {
+      if (insertAt >= 0) break;
       if (existingIndexToMergedIndex.has(index)) {
         insertAt = existingIndexToMergedIndex.get(index) + 1;
         break;
@@ -1225,6 +1348,14 @@ function createThreadDetailRuntime(deps = {}) {
     isReasoningItem,
     userMessageHasSubmissionId,
     userMessagesCanShadow,
+    durableUserMessageSettlesPendingEcho: (durableItem, pendingItem, durableTurn) => Boolean(
+      durableItem
+      && pendingItem
+      && durableItem.type === "userMessage"
+      && pendingItem.type === "userMessage"
+      && !isOptimisticUserMessage(durableItem)
+      && optimisticEchoCanMatchEarlierDurable(durableItem, pendingItem, durableTurn)
+    ),
     isTurnComplete,
     isRunningStatus,
     isIncompleteInterruptedTurn,
@@ -1317,6 +1448,7 @@ function createThreadDetailRuntime(deps = {}) {
     userMessageSpecificity,
     userMessagesLikelySame,
     userMessagesCanShadow,
+    userMessagesAreSameTurnDuplicateEvent,
     userMessageTimestampMs,
     userMessagesHaveNearbyTimestamps,
     isProjectionIndexUserMessage,

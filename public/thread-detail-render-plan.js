@@ -31,6 +31,20 @@
     return Array.isArray(value) ? value.map((entry) => String(entry || "")).filter(Boolean) : [];
   }
 
+  function signatureThreadId(value) {
+    const signature = normalizeSignature(value);
+    if (!signature) return "";
+    if (signature.startsWith("loading|")) return signature.split("|")[1] || "";
+    if (signature.startsWith("load-error|")) return signature.split("|")[1] || "";
+    if (signature[0] !== "{") return "";
+    try {
+      const parsed = JSON.parse(signature);
+      return String(parsed && parsed.threadId || "");
+    } catch (_) {
+      return "";
+    }
+  }
+
   function turnOrderMismatch(expectedValue, renderedValue) {
     const expected = normalizedStringList(expectedValue);
     const rendered = normalizedStringList(renderedValue);
@@ -849,24 +863,29 @@
       && localPatchAttempted
       && !locallyPatchedDetail
       && !tilePanePatchedDetail);
+    const patchRejectReason = reportLocalPatchRejected
+      ? compactReason(input.patchRejectReason, "unknown")
+      : "";
+    const finalizeResult = {
+      locallyPatchedDetail,
+      tilePanePatchedDetail,
+    };
+    if (patchRejectReason === "patch-shell-changed") {
+      finalizeResult.patchRejectReason = patchRejectReason;
+    }
     return {
       patchResult,
       locallyPatchedDetail,
       tilePanePatchedDetail,
       detailPatchMs,
       patchTimingSource,
-      patchRejectReason: reportLocalPatchRejected
-        ? compactReason(input.patchRejectReason, "unknown")
-        : "",
+      patchRejectReason,
       reportLocalPatchRejected,
       localPatchAttempted,
       tilePanePatchAttempted,
       patchResult,
       patchTimingSource,
-      finalizeResult: {
-        locallyPatchedDetail,
-        tilePanePatchedDetail,
-      },
+      finalizeResult,
     };
   }
 
@@ -1038,6 +1057,7 @@
   function finalizeThreadDetailRenderPlan(plan = {}, result = {}) {
     const tilePanePatchedDetail = Boolean(result.tilePanePatchedDetail);
     const locallyPatchedDetail = Boolean(result.locallyPatchedDetail);
+    const patchRejectReason = compactReason(result.patchRejectReason, "");
     if (!plan.shouldRenderDetail) {
       if (tilePanePatchedDetail) {
         return {
@@ -1071,6 +1091,15 @@
         locallyPatchedDetail: true,
         tilePanePatchedDetail: false,
         renderAction: "local-patch-metadata-update",
+        projectionConsistencyPhase: "refresh-local-patch",
+      };
+    }
+    if (patchRejectReason === "patch-shell-changed") {
+      return {
+        detailRenderMode: "shell-patch",
+        locallyPatchedDetail: false,
+        tilePanePatchedDetail: false,
+        renderAction: "shell-patch-render",
         projectionConsistencyPhase: "refresh-local-patch",
       };
     }
@@ -1123,6 +1152,22 @@
         projectionConsistencyPhase,
         consistencyCheck,
         reason: "metadata-only",
+      };
+    }
+    if (renderAction === "shell-patch-render") {
+      return {
+        renderAction,
+        metadataUpdateMode: "",
+        metadataEffects: [],
+        executionAction: "shell-patch-render",
+        timingTarget: "conversation-render",
+        runFullRender: false,
+        projectionConsistencyPhase: projectionConsistencyPhase || "refresh-local-patch",
+        consistencyCheck: planThreadDetailRefreshConsistencyCheck({
+          projectionConsistencyPhase: projectionConsistencyPhase || "refresh-local-patch",
+          detailRenderMode: outcome.detailRenderMode,
+        }),
+        reason: "shell-patch-render",
       };
     }
     if (renderAction === "full-render") {
@@ -1247,6 +1292,7 @@
       renderElapsedMs: normalizedDurationMs(timings.renderElapsedMs),
       detailRenderMode: compactReason(input.detailRenderMode, cached ? "cached-current" : "first-paint"),
       cached,
+      fullBackfillPlanned: input.fullBackfillPlanned === true,
     };
     addOptionalTimingField(out, "mergeMs", timings.mergeMs);
     addOptionalTimingField(out, "draftRestoreMs", timings.draftRestoreMs);
@@ -1264,6 +1310,7 @@
       threadId: input.threadId,
       detailRenderMode: input.detailRenderMode || (cached ? "cached-current" : "first-paint"),
       cached,
+      fullBackfillPlanned: input.fullBackfillPlanned === true,
       timings: objectOrEmpty(input.timings),
     });
     return {
@@ -1280,6 +1327,7 @@
         omittedTurns: normalizedCount(input.omittedTurns),
         rolloutSizeBytes: normalizedCount(input.rolloutSizeBytes),
         threadHash: compactReason(input.threadHash, ""),
+        fullBackfillPlanned: input.fullBackfillPlanned === true,
       },
       reason: cached ? "cached-current-reporting" : "first-paint-reporting",
     };
@@ -1413,6 +1461,19 @@
         reason: "full-render",
       };
     }
+    if (executionAction === "shell-patch-render") {
+      return {
+        effects: [
+          {
+            type: "shell-patch-render",
+            timingTarget: "conversation-render",
+            metadataEffects: [],
+            requireEffects: false,
+          },
+        ],
+        reason: "shell-patch-render",
+      };
+    }
     if (!executionAction || executionAction === "none") {
       return {
         effects: [],
@@ -1470,6 +1531,11 @@
           threadId: compactReason(input.threadId, ""),
           seq: Number.isFinite(seq) ? seq : 0,
           source: compactReason(input.source, "").slice(0, 40),
+        },
+        {
+          type: "schedule-current-thread-refresh-if-deferred-seed",
+          delayMs: 900,
+          reason: "deferred-projection-seed",
         },
         { type: "schedule-usage-backfill-refresh" },
       ],
@@ -1632,6 +1698,7 @@
           context: {
             action: "thread-detail-load",
             threadId,
+            fullBackfillPlanned: input.fullBackfillPlanned === true,
           },
         },
         {
@@ -1830,12 +1897,12 @@
         emptyMessage: "",
       };
     }
-    const hasPrimaryContent = hasHtml(input.turnsHtml) || hasHtml(input.approvalsHtml) || hasHtml(input.taskCardsHtml);
+    const hasPrimaryContent = hasHtml(input.taskCardReceiptsHtml) || hasHtml(input.turnsHtml) || hasHtml(input.approvalsHtml) || hasHtml(input.taskCardsHtml);
     const emptyMessage = input.readWarningMessage
       ? "暂时没有可显示的完整消息。共享模式恢复后刷新这个页面即可继续读取。"
       : "No visible turns.";
     const body = hasPrimaryContent
-      ? `${text(input.turnsHtml)}${text(input.approvalsHtml)}${text(input.taskCardsHtml)}${text(input.pluginRefreshNotice)}`
+      ? `${text(input.turnsHtml)}${text(input.taskCardReceiptsHtml)}${text(input.approvalsHtml)}${text(input.taskCardsHtml)}${text(input.pluginRefreshNotice)}`
       : `${text(input.pluginRefreshNotice)}<div class="empty-state entry-animate">${escape(emptyMessage)}</div>`;
     return {
       mode: "detail",
@@ -1851,6 +1918,31 @@
   function planSingleThreadEarlyShellExecution(input = {}) {
     const loadingWithoutVisibleTurns = Boolean(input.loadingWithoutVisibleTurns);
     const loadError = text(input.loadError);
+    const threadId = text(input.threadId || input.currentThreadId);
+    const renderedThreadId = signatureThreadId(input.renderedConversationSignature);
+    const renderedDomTurnCount = normalizedCount(input.renderedDomTurnCount);
+    const renderedDomItemCount = normalizedCount(input.renderedDomItemCount);
+    const hasSameThreadVisibleDom = Boolean(
+      loadingWithoutVisibleTurns
+      && !loadError
+      && threadId
+      && renderedThreadId === threadId
+      && (renderedDomTurnCount > 0 || renderedDomItemCount > 0)
+    );
+    if (hasSameThreadVisibleDom) {
+      return {
+        shouldRender: false,
+        mode: "detail",
+        reason: "preserve-existing-visible-dom",
+        html: "",
+        clearLiveOperationDock: false,
+        bindRetry: false,
+        retryThreadId: "",
+        conversationSignature: text(input.conversationSignature),
+        patchShellSignature: text(input.patchShellSignature),
+        stickToBottom: Boolean(input.stickToBottom),
+      };
+    }
     if (!loadingWithoutVisibleTurns && !loadError) {
       return {
         shouldRender: false,
@@ -1866,7 +1958,7 @@
       };
     }
     const shellPlan = planSingleThreadFullRenderShell({
-      threadId: input.threadId || input.currentThreadId,
+      threadId,
       currentThreadId: input.currentThreadId,
       loadingWithoutVisibleTurns,
       loadError,

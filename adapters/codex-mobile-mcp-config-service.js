@@ -4,6 +4,18 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const DEFAULT_SERVER_NAME = "codex_mobile";
+const CODEX_MOBILE_MCP_TOOL_NAMES = [
+  "list_threads",
+  "delegate_to_thread",
+  "start_loop",
+  "loop_status",
+  "thread_lifecycle",
+  "return_to_source",
+  "task_card_heartbeat",
+  "rmw_list_workspaces",
+  "rmw_dispatch_task_card",
+  "rmw_read_task_card",
+];
 
 function tomlBasicString(value) {
   return JSON.stringify(String(value || ""));
@@ -65,23 +77,28 @@ function buildCodexMobileMcpSection(options = {}) {
   const scriptPath = path.resolve(rawScriptPath);
   const baseUrl = normalizeBaseUrl(options.baseUrl || "http://127.0.0.1:8787");
   const keyFile = String(options.keyFile || "").trim();
+  const rmwControlUrl = String(options.rmwControlUrl || "http://127.0.0.1:8797").trim();
+  const rmwControlCredentialFile = String(options.rmwControlCredentialFile || options.rmwControlTokenFile || "").trim();
+  const rmwControlStateFile = String(options.rmwControlStateFile || "").trim();
   const args = [scriptPath, "--server", baseUrl];
   if (keyFile) args.push("--key-file", keyFile);
-  return [
+  if (rmwControlUrl) args.push("--rmw-control-url", normalizeBaseUrl(rmwControlUrl));
+  if (rmwControlCredentialFile) args.push("--rmw-control-credential-file", rmwControlCredentialFile);
+  if (rmwControlStateFile) args.push("--rmw-control-state-file", rmwControlStateFile);
+  const lines = [
     configSectionHeader(serverName),
     `command = ${tomlBasicString(command)}`,
     `args = ${tomlArray(args)}`,
     "",
-    toolSectionHeader(serverName, "list_threads"),
-    `approval_mode = ${tomlBasicString("approve")}`,
-    "",
-    toolSectionHeader(serverName, "delegate_to_thread"),
-    `approval_mode = ${tomlBasicString("approve")}`,
-    "",
-    toolSectionHeader(serverName, "return_to_source"),
-    `approval_mode = ${tomlBasicString("approve")}`,
-    "",
-  ].join("\n");
+  ];
+  for (const toolName of CODEX_MOBILE_MCP_TOOL_NAMES) {
+    lines.push(
+      toolSectionHeader(serverName, toolName),
+      `approval_mode = ${tomlBasicString("approve")}`,
+      "",
+    );
+  }
+  return lines.join("\n");
 }
 
 function ensureCodexMobileMcpServerInConfig(configPath, options = {}) {
@@ -120,6 +137,7 @@ function ensureCodexMobileMcpServer(options = {}) {
 }
 
 module.exports = {
+  CODEX_MOBILE_MCP_TOOL_NAMES,
   DEFAULT_SERVER_NAME,
   buildCodexMobileMcpSection,
   ensureCodexMobileMcpServer,

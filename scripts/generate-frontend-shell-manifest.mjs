@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 
 export const SHELL_MANIFEST_SCHEMA_VERSION = 4;
-export const SHELL_CACHE_NAME_BASE = "codex-mobile-shell-v628";
+export const SHELL_CACHE_NAME_BASE = "codex-mobile-shell-v629";
 export const SHELL_SCRIPT_BLOCK_START = "<!-- CODEX_MOBILE_SHELL_SCRIPTS:BEGIN -->";
 export const SHELL_SCRIPT_BLOCK_END = "<!-- CODEX_MOBILE_SHELL_SCRIPTS:END -->";
 
@@ -196,6 +196,32 @@ function shellCacheContentHash(root, assets, appVersion) {
 
 export function shellCacheNameForAssets(root, assets, appVersion = packageVersion(root)) {
   return `${SHELL_CACHE_NAME_BASE}-${shellCacheContentHash(root, assets, appVersion)}`;
+}
+
+function normalizeShellCacheIdentity(identity, appVersion, classicShellCacheName) {
+  if (!identity || typeof identity !== "object") return null;
+  const shellCacheName = String(identity.shellCacheName || "").trim();
+  const clientBuildId = String(identity.clientBuildId || "").trim();
+  const viteArtifactCache = identity.viteArtifactCache && typeof identity.viteArtifactCache === "object"
+    ? identity.viteArtifactCache
+    : null;
+  if (!shellCacheName || !clientBuildId || !viteArtifactCache) return null;
+  if (clientBuildId !== `${appVersion}|${shellCacheName}`) return null;
+  if (String(viteArtifactCache.baseShellCacheName || "") !== classicShellCacheName) return null;
+  return {
+    shellCacheName,
+    clientBuildId,
+    viteArtifactCache,
+  };
+}
+
+function existingShellCacheIdentity(root, appVersion, classicShellCacheName) {
+  try {
+    const manifest = JSON.parse(readText(root, "public/shell-asset-manifest.json"));
+    return normalizeShellCacheIdentity(manifest, appVersion, classicShellCacheName);
+  } catch (_) {
+    return null;
+  }
 }
 
 function assertAssetsExist(root, assets) {
@@ -402,7 +428,7 @@ export function canonicalShellScriptAssets() {
   return uniqueValues(SHELL_ENTRY_GROUP_DEFINITIONS.flatMap((definition) => definition.assets));
 }
 
-export function buildPublicShellManifest(root = process.cwd()) {
+export function buildPublicShellManifest(root = process.cwd(), options = {}) {
   const indexHtml = readText(root, "public/index.html");
   const appVersion = packageVersion(root);
   const hasGeneratedScriptBlock = indexHtml.includes(SHELL_SCRIPT_BLOCK_START)
@@ -438,7 +464,11 @@ export function buildPublicShellManifest(root = process.cwd()) {
     "/sw.js",
   ]);
   assertAssetsExist(root, pageShellAssets);
-  const shellCacheName = shellCacheNameForAssets(root, hashAssets, appVersion);
+  const classicShellCacheName = shellCacheNameForAssets(root, hashAssets, appVersion);
+  const useExistingViteArtifactCache = options.useExistingViteArtifactCache !== false;
+  const cacheIdentity = normalizeShellCacheIdentity(options.cacheIdentity, appVersion, classicShellCacheName)
+    || (useExistingViteArtifactCache ? existingShellCacheIdentity(root, appVersion, classicShellCacheName) : null);
+  const shellCacheName = cacheIdentity ? cacheIdentity.shellCacheName : classicShellCacheName;
   const classicGlobalExports = buildClassicGlobalExports(root, scriptAssets);
   const startupGlobalContracts = buildStartupGlobalContracts(root, entryGroups, classicGlobalExports);
   const missingStartupGlobals = startupGlobalContracts
@@ -452,6 +482,8 @@ export function buildPublicShellManifest(root = process.cwd()) {
     generatedBy: "generate-frontend-shell-manifest",
     shellCacheName,
     clientBuildId: `${appVersion}|${shellCacheName}`,
+    classicShellCacheName,
+    ...(cacheIdentity ? { viteArtifactCache: cacheIdentity.viteArtifactCache } : {}),
     scriptAssets,
     entryGroups,
     classicGlobalExports,
@@ -515,8 +547,8 @@ function manifestJsSource(manifest) {
   ].join("\n");
 }
 
-export function generatedManifestFiles(root = process.cwd()) {
-  const manifest = buildPublicShellManifest(root);
+export function generatedManifestFiles(root = process.cwd(), options = {}) {
+  const manifest = buildPublicShellManifest(root, options);
   const indexHtmlPath = path.join(root, "public", "index.html");
   const indexHtml = fs.readFileSync(indexHtmlPath, "utf8");
   return {
@@ -539,7 +571,7 @@ export function generatedManifestFiles(root = process.cwd()) {
 }
 
 export function writePublicShellManifest(root = process.cwd(), options = {}) {
-  const generated = generatedManifestFiles(root);
+  const generated = generatedManifestFiles(root, options);
   const mismatches = [];
   for (const file of generated.files) {
     const current = fs.existsSync(file.path) ? fs.readFileSync(file.path, "utf8") : "";

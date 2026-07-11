@@ -72,6 +72,26 @@ test("app update status is read through the maintenance service with safe public
   ]);
 });
 
+test("source snapshot without git metadata is an unsupported update mode, not an update failure", async () => {
+  const service = createAppMaintenanceService({
+    appRoot: "/deploy/codex-mobile-web",
+    appVersion: "0.1.13",
+    runGit: async () => {
+      const err = new Error("not a git repository");
+      err.stderr = "fatal: not a git repository";
+      throw err;
+    },
+  });
+
+  const status = await service.refreshAppUpdateStatus({ force: true });
+
+  assert.equal(status.supported, false);
+  assert.equal(status.version, "0.1.13");
+  assert.equal(status.reason, "not a git worktree");
+  assert.equal(status.error, undefined);
+  assert.equal(status.updateAvailable, false);
+});
+
 test("GitHub preview status uses bounded normalization and an in-flight/cache owner", async () => {
   let fetchCount = 0;
   const service = createAppMaintenanceService({

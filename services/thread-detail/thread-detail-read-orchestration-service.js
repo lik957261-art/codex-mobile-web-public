@@ -131,6 +131,20 @@ function activeTurnIdFromThread(thread) {
   return "";
 }
 
+function activeTurnFromThread(thread, expectedTurnId = "") {
+  const turns = Array.isArray(thread && thread.turns) ? thread.turns : [];
+  const expected = nonEmptyText(expectedTurnId);
+  let fallback = null;
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (!isActiveTurn(turn)) continue;
+    const id = nonEmptyText(turn && (turn.id || turn.turnId || turn.turn_id));
+    if (expected && id === expected) return turn;
+    if (!fallback) fallback = turn;
+  }
+  return expected ? null : fallback;
+}
+
 function activeTurnIdFromOverlayInput(input) {
   return nonEmptyText(input && input.activeTurnId)
     || nonEmptyText(input && input.turnId)
@@ -139,6 +153,37 @@ function activeTurnIdFromOverlayInput(input) {
       || input.overlayTurn.turnId
       || input.overlayTurn.turn_id
     ));
+}
+
+function coverageForWindowCount(count) {
+  return Number(count || 0) > 0 ? "present" : "none";
+}
+
+function activeOverlayInputFromWindowThread(thread, summary, baseInput = {}) {
+  const expectedTurnId = summaryActiveTurnMarker(summary) || activeTurnIdFromThread(thread);
+  const overlayTurn = activeTurnFromThread(thread, expectedTurnId);
+  if (!overlayTurn) return null;
+  const evidence = summarizeActiveOverlayTurnEvidence(overlayTurn);
+  const activeTurnId = expectedTurnId || evidence.turnId || activeTurnIdFromThread(thread);
+  if (!activeTurnId) return null;
+  return Object.assign({}, baseInput || {}, {
+    activeTurnId,
+    overlaySource: "server-active-overlay",
+    overlayTurn,
+    overlayEvidence: evidence,
+    overlayCompleteness: "full",
+    overlayPartial: false,
+    overlayPartialKind: "",
+    overlaySignatureHashPresent: true,
+    overlayUnavailableReason: "",
+    operationCoverage: coverageForWindowCount(evidence.operationItems),
+    uploadCoverage: coverageForWindowCount(evidence.uploadItems),
+    assistantDeltaCoverage: evidence.assistantItems > 0 ? "fresh" : "none",
+    receiptCoverage: coverageForWindowCount(evidence.receiptItems),
+    overlayTimestampMs: safeNonNegativeNumber(baseInput && baseInput.overlayTimestampMs)
+      || evidence.latestItemTimestampMs
+      || 0,
+  });
 }
 
 function projectionThreadIsPartial(thread) {
@@ -181,6 +226,28 @@ function overlayCompletenessAllowsCachedActiveWindow(input) {
 
 function overlayRequiresFreshActiveWindow(input) {
   return overlaySource(input) === "projection-live" && !overlayCompletenessAllowsCachedActiveWindow(input);
+}
+
+function projectionThreadIsActiveOverlayWindow(thread) {
+  if (!thread || typeof thread !== "object") return false;
+  const projection = thread.mobileProjection && typeof thread.mobileProjection === "object"
+    ? thread.mobileProjection
+    : {};
+  return projection.activeOverlayWindow === true
+    || nonEmptyText(projection.partialKind).toLowerCase() === "turns-list-active-overlay-window"
+    || nonEmptyText(thread.mobileReadMode).toLowerCase() === "projection-active-window";
+}
+
+function trustedActiveOverlayWindowForOverlay(thread, overlayInput, activeTurnId) {
+  if (!projectionThreadIsActiveOverlayWindow(thread)) return false;
+  if (!threadHasTurn(thread, activeTurnId)) return false;
+  const overlayRevision = safeNonNegativeNumber(overlayInput && overlayInput.overlayRevision);
+  const overlayTimestampMs = safeNonNegativeNumber(overlayInput && overlayInput.overlayTimestampMs);
+  if (!overlayRevision && !overlayTimestampMs) return false;
+  const fields = activeOverlayProjectionFieldsFromThread(thread);
+  if (overlayRevision && (!fields.projectionRevision || fields.projectionRevision < overlayRevision)) return false;
+  if (overlayTimestampMs && (!fields.projectionTimestampMs || fields.projectionTimestampMs < overlayTimestampMs)) return false;
+  return true;
 }
 
 function promoteActiveReadPolicy(policy, reason) {
@@ -229,6 +296,300 @@ function isCompletedTurn(turn) {
 
 function isActiveTurn(turn) {
   return /running|active|queued|processing|inprogress|in_progress|in-progress/i.test(statusText(turn && turn.status));
+}
+
+function activeMarkerTurnId(value) {
+  if (!value) return "";
+  if (typeof value === "object") {
+    return nonEmptyText(value.turnId || value.turn_id || value.id || value.activeTurnId || value.active_turn_id);
+  }
+  return nonEmptyText(value);
+}
+
+function summaryActiveTurnMarker(summary) {
+  if (!summary || typeof summary !== "object") return "";
+  for (const value of [
+    summary.activeTurnId,
+    summary.active_turn_id,
+    summary.mobileActiveTurnId,
+    summary.mobile_active_turn_id,
+    summary.mobileRolloutActiveTurn,
+    summary.mobileLocalActiveStatus,
+  ]) {
+    const id = activeMarkerTurnId(value);
+    if (id) return id;
+  }
+  return "";
+}
+
+function summaryHasActiveRuntimeMarker(summary) {
+  if (!summary || typeof summary !== "object") return false;
+  if (summaryActiveTurnMarker(summary)) return true;
+  return [
+    summary.status,
+    summary.mobileStatus,
+    summary.mobileLocalActiveStatus && summary.mobileLocalActiveStatus.status,
+  ].filter(Boolean).some(isActiveLikeStatusValue);
+}
+
+function isActiveLikeStatusValue(value) {
+  return /running|active|queued|processing|inprogress|in_progress|in-progress|pending|started/i.test(statusText(value));
+}
+
+function isRestingLikeStatusValue(value) {
+  return /^(completed|complete|done|failed|failure|cancelled|canceled|cancel|error|interrupted|stopped|stop)$/i
+    .test(statusText(value).trim());
+}
+
+function summaryHasPrimaryRestingStatus(summary) {
+  if (!summary || typeof summary !== "object") return false;
+  return [summary.status, summary.mobileStatus].filter(Boolean).some(isRestingLikeStatusValue);
+}
+
+function summaryRejectsWindowActiveTurns(summary) {
+  if (!summary || typeof summary !== "object") return false;
+  if (summaryHasPrimaryRestingStatus(summary)) return true;
+  if (summaryActiveTurnMarker(summary)) return false;
+  const statuses = [
+    summary.status,
+    summary.mobileStatus,
+    summary.mobileLocalActiveStatus && summary.mobileLocalActiveStatus.status,
+  ].filter(Boolean);
+  if (statuses.some(isActiveLikeStatusValue)) return false;
+  return statuses.some(isRestingLikeStatusValue);
+}
+
+function timestampToMs(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  const number = Number(value);
+  if (Number.isFinite(number) && number > 0) {
+    return number > 1_000_000_000_000 ? Math.trunc(number) : Math.trunc(number * 1000);
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function timestampFromFields(source, fields = []) {
+  for (const field of fields) {
+    const value = source && source[field];
+    const ms = timestampToMs(value);
+    if (ms) return ms;
+  }
+  return 0;
+}
+
+function summaryUpdatedAtMs(summary) {
+  return timestampFromFields(summary, [
+    "updatedAtMs",
+    "updatedAt",
+    "updated_at_ms",
+    "updated_at",
+    "lastActivityAtMs",
+    "lastActivityAt",
+    "last_activity_at_ms",
+    "last_activity_at",
+  ]);
+}
+
+function itemActivityTimestampMs(item) {
+  return timestampFromFields(item, [
+    "updatedAtMs",
+    "updatedAt",
+    "updated_at_ms",
+    "updated_at",
+    "completedAtMs",
+    "completedAt",
+    "completed_at_ms",
+    "completed_at",
+    "startedAtMs",
+    "startedAt",
+    "started_at_ms",
+    "started_at",
+    "createdAtMs",
+    "createdAt",
+    "created_at_ms",
+    "created_at",
+    "timestampMs",
+    "timestamp",
+    "mobileDisplayTimestampMs",
+    "mobileDisplayTimestamp",
+  ]);
+}
+
+function turnActivityTimestampMs(turn) {
+  let latest = timestampFromFields(turn, [
+    "updatedAtMs",
+    "updatedAt",
+    "updated_at_ms",
+    "updated_at",
+    "completedAtMs",
+    "completedAt",
+    "completed_at_ms",
+    "completed_at",
+    "startedAtMs",
+    "startedAt",
+    "started_at_ms",
+    "started_at",
+    "createdAtMs",
+    "createdAt",
+    "created_at_ms",
+    "created_at",
+  ]);
+  for (const item of Array.isArray(turn && turn.items) ? turn.items : []) {
+    latest = Math.max(latest, itemActivityTimestampMs(item));
+  }
+  return latest;
+}
+
+function turnHasTerminalUsageSummary(turn) {
+  return (Array.isArray(turn && turn.items) ? turn.items : [])
+    .some((item) => itemType(item) === "turnusagesummary");
+}
+
+function shouldPreserveActiveTurnAgainstRestingSummary(turn, summary) {
+  if (!isActiveTurn(turn)) return false;
+  if (turnHasTerminalUsageSummary(turn)) return false;
+  const summaryMs = summaryUpdatedAtMs(summary);
+  const activityMs = turnActivityTimestampMs(turn);
+  if (!summaryMs || !activityMs) return false;
+  return activityMs >= summaryMs - 15_000;
+}
+
+function staleCompletedStatusFromActiveStatus(value) {
+  if (isCompletedTurn({ status: value })) return value;
+  const previousType = statusText(value);
+  return {
+    type: "completed",
+    mobileStaleActiveTurn: true,
+    previousType,
+    reason: "summary-resting-active-window",
+  };
+}
+
+function terminalCompletedStatusFromActiveStatus(value) {
+  if (isCompletedTurn({ status: value })) return value;
+  const previousType = statusText(value);
+  return {
+    type: "completed",
+    mobileCompletedActiveTurn: true,
+    previousType,
+    reason: "terminal-usage-summary",
+  };
+}
+
+function terminalCompletedStatusFromStaleStatus(value) {
+  const previousType = statusText(value && value.previousType || value);
+  const status = value && typeof value === "object"
+    ? Object.assign({}, value)
+    : {};
+  status.type = "completed";
+  status.mobileCompletedActiveTurn = true;
+  delete status.mobileStaleActiveTurn;
+  if (previousType && !status.previousType) status.previousType = previousType;
+  status.reason = "terminal-usage-summary";
+  return status;
+}
+
+function turnHasStaleActiveMarker(turn) {
+  return Boolean(turn && (
+    turn.mobileStaleActiveTurn
+      || (turn.status && turn.status.mobileStaleActiveTurn)
+      || (turn.status && turn.status.reason === "summary-resting-active-window")
+      || turn.reason === "summary-resting-active-window"
+  ));
+}
+
+function normalizeTerminalUsageStaleActiveTurn(turn) {
+  if (!turn || typeof turn !== "object") return false;
+  if (!turnHasStaleActiveMarker(turn)) return false;
+  if (!turnHasTerminalUsageSummary(turn)) return false;
+  delete turn.mobileStaleActiveTurn;
+  turn.mobileCompletedActiveTurn = true;
+  turn.status = terminalCompletedStatusFromStaleStatus(turn.status);
+  return true;
+}
+
+function clearThreadActiveMarkers(thread) {
+  if (!thread || typeof thread !== "object") return;
+  delete thread.activeTurnId;
+  delete thread.active_turn_id;
+  delete thread.mobileActiveTurnId;
+  delete thread.mobile_active_turn_id;
+  delete thread.mobileRolloutActiveTurn;
+  delete thread.mobileLocalActiveStatus;
+  delete thread.mobileStatusTurnId;
+  delete thread.mobileStatusSource;
+}
+
+function markWindowActiveTurnsStaleForRestingSummary(thread, summary) {
+  if (!summaryRejectsWindowActiveTurns(summary) || !thread || typeof thread !== "object") return 0;
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  let staleCount = 0;
+  let terminalCompletedCount = 0;
+  let preserved = 0;
+  let preservedActivityMs = 0;
+  delete thread.mobileStaleActiveTurn;
+  delete thread.mobileCompletedActiveTurn;
+  for (const turn of turns) {
+    if (normalizeTerminalUsageStaleActiveTurn(turn)) {
+      terminalCompletedCount += 1;
+      continue;
+    }
+    if (!isActiveTurn(turn)) continue;
+    if (turnHasTerminalUsageSummary(turn)) {
+      turn.mobileCompletedActiveTurn = true;
+      turn.status = terminalCompletedStatusFromActiveStatus(turn.status);
+      terminalCompletedCount += 1;
+      continue;
+    }
+    if (shouldPreserveActiveTurnAgainstRestingSummary(turn, summary)) {
+      turn.mobilePreservedAgainstRestingSummary = true;
+      preserved += 1;
+      preservedActivityMs = Math.max(preservedActivityMs, turnActivityTimestampMs(turn));
+      continue;
+    }
+    turn.mobileStaleActiveTurn = true;
+    turn.status = staleCompletedStatusFromActiveStatus(turn.status);
+    staleCount += 1;
+  }
+  if (preserved) {
+    thread.mobileRestingSummaryActiveWindowPreserved = {
+      count: preserved,
+      reason: "active-window-newer-than-resting-summary",
+      activityMs: preservedActivityMs,
+      summaryUpdatedAtMs: summaryUpdatedAtMs(summary),
+    };
+    if (!isActiveLikeStatusValue(thread.status)) {
+      thread.status = {
+        type: "active",
+        mobilePreservedAgainstRestingSummary: true,
+        previousType: statusText(thread.status),
+      };
+    }
+  }
+  const completedCount = staleCount + terminalCompletedCount;
+  if (!completedCount) return 0;
+  if (!preserved) clearThreadActiveMarkers(thread);
+  if (!preserved && isActiveLikeStatusValue(thread.status)) {
+    thread.status = {
+      type: "completed",
+      mobileClearedStaleActiveSummary: true,
+      previousType: statusText(thread.status),
+    };
+  }
+  if (staleCount) {
+    thread.mobileStaleActiveTurn = {
+      count: staleCount,
+      reason: "summary-resting-active-window",
+    };
+  }
+  if (terminalCompletedCount) {
+    thread.mobileCompletedActiveTurn = {
+      count: terminalCompletedCount,
+      reason: "terminal-usage-summary",
+    };
+  }
+  return staleCount;
 }
 
 function isUserVisibleInputItem(item) {
@@ -350,6 +711,9 @@ function createThreadDetailReadOrchestrationService(options = {}) {
 
   function attachDetailDiagnostics(result, context, details = {}) {
     const boundedDecision = context.boundedReadBeforeFullRead || null;
+    const prepareTimings = details.prepareResponseTimings && typeof details.prepareResponseTimings === "object"
+      ? details.prepareResponseTimings
+      : {};
     return attachDiagnostics(result, {
       requestMode: context.preferRecentTurns ? "recent" : "full",
       readDecision: details.readDecision || "",
@@ -375,7 +739,7 @@ function createThreadDetailReadOrchestrationService(options = {}) {
       activeOverlayAssistantItems: context.activeOverlayAssistantItems || 0,
       activeOverlayReceiptItems: context.activeOverlayReceiptItems || 0,
       activeOverlayWindowFirst: context.activeOverlayWindowFirst === true,
-      timings: context.timer.timings,
+      timings: Object.assign({}, context.timer.timings, prepareTimings),
       totalMs: context.timer.elapsedMs(),
       rolloutSizeBytes: result && result.thread ? threadRolloutSizeBytes(result.thread) : 0,
       largeReadProtected: Boolean(boundedDecision && boundedDecision.prefer),
@@ -688,6 +1052,7 @@ function createThreadDetailReadOrchestrationService(options = {}) {
       }
       return rawBoundedReadDecision;
     }
+
     const projectionStartedAtMs = now();
     const allowPartialProjection = activeReadPolicy.allowPartialProjection;
     const shouldUseActiveOverlayWindowFirst = Boolean(
@@ -734,7 +1099,14 @@ function createThreadDetailReadOrchestrationService(options = {}) {
         returnedTurns: Array.isArray(projectedThread.turns) ? projectedThread.turns.length : null,
         omittedTurns: projectedThread.mobileOmittedTurnCount || 0,
       });
-      const projectedActiveTurnId = activeTurnIdFromThread(projectedThread);
+      const projectedStaleActiveTurns = markWindowActiveTurnsStaleForRestingSummary(projectedThread, summary);
+      if (projectedStaleActiveTurns) {
+        threadLog("projection_stale_active_turns_downgraded", {
+          count: projectedStaleActiveTurns,
+          reason: "summary-resting-active-window",
+        });
+      }
+      const projectedActiveTurnId = projectedStaleActiveTurns ? "" : activeTurnIdFromThread(projectedThread);
       const projectedThreadIsPartial = projectionThreadIsPartial(projectedThread);
       if (projectedActiveTurnId && projectedThreadIsPartial && !activeReadPolicy.activeFullReadRequired) {
         activeReadPolicy = promoteActiveReadPolicy(activeReadPolicy, "projection-window-active-turn");
@@ -1000,12 +1372,19 @@ function createThreadDetailReadOrchestrationService(options = {}) {
             : "projection-thread";
         }
         if (!backfillThread
+          && requiresFreshActiveWindow
+          && trustedActiveOverlayWindowForOverlay(activeOverlayProjectionThread, overlayInput, backfillActiveTurnId)) {
+          backfillThread = activeOverlayProjectionThread;
+          backfillSource = "trusted-active-window-projection";
+        }
+        if (!backfillThread
           && !requiresFreshActiveWindow
           && activeOverlayProjectionWindowLookup
           && !activeOverlayProjectionWindowLookupAttempted) {
           const cachedWindow = activeOverlayProjectionWindowLookup(projection, summary, runtimeSettings, {
             allowPartial: true,
             activeOverlay: true,
+            omitActiveTurnId: backfillActiveTurnId,
           });
           const resolvedCachedWindow = isPromiseLike(cachedWindow) ? await cachedWindow : cachedWindow;
           const cachedThread = resolvedCachedWindow
@@ -1014,6 +1393,27 @@ function createThreadDetailReadOrchestrationService(options = {}) {
           if (cachedThread && typeof cachedThread === "object" && threadHasTurn(cachedThread, backfillActiveTurnId)) {
             backfillThread = cachedThread;
             backfillSource = "cached-active-window";
+          }
+        }
+        if (!backfillThread
+          && requiresFreshActiveWindow
+          && activeOverlayProjectionWindowLookup) {
+          const cachedWindow = activeOverlayProjectionWindowLookup(projection, summary, runtimeSettings, {
+            allowPartial: true,
+            activeOverlay: true,
+            activeOverlayStatusProven: true,
+            omitActiveTurnId: backfillActiveTurnId,
+          });
+          const resolvedCachedWindow = isPromiseLike(cachedWindow) ? await cachedWindow : cachedWindow;
+          const cachedThread = resolvedCachedWindow
+            && resolvedCachedWindow.result
+            && resolvedCachedWindow.result.thread;
+          if (trustedActiveOverlayWindowForOverlay(cachedThread, overlayInput, backfillActiveTurnId)) {
+            backfillThread = cachedThread;
+            backfillSource = "trusted-cached-active-window";
+            threadLog("active_overlay_cached_window_reused", {
+              source: backfillSource,
+            });
           }
         }
         const canUseHistoryWindowWithoutBackfill = activeOverlayHistoryWindowWithoutActiveTurn
@@ -1205,6 +1605,7 @@ function createThreadDetailReadOrchestrationService(options = {}) {
 
     if (!activeReadPolicy.activeFullReadRequired
       && preferRecentTurns
+      && !summaryRejectsWindowActiveTurns(summary)
       && projection
       && resolveActiveWindowOverlay
       && activeOverlayProjectionWindowLookup) {
@@ -1344,7 +1745,14 @@ function createThreadDetailReadOrchestrationService(options = {}) {
           return hiddenResponse();
         }
         timer.mark("turnsListInitialMs", turnsStartedAtMs);
-        const initialActiveTurnId = activeTurnIdFromThread(result && result.thread);
+        const initialStaleActiveTurns = markWindowActiveTurnsStaleForRestingSummary(result && result.thread, summary);
+        if (initialStaleActiveTurns) {
+          threadLog("turns_list_initial_stale_active_turns_downgraded", {
+            count: initialStaleActiveTurns,
+            reason: "summary-resting-active-window",
+          });
+        }
+        const initialActiveTurnId = initialStaleActiveTurns ? "" : activeTurnIdFromThread(result && result.thread);
         if (initialActiveTurnId && !activeReadPolicy.activeFullReadRequired) {
           activeReadPolicy = promoteActiveReadPolicy(activeReadPolicy, "initial-window-active-turn");
           applyActivePolicyContext(context, activeReadPolicy);
@@ -1408,10 +1816,20 @@ function createThreadDetailReadOrchestrationService(options = {}) {
     }
 
     const rawDecisionBeforeFullRead = boundedReadBeforeFullReadDecision();
-    const boundedReadDecision = applyActiveThreadPolicyToBoundedReadDecision(
+    let boundedReadDecision = applyActiveThreadPolicyToBoundedReadDecision(
       rawDecisionBeforeFullRead,
       activeReadPolicy,
     );
+    if (!boundedReadDecision.prefer
+      && rawDecisionBeforeFullRead.prefer
+      && activePolicyRequiresFullThreadRead(activeReadPolicy)
+      && turnsListThreadReadResult) {
+      boundedReadDecision = Object.assign({}, rawDecisionBeforeFullRead, {
+        prefer: true,
+        reason: "active-thread-bounded-window",
+        activeFullReadBypass: "bounded-window-first-paint",
+      });
+    }
     context.boundedReadBeforeFullRead = boundedReadDecision;
     if (boundedReadDecision.prefer) {
       const turnsStartedAtMs = now();
@@ -1442,6 +1860,25 @@ function createThreadDetailReadOrchestrationService(options = {}) {
           return hiddenResponse();
         }
         timer.mark("turnsListBeforeFullMs", turnsStartedAtMs);
+        if (activeReadPolicy.activeFullReadRequired
+          && activeFullReadCanCloseWithOverlay(activeReadPolicy)
+          && projection
+          && resolveActiveWindowOverlay
+          && result
+          && result.thread) {
+          const overlayInput = activeOverlayInputFromWindowThread(result.thread, summary);
+          if (overlayInput) {
+            const previousActiveOverlayWindowFirst = context.activeOverlayWindowFirst;
+            context.activeOverlayWindowFirst = true;
+            const overlayResponse = await tryActiveOverlayFromInitialWindow(result, {
+              source: "turns-list-large-active-window",
+              seed: true,
+              overlayInput,
+            });
+            if (overlayResponse) return overlayResponse;
+            context.activeOverlayWindowFirst = previousActiveOverlayWindowFirst;
+          }
+        }
         if (projection && result && result.thread) {
           try {
             seedProjection(projection, result);

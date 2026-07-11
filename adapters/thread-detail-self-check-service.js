@@ -119,6 +119,28 @@ function isStaleActiveCompletionStatus(value) {
   return Boolean(value && typeof value === "object" && value.mobileStaleActiveTurn === true);
 }
 
+function isStaleActiveTurn(turn) {
+  return Boolean(turn && (turn.mobileStaleActiveTurn === true || isStaleActiveCompletionStatus(turn.status)));
+}
+
+function turnHasConversationDisplayItems(turn) {
+  return safeArray(turn && turn.items).some((item) => {
+    const type = itemType(item);
+    return USER_INPUT_TYPES.has(type)
+      || type === "turnUsageSummary"
+      || isAssistantItem(item)
+      || isOperationItem(item)
+      || isReasoningItem(item);
+  });
+}
+
+function laterTurnHasConversationDisplayItems(turns = [], index = -1) {
+  for (let cursor = index + 1; cursor < turns.length; cursor += 1) {
+    if (turnHasConversationDisplayItems(turns[cursor])) return true;
+  }
+  return false;
+}
+
 function turnCompletedAtMs(turn, thread = null) {
   if (!isTurnComplete(turn)) return 0;
   const direct = numericTimestampMs(turn && (
@@ -162,10 +184,18 @@ function threadId(thread) {
 
 function threadUpdatedAtMs(thread) {
   return numericTimestampMs(thread && (
-    thread.updatedAtMs
+    thread.mobileListUpdatedAtMs
+    || thread.mobile_list_updated_at_ms
+    || thread.listActivityAtMs
+    || thread.list_activity_at_ms
+    || thread.updatedAtMs
     || thread.updatedAt
+    || thread.updated_at_ms
+    || thread.updated_at
     || thread.lastActivityAtMs
     || thread.lastActivityAt
+    || thread.last_activity_at_ms
+    || thread.last_activity_at
   ));
 }
 
@@ -305,6 +335,65 @@ function duplicateSameTimestampUserMessages(turn = {}, thread = null) {
   };
 }
 
+function uniqueUserInputItemCount(items = []) {
+  const uniqueItems = [];
+  for (const item of safeArray(items)) {
+    const type = itemType(item);
+    if (!USER_INPUT_TYPES.has(type)) continue;
+    if (type === "userMessage") {
+      const matchesExisting = uniqueItems.some((existing) => (
+        itemType(existing) === "userMessage" && sameUserMessageContent(existing, item)
+      ));
+      if (matchesExisting) continue;
+      uniqueItems.push(item);
+      continue;
+    }
+    const identity = `${type}:${itemId(item) || visibleKeyForItem(item)}`;
+    const matchesExisting = uniqueItems.some((existing) => (
+      itemType(existing) !== "userMessage"
+        && `${itemType(existing)}:${itemId(existing) || visibleKeyForItem(existing)}` === identity
+    ));
+    if (!matchesExisting) uniqueItems.push(item);
+  }
+  return boundedCount(uniqueItems.length);
+}
+
+function assistantTextValue(item = {}) {
+  const direct = text(item.text || item.message || item.summary);
+  if (direct) return direct.replace(/\s+/g, " ");
+  const content = safeArray(item.content);
+  const parts = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    const value = text(part.text || part.input_text || part.content);
+    if (value) parts.push(value);
+  }
+  return parts.join("\n").replace(/\s+/g, " ").trim();
+}
+
+function assistantItemsLikelySame(left = {}, right = {}) {
+  if (!isAssistantItem(left) || !isAssistantItem(right)) return false;
+  const leftText = assistantTextValue(left);
+  const rightText = assistantTextValue(right);
+  if (!leftText || !rightText) return false;
+  if (leftText === rightText) return true;
+  const shorter = leftText.length <= rightText.length ? leftText : rightText;
+  const longer = leftText.length > rightText.length ? leftText : rightText;
+  return shorter.length >= 24
+    && longer.startsWith(shorter)
+    && shorter.length / Math.max(1, longer.length) >= 0.5;
+}
+
+function uniqueAssistantItemCount(items = []) {
+  const uniqueItems = [];
+  for (const item of safeArray(items)) {
+    if (!isAssistantItem(item)) continue;
+    const matchesExisting = uniqueItems.some((existing) => assistantItemsLikelySame(existing, item));
+    if (!matchesExisting) uniqueItems.push(item);
+  }
+  return boundedCount(uniqueItems.length);
+}
+
 function visibleItemTimestampOrderIssue(turn = {}, thread = null) {
   let previousTimestamp = 0;
   let previousIdentity = "";
@@ -382,8 +471,14 @@ function summarizeTurn(turn = {}, thread = null) {
   const operationItems = items.filter(isOperationItem).length;
   const reasoningItems = items.filter(isReasoningItem).length;
   const assistantItems = items.filter(isAssistantItem).length;
+  const uniqueAssistantItems = uniqueAssistantItemCount(items);
   const usageItems = items.filter((item) => itemType(item) === "turnUsageSummary").length;
   const userInputItems = items.filter((item) => USER_INPUT_TYPES.has(itemType(item))).length;
+  const uniqueUserInputItems = uniqueUserInputItemCount(items);
+  const comparableItemCount = boundedCount(Math.max(0,
+    items.length
+      - Math.max(0, userInputItems - uniqueUserInputItems)
+      - Math.max(0, assistantItems - uniqueAssistantItems)));
   const timestampMissingVisibleItems = items.filter((item) => {
     const type = itemType(item);
     return USER_VISIBLE_TIMESTAMP_TYPES.has(type) && !itemTimestampMs(item, turn, thread);
@@ -392,16 +487,46 @@ function summarizeTurn(turn = {}, thread = null) {
     turnHash: shortHash(turnId(turn)),
     status: text(statusText(turn.status)).slice(0, 40),
     itemCount: boundedCount(items.length),
+    comparableItemCount,
     counts: countItems(items),
     operationItems: boundedCount(operationItems),
     reasoningItems: boundedCount(reasoningItems),
     assistantItems: boundedCount(assistantItems),
+    uniqueAssistantItems,
     usageItems: boundedCount(usageItems),
     userInputItems: boundedCount(userInputItems),
+    uniqueUserInputItems,
     timestampMissingVisibleItems: boundedCount(timestampMissingVisibleItems),
     syntheticCompletionTurn: turn && turn.mobileSyntheticCompletionTurn === true,
     startedAtMs: boundedCount(turnStartedAtMs(turn), Number.MAX_SAFE_INTEGER),
     completedAtMs: boundedCount(turnCompletedAtMs(turn, thread), Number.MAX_SAFE_INTEGER),
+  };
+}
+
+function rawCanonicalUserInputCount(rawCounts = null) {
+  if (!rawCounts || rawCounts.checked !== true || rawCounts.found !== true) return 0;
+  return boundedCount(rawCounts.rawUserItems || 0);
+}
+
+function userInputOvercountCollapse(beforeSummary = null, afterSummary = null, rawCounts = null) {
+  if (!beforeSummary || !afterSummary) return null;
+  const rawUserItems = rawCanonicalUserInputCount(rawCounts);
+  if (rawUserItems <= 0) return null;
+  const beforeUniqueUserInputItems = Number.isFinite(Number(beforeSummary.uniqueUserInputItems))
+    ? boundedCount(beforeSummary.uniqueUserInputItems)
+    : beforeSummary.userInputItems;
+  const afterUniqueUserInputItems = Number.isFinite(Number(afterSummary.uniqueUserInputItems))
+    ? boundedCount(afterSummary.uniqueUserInputItems)
+    : afterSummary.userInputItems;
+  if (afterUniqueUserInputItems >= beforeUniqueUserInputItems) return null;
+  if (beforeUniqueUserInputItems <= rawUserItems) return null;
+  if (afterUniqueUserInputItems < rawUserItems) return null;
+  return {
+    rawUserItems,
+    beforeUniqueUserInputItems,
+    afterUniqueUserInputItems,
+    collapsedCount: boundedCount(beforeUniqueUserInputItems - afterUniqueUserInputItems),
+    overcountBefore: boundedCount(beforeUniqueUserInputItems - rawUserItems),
   };
 }
 
@@ -464,6 +589,7 @@ function analyzeThreadDetail(detail = {}, options = {}) {
     pushIssue(issues, "duplicate_item_visible_keys", "H2", "thread-detail", { threadHash });
   }
   for (const turn of turns) {
+    const turnIndex = turns.indexOf(turn);
     const renderKeys = safeArray(turn.items).map((item, index) => clientRenderKeyForItem(thread, turn, item, index));
     const duplicate = duplicateInfo(renderKeys);
     if (duplicate.count > 0) {
@@ -490,6 +616,15 @@ function analyzeThreadDetail(detail = {}, options = {}) {
         turnHash: shortHash(turnId(turn)),
         count: timestampOrder.count,
         itemHash: timestampOrder.firstHash,
+      });
+    }
+    if (isStaleActiveTurn(turn)
+      && turnHasConversationDisplayItems(turn)
+      && !laterTurnHasConversationDisplayItems(turns, turnIndex)) {
+      pushIssue(issues, "thread_detail_stale_active_turn_downgraded", "H2", "thread-detail", {
+        threadHash,
+        turnHash: shortHash(turnId(turn)),
+        reason: text((turn.status && turn.status.reason) || turn.reason || "summary-resting-active-window"),
       });
     }
   }
@@ -743,6 +878,15 @@ function detailThreadIsSettled(detail = {}) {
   return Boolean(latestCompletedTurn(thread).turn);
 }
 
+function detailThreadIsActive(detail = {}) {
+  const thread = objectOrNull(detail && detail.thread);
+  if (!thread) return false;
+  if (detailThreadIsSettled(detail)) return false;
+  if (isActiveStatus(thread.status)) return true;
+  if (activeTurn(thread).turn) return true;
+  return Boolean(threadActiveMarker(thread));
+}
+
 function compareThreadListRowToDetail(row = {}, detail = {}) {
   const id = threadId(row) || threadId(detail && detail.thread);
   const threadHash = shortHash(id);
@@ -753,8 +897,10 @@ function compareThreadListRowToDetail(row = {}, detail = {}) {
   const listIsActive = isActiveStatus(listStatus) || listHasActiveMarker;
   const listIsRest = isRestStatus(listStatus);
   const detailSettled = detailThreadIsSettled(detail);
+  const detailIsActive = detailThreadIsActive(detail);
   const detailThread = objectOrNull(detail && detail.thread);
   const detailStatus = statusText(detailThread && detailThread.status);
+  const detailMarker = threadActiveMarker(detailThread);
   if (listIsRest && listHasActiveMarker) {
     pushIssue(issues, "thread_list_rest_status_has_active_turn", "H2", "thread-list-detail-consistency", {
       threadHash,
@@ -770,6 +916,14 @@ function compareThreadListRowToDetail(row = {}, detail = {}) {
       activeTurnHash: marker ? shortHash(marker) : "",
     });
   }
+  if (!listIsActive && detailIsActive) {
+    pushIssue(issues, "thread_list_missing_active_detail_active_mismatch", "H2", "thread-list-detail-consistency", {
+      threadHash,
+      listStatus: statusText(listStatus),
+      detailStatus,
+      detailActiveTurnHash: detailMarker ? shortHash(detailMarker) : "",
+    });
+  }
   return {
     ok: issues.filter(issueSeverityBlocks).length === 0,
     threadHash,
@@ -777,8 +931,116 @@ function compareThreadListRowToDetail(row = {}, detail = {}) {
     detailStatus,
     listHasActiveMarker,
     detailSettled,
+    detailIsActive,
     issues,
   };
+}
+
+function findTurnById(thread = {}, id = "") {
+  const expected = text(id);
+  if (!expected) return null;
+  return safeArray(thread.turns).find((turn) => turnId(turn) === expected) || null;
+}
+
+function pushRefreshTurnDowngradeIssues(issues, beforeSummary, afterSummary, threadHash, options = {}) {
+  if (!beforeSummary || !afterSummary || beforeSummary.turnHash !== afterSummary.turnHash) return;
+  const overcountCollapse = userInputOvercountCollapse(
+    beforeSummary,
+    afterSummary,
+    options.rawLatestCompletedCounts,
+  );
+  const beforeComparableItems = Number.isFinite(Number(beforeSummary.comparableItemCount))
+    ? boundedCount(beforeSummary.comparableItemCount)
+    : beforeSummary.itemCount;
+  const afterComparableItems = Number.isFinite(Number(afterSummary.comparableItemCount))
+    ? boundedCount(afterSummary.comparableItemCount)
+    : afterSummary.itemCount;
+  const effectiveBeforeComparableItems = overcountCollapse
+    ? boundedCount(Math.max(0, beforeComparableItems - overcountCollapse.overcountBefore))
+    : beforeComparableItems;
+  if (afterComparableItems < effectiveBeforeComparableItems) {
+    pushIssue(issues, "thread_detail_refresh_item_downgrade", "H2", "thread-detail-refresh", {
+      threadHash,
+      turnHash: afterSummary.turnHash,
+      beforeItems: effectiveBeforeComparableItems,
+      afterItems: afterComparableItems,
+    });
+  }
+  const beforeUniqueUserInputItems = Number.isFinite(Number(beforeSummary.uniqueUserInputItems))
+    ? boundedCount(beforeSummary.uniqueUserInputItems)
+    : beforeSummary.userInputItems;
+  const afterUniqueUserInputItems = Number.isFinite(Number(afterSummary.uniqueUserInputItems))
+    ? boundedCount(afterSummary.uniqueUserInputItems)
+    : afterSummary.userInputItems;
+  if (afterUniqueUserInputItems < beforeUniqueUserInputItems && overcountCollapse) {
+    pushIssue(issues, "thread_detail_refresh_collapsed_user_input_projection_overcount", "H3", "thread-detail-refresh", {
+      threadHash,
+      turnHash: afterSummary.turnHash,
+      beforeItems: beforeUniqueUserInputItems,
+      afterItems: afterUniqueUserInputItems,
+      rawUserItems: overcountCollapse.rawUserItems,
+    });
+  } else if (afterUniqueUserInputItems < beforeUniqueUserInputItems) {
+    pushIssue(issues, "thread_detail_refresh_lost_user_input", "H2", "thread-detail-refresh", {
+      threadHash,
+      turnHash: afterSummary.turnHash,
+      beforeItems: beforeUniqueUserInputItems,
+      afterItems: afterUniqueUserInputItems,
+    });
+  }
+  const beforeUniqueAssistantItems = Number.isFinite(Number(beforeSummary.uniqueAssistantItems))
+    ? boundedCount(beforeSummary.uniqueAssistantItems)
+    : beforeSummary.assistantItems;
+  const afterUniqueAssistantItems = Number.isFinite(Number(afterSummary.uniqueAssistantItems))
+    ? boundedCount(afterSummary.uniqueAssistantItems)
+    : afterSummary.assistantItems;
+  if (afterUniqueAssistantItems < beforeUniqueAssistantItems) {
+    pushIssue(issues, "thread_detail_refresh_lost_assistant_items", "H2", "thread-detail-refresh", {
+      threadHash,
+      turnHash: afterSummary.turnHash,
+      beforeItems: beforeUniqueAssistantItems,
+      afterItems: afterUniqueAssistantItems,
+    });
+  }
+  if (beforeSummary.usageItems > 0 && afterSummary.usageItems === 0) {
+    pushIssue(issues, "thread_detail_refresh_lost_usage", "H2", "thread-detail-refresh", {
+      threadHash,
+      turnHash: afterSummary.turnHash,
+    });
+  }
+  if (beforeSummary.reasoningItems === 0 && afterSummary.reasoningItems > 0) {
+    pushIssue(issues, "thread_detail_refresh_added_reasoning", "H2", "thread-detail-refresh", {
+      threadHash,
+      turnHash: afterSummary.turnHash,
+      count: afterSummary.reasoningItems,
+    });
+  }
+  if (beforeSummary.operationItems === 0 && afterSummary.operationItems > 0) {
+    pushIssue(issues, "thread_detail_refresh_added_operations", "H2", "thread-detail-refresh", {
+      threadHash,
+      turnHash: afterSummary.turnHash,
+      count: afterSummary.operationItems,
+    });
+  }
+  if (beforeSummary.timestampMissingVisibleItems === 0 && afterSummary.timestampMissingVisibleItems > 0) {
+    pushIssue(issues, "thread_detail_refresh_lost_visible_timestamps", "H2", "thread-detail-refresh", {
+      threadHash,
+      turnHash: afterSummary.turnHash,
+      count: afterSummary.timestampMissingVisibleItems,
+    });
+  }
+  if (beforeSummary.startedAtMs > 0 && afterSummary.startedAtMs === 0) {
+    pushIssue(issues, "thread_detail_refresh_lost_turn_start_timestamp", "H2", "thread-detail-refresh", {
+      threadHash,
+      turnHash: afterSummary.turnHash,
+    });
+  }
+  if (beforeSummary.completedAtMs > 0 && afterSummary.completedAtMs === 0) {
+    pushIssue(issues, "thread_detail_refresh_lost_turn_completion_timestamp", "H2", "thread-detail-refresh", {
+      threadHash,
+      turnHash: afterSummary.turnHash,
+    });
+  }
 }
 
 function compareDetailReadbacks(firstDetail = {}, secondDetail = {}, options = {}) {
@@ -790,73 +1052,25 @@ function compareDetailReadbacks(firstDetail = {}, secondDetail = {}, options = {
   const firstSummary = firstLatest ? summarizeTurn(firstLatest, firstThread) : null;
   const secondSummary = secondLatest ? summarizeTurn(secondLatest, secondThread) : null;
   const threadHash = shortHash(threadId(secondThread) || threadId(firstThread) || options.threadId);
+  const firstActive = activeTurn(firstThread).turn;
+  const firstActiveId = turnId(firstActive);
+  const secondSameActive = findTurnById(secondThread, firstActiveId);
+  if (firstActive && secondSameActive && isStaleActiveCompletionStatus(secondSameActive.status)) {
+    const beforeActiveSummary = summarizeTurn(firstActive, firstThread);
+    const afterActiveSummary = summarizeTurn(secondSameActive, secondThread);
+    pushIssue(issues, "thread_detail_refresh_active_status_downgrade", "H2", "thread-detail-refresh", {
+      threadHash,
+      turnHash: beforeActiveSummary.turnHash,
+      beforeStatus: beforeActiveSummary.status,
+      afterStatus: afterActiveSummary.status,
+    });
+    pushRefreshTurnDowngradeIssues(issues, beforeActiveSummary, afterActiveSummary, threadHash, options);
+  }
   if (firstSummary && secondSummary && firstSummary.turnHash === secondSummary.turnHash) {
-    if (secondSummary.itemCount < firstSummary.itemCount) {
-      pushIssue(issues, "thread_detail_refresh_item_downgrade", "H2", "thread-detail-refresh", {
-        threadHash,
-        turnHash: secondSummary.turnHash,
-        beforeItems: firstSummary.itemCount,
-        afterItems: secondSummary.itemCount,
-      });
-    }
-    if (secondSummary.userInputItems < firstSummary.userInputItems) {
-      pushIssue(issues, "thread_detail_refresh_lost_user_input", "H2", "thread-detail-refresh", {
-        threadHash,
-        turnHash: secondSummary.turnHash,
-        beforeItems: firstSummary.userInputItems,
-        afterItems: secondSummary.userInputItems,
-      });
-    }
-    if (secondSummary.assistantItems < firstSummary.assistantItems) {
-      pushIssue(issues, "thread_detail_refresh_lost_assistant_items", "H2", "thread-detail-refresh", {
-        threadHash,
-        turnHash: secondSummary.turnHash,
-        beforeItems: firstSummary.assistantItems,
-        afterItems: secondSummary.assistantItems,
-      });
-    }
-    if (firstSummary.usageItems > 0 && secondSummary.usageItems === 0) {
-      pushIssue(issues, "thread_detail_refresh_lost_usage", "H2", "thread-detail-refresh", {
-        threadHash,
-        turnHash: secondSummary.turnHash,
-      });
-    }
-    if (firstSummary.reasoningItems === 0 && secondSummary.reasoningItems > 0) {
-      pushIssue(issues, "thread_detail_refresh_added_reasoning", "H2", "thread-detail-refresh", {
-        threadHash,
-        turnHash: secondSummary.turnHash,
-        count: secondSummary.reasoningItems,
-      });
-    }
-    if (firstSummary.operationItems === 0 && secondSummary.operationItems > 0) {
-      pushIssue(issues, "thread_detail_refresh_added_operations", "H2", "thread-detail-refresh", {
-        threadHash,
-        turnHash: secondSummary.turnHash,
-        count: secondSummary.operationItems,
-      });
-    }
-    if (firstSummary.timestampMissingVisibleItems === 0 && secondSummary.timestampMissingVisibleItems > 0) {
-      pushIssue(issues, "thread_detail_refresh_lost_visible_timestamps", "H2", "thread-detail-refresh", {
-        threadHash,
-        turnHash: secondSummary.turnHash,
-        count: secondSummary.timestampMissingVisibleItems,
-      });
-    }
-    if (firstSummary.startedAtMs > 0 && secondSummary.startedAtMs === 0) {
-      pushIssue(issues, "thread_detail_refresh_lost_turn_start_timestamp", "H2", "thread-detail-refresh", {
-        threadHash,
-        turnHash: secondSummary.turnHash,
-      });
-    }
-    if (firstSummary.completedAtMs > 0 && secondSummary.completedAtMs === 0) {
-      pushIssue(issues, "thread_detail_refresh_lost_turn_completion_timestamp", "H2", "thread-detail-refresh", {
-        threadHash,
-        turnHash: secondSummary.turnHash,
-      });
-    }
+    pushRefreshTurnDowngradeIssues(issues, firstSummary, secondSummary, threadHash, options);
   }
   return {
-    ok: issues.length === 0,
+    ok: issues.filter(issueSeverityBlocks).length === 0,
     threadHash,
     before: firstSummary,
     after: secondSummary,

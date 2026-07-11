@@ -43,6 +43,21 @@ const {
   normalizeHomeAiDeployLaneSummary,
 } = require("./services/task-cards/thread-task-card-deploy-lane-policy-service");
 const { createThreadTaskCardRuntimeService } = require("./services/task-cards/thread-task-card-runtime-service");
+const {
+  createRemoteManagedWorkspaceService,
+} = require("./services/remote-managed-workspaces/remote-managed-workspace-service");
+const {
+  createRemoteManagedWorkspaceNodeClientService,
+} = require("./services/remote-managed-workspaces/remote-managed-workspace-node-client-service");
+const {
+  createRemoteManagedWorkspaceNodeRunnerService,
+} = require("./services/remote-managed-workspaces/remote-managed-workspace-node-runner-service");
+const {
+  createRemoteManagedWorkspaceLocalExecutionService,
+} = require("./services/remote-managed-workspaces/remote-managed-workspace-local-execution-service");
+const {
+  createRemoteManagedWorkspaceSettingsService,
+} = require("./services/remote-managed-workspaces/remote-managed-workspace-settings-service");
 const { createThreadSideChatService } = require("./adapters/thread-side-chat-service");
 const {
   continuationGoalMigrationPlan,
@@ -95,12 +110,16 @@ const { createServerRuntimeUtils } = require("./services/runtime/server-runtime-
 const { createViteShellArtifactService } = require("./services/runtime/vite-shell-artifact-service");
 const { createServerRuntimeConfigService } = require("./services/runtime/server-runtime-config-service");
 const { createServerHttpRuntimeService } = require("./services/runtime/server-http-runtime-service");
+const { createServerRestartDrainService } = require("./services/runtime/server-restart-drain-service");
 const { createRuntimeSettingsService } = require("./services/runtime/runtime-settings-service");
 const { createThreadRuntimeSettingsService } = require("./services/runtime/thread-runtime-settings-service");
+const { createModelOptionsRuntimeService } = require("./services/runtime/model-options-runtime-service");
 const { createThreadRolloutRuntimeService } = require("./services/runtime/thread-rollout-runtime-service");
 const { createServerSupportRuntimeService } = require("./services/runtime/server-support-runtime-service");
+const { createRuntimePressureDiagnosticsService } = require("./services/runtime/runtime-pressure-diagnostics-service");
 const { createNotificationRuntimeService } = require("./services/runtime/notification-runtime-service");
 const { createAppServerRequestPolicyService } = require("./services/runtime/app-server-request-policy-service");
+const { createUserBehaviorRepairCardService } = require("./services/runtime/user-behavior-repair-card-service");
 const { createServerRouteCompositionService } = require("./server-routes/server-route-composition-service");
 const {
   createAutoTurnRecoveryService,
@@ -119,7 +138,13 @@ const serverRuntimeUtils = createServerRuntimeUtils({
   appRoot: APP_ROOT,
   publicRoot: PUBLIC_ROOT,
   userHome: USER_HOME,
-  getCodexHome: () => CODEX_HOME,
+  getCodexHome: () => {
+    try {
+      return resolveCurrentCodexRuntimeBinding().codexHome;
+    } catch (_) {
+      return process.env.CODEX_HOME || path.join(USER_HOME, ".codex");
+    }
+  },
   getAppVersion: () => APP_VERSION,
 });
 const {
@@ -201,6 +226,7 @@ const {
   HOME_AI_SECRET_REF_KEY_FILE,
   HOME_AI_SECRET_REF_CONSUME_PATH,
   HOME_AI_SECRET_REF_TIMEOUT_MS,
+  AT_LOOP_STATE_FILE,
   THREAD_TASK_CARD_FILE,
   RUNTIME_SETTINGS_FILE,
   THREAD_SIDE_CHAT_FILE,
@@ -228,6 +254,14 @@ const {
   THREAD_TASK_CARD_DRAFT_TAG,
   THREAD_TASK_CARD_BODY_MAX_CHARS,
   THREAD_TASK_CARD_DRAFT_TURN_LOOKBACK,
+  THREAD_TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS,
+  THREAD_TASK_CARD_EXECUTION_WATCHDOG_STALE_MS,
+  THREAD_TASK_CARD_EXECUTION_WATCHDOG_LIMIT,
+  USER_BEHAVIOR_REPAIR_CARDS_DISABLED,
+  USER_BEHAVIOR_REPAIR_TARGET_THREAD_ID,
+  USER_BEHAVIOR_REPAIR_TARGET_ROLE,
+  USER_BEHAVIOR_REPAIR_TARGET_WORKSPACE,
+  USER_BEHAVIOR_REPAIR_DEDUPE_WINDOW_MS,
   WORKSPACE_REGISTRY_FILE,
   TOKEN_USAGE_STATS_DB,
   TOKEN_USAGE_QUERY_CACHE_TTL_MS,
@@ -237,10 +271,12 @@ const {
   THREAD_DETAIL_RAW_ALL_ENABLED,
   WORKSPACE_CREATE_ROOTS,
   WORKSPACE_DEFAULT_CREATE_ROOT,
+  DESKTOP_GLOBAL_STATE_READ_FILES,
   DESKTOP_GLOBAL_STATE_FILES,
   MOBILE_WEB_LOG_FILE,
   MOBILE_WEB_LOG_MAX_BYTES,
   MOBILE_WEB_LOG_KEEP_BYTES,
+  MOBILE_WEB_LOG_EVENT_MIN_INTERVAL_MS,
   MAX_TEXT_CHARS,
   MAX_JSON_BODY_BYTES,
   MAX_START_THREAD_DEVELOPER_INSTRUCTIONS_CHARS,
@@ -274,6 +310,12 @@ const {
   THREAD_DETAIL_PROGRESSIVE_COMPLETED_TEXT_CHARS,
   THREAD_DETAIL_PROGRESSIVE_COMPLETED_USER_TEXT_CHARS,
   THREAD_DETAIL_SUMMARY_APP_SERVER_REFRESH_TTL_MS,
+  THREAD_DETAIL_DEFERRED_INITIAL_SEED_DELAY_MS,
+  THREAD_DETAIL_FIRST_PAINT_PREWARM_ENABLED,
+  THREAD_DETAIL_FIRST_PAINT_PREWARM_DELAY_MS,
+  THREAD_DETAIL_FIRST_PAINT_PREWARM_MIN_INTERVAL_MS,
+  THREAD_DETAIL_FIRST_PAINT_PREWARM_MIN_BYTES,
+  THREAD_DETAIL_FIRST_PAINT_PREWARM_MAX_PENDING,
   OPERATIONAL_ITEM_TYPES,
   THREAD_LIST_FALLBACK_CACHE_TTL_MS,
   THREAD_LIST_FALLBACK_CACHE_FILE,
@@ -292,6 +334,7 @@ const {
   DEFAULT_RPC_TIMEOUT_MS,
   READ_RPC_TIMEOUT_MS,
   THREAD_DETAIL_RPC_TIMEOUT_MS,
+  MAX_APP_SERVER_INBOUND_MESSAGE_BYTES,
   PROFILE_SWITCH_PREFLIGHT_TIMEOUT_MS,
   PROFILE_SWITCH_PROGRESS_TTL_MS,
   MUTATION_RPC_TIMEOUT_MS,
@@ -319,6 +362,35 @@ const {
   MUX_REPLAY_NOTIFICATION_LIMIT,
   SAFE_RETRY_METHODS,
 } = serverRuntimeConfigService.resolve();
+
+function resolveCurrentCodexRuntimeBinding() {
+  const bootstrap = resolveActiveCodexHomeFromStore({
+    userHome: USER_HOME,
+    runtimeRoot: RUNTIME_ROOT,
+    env: process.env,
+  });
+  const codexHomeResolution = resolveEffectiveCodexHome({
+    userHome: USER_HOME,
+    runtimeRoot: RUNTIME_ROOT,
+    env: process.env,
+    defaultCodexHome: DEFAULT_CODEX_HOME,
+    bootstrap,
+  });
+  const codexHome = codexHomeResolution.codexHome || CODEX_HOME;
+  const muxEndpointFile = serverRuntimeUtils.resolveMuxEndpointFile(
+    process.env,
+    codexHome,
+    codexHomeResolution,
+  ) || MUX_ENDPOINT_FILE;
+  return {
+    codexHome,
+    codexHomeResolution,
+    muxEndpointFile,
+    sessionsDir: path.join(codexHome, "sessions"),
+    archivedSessionsDir: path.join(codexHome, "archived_sessions"),
+  };
+}
+
 const serverHttpRuntimeService = createServerHttpRuntimeService({
   fs,
   path,
@@ -328,10 +400,11 @@ const serverHttpRuntimeService = createServerHttpRuntimeService({
   disableAuth: DISABLE_AUTH,
   getAuthKey: () => AUTH_KEY,
   getHermesPluginService: () => hermesPluginService,
-  getCodexHome: () => CODEX_HOME,
+  getCodexHome: () => resolveCurrentCodexRuntimeBinding().codexHome,
   getMobileWebLogFile: () => MOBILE_WEB_LOG_FILE,
   getMobileWebLogMaxBytes: () => MOBILE_WEB_LOG_MAX_BYTES,
   getMobileWebLogKeepBytes: () => MOBILE_WEB_LOG_KEEP_BYTES,
+  getMobileWebLogEventMinIntervalMs: () => MOBILE_WEB_LOG_EVENT_MIN_INTERVAL_MS,
   getMaxStructuredChars: () => MAX_STRUCTURED_CHARS,
   getMaxJsonBodyBytes: () => MAX_JSON_BODY_BYTES,
 });
@@ -373,6 +446,7 @@ const {
   compactStringArray,
   statusText,
 } = serverHttpRuntimeService;
+const serverRestartDrainService = createServerRestartDrainService();
 const AUTH_KEY = DISABLE_AUTH ? "" : loadAuthKey();
 const hermesPluginService = createHermesPluginService({
   registrationFile: HERMES_PLUGIN_REGISTRATION_FILE,
@@ -409,7 +483,7 @@ const mobileArchiveIndexService = createMobileArchiveIndexService({
 const codexProfileService = createCodexProfileService({
   userHome: USER_HOME,
   runtimeRoot: RUNTIME_ROOT,
-  activeCodexHome: CODEX_HOME,
+  activeCodexHome: () => resolveCurrentCodexRuntimeBinding().codexHome,
 });
 const publicConfigRuntimeCache = createPublicConfigRuntimeCache();
 const runtimeWorkspaceBootstrapService = createRuntimeWorkspaceBootstrapService({
@@ -417,6 +491,7 @@ const runtimeWorkspaceBootstrapService = createRuntimeWorkspaceBootstrapService(
   activeCodexHome: CODEX_HOME,
   authKeyFile: AUTH_KEY_FILE,
   port: PORT,
+  runtimeRoot: RUNTIME_ROOT,
   env: process.env,
   processExecPath: process.execPath,
   workspaceRegistryService,
@@ -452,6 +527,7 @@ const serverSupportRuntimeService = createServerSupportRuntimeService({
   publicReleaseRepository: PUBLIC_RELEASE_REPOSITORY,
   publicReleaseBranch: PUBLIC_RELEASE_BRANCH,
   publicReleaseCheckCacheMs: PUBLIC_RELEASE_CHECK_CACHE_MS,
+  currentPublicBuildConfig,
   shutdown,
 });
 const {
@@ -668,6 +744,8 @@ const {
   filterFallbackThreads,
   readStateDbFallback,
 } = threadVisibilityService;
+const runtimePressureDiagnostics = createRuntimePressureDiagnosticsService();
+runtimePressureDiagnostics.enable();
 const mediaStaticRuntimeService = createMediaStaticRuntimeService({
   env: process.env,
   path,
@@ -732,6 +810,7 @@ function callThreadListServerBoundary(method, args) {
 }
 
 const CODEX_CONFIG_DEFAULTS = readCodexConfigDefaults();
+let modelOptionsRuntimeService = null;
 const runtimePermissionPolicyService = createRuntimePermissionPolicyService({
   path,
   permissionModeOptions: PERMISSION_MODE_OPTIONS,
@@ -756,7 +835,9 @@ const threadRuntimeSettingsService = createThreadRuntimeSettingsService({
   maxRuntimeContextScanBytes: MAX_RUNTIME_CONTEXT_SCAN_BYTES,
   runtimeContextCacheTtlMs: RUNTIME_CONTEXT_CACHE_TTL_MS,
   runtimeContextCacheMax: RUNTIME_CONTEXT_CACHE_MAX,
-  modelOptions: MODEL_OPTIONS,
+  modelOptions: () => (modelOptionsRuntimeService
+    ? modelOptionsRuntimeService.currentModelOptions()
+    : MODEL_OPTIONS),
   reasoningEffortOptions: REASONING_EFFORT_OPTIONS,
   codexConfigDefaults: CODEX_CONFIG_DEFAULTS,
   normalizeFsPath,
@@ -804,6 +885,7 @@ const threadTaskCardRuntimeService = createThreadTaskCardRuntimeService({
   homeAiSecretRefConsumePath: HOME_AI_SECRET_REF_CONSUME_PATH,
   homeAiSecretRefTimeoutMs: HOME_AI_SECRET_REF_TIMEOUT_MS,
   registrationForWorkspace: (workspaceId) => hermesPluginService.registration({ workspaceId }),
+  atLoopStateFile: AT_LOOP_STATE_FILE,
   threadTaskCardFile: THREAD_TASK_CARD_FILE,
   returnThreadTaskCardScriptPath: path.join(APP_ROOT, "scripts", "return-thread-task-card.js"),
   threadTaskCardDraftTag: THREAD_TASK_CARD_DRAFT_TAG,
@@ -826,7 +908,10 @@ const threadTaskCardRuntimeService = createThreadTaskCardRuntimeService({
   visibleWorkspaceRoots,
   readGlobalState: (...args) => readGlobalState(...args),
   readThreadListFallback: (...args) => readThreadListFallback(...args),
+  listWorkspaces: (...args) => listWorkspaces(...args),
+  workspaceBindingAliases: (...args) => remoteManagedWorkspaceBindingAliases(...args),
   pushThreadId,
+  broadcast,
   shortIdentifier,
   compactOneLine,
   workspaceDelegationGuardExemptCwds: WORKSPACE_DELEGATION_GUARD_EXEMPT_CWDS,
@@ -840,6 +925,11 @@ const threadTaskCardRuntimeService = createThreadTaskCardRuntimeService({
   applyPermissionModeOverride,
   mutationRpcTimeoutMs: MUTATION_RPC_TIMEOUT_MS,
   notifyLocalTurnStarted,
+  readStartThreadDeveloperInstructions: (...args) => readStartThreadDeveloperInstructions(...args),
+  threadIdFromStartResult: (...args) => threadIdFromStartResult(...args),
+  persistThreadTitleToSessionIndex: (...args) => persistThreadTitleToSessionIndex(...args),
+  tryUpdateThreadTitle: (...args) => tryUpdateThreadTitle(...args),
+  rememberStartedThread: (...args) => rememberStartedThread(...args),
   readRuntimeSettings: (...args) => readRuntimeSettings(...args),
   hydrateThreadTitleFromSessionIndex,
   visibilityFromGlobalState,
@@ -867,6 +957,8 @@ const {
   requestedCodexFastMode,
   workspaceSourceWriteGuardDecisionForRequest,
   workspaceSourceWriteGuardLogPayload,
+  atLoopRouteService,
+  atLoopRuntimeService,
   threadTaskCardRouteService,
   threadTaskCardService,
   workspaceDelegationTargetHints,
@@ -919,6 +1011,90 @@ const {
   materializeThreadTaskCardDraftsForThread,
   prepareThreadTaskCardsToResult,
 } = threadTaskCardRuntimeService;
+const REMOTE_MANAGED_WORKSPACE_CENTRAL_SIMULATOR_ENABLED = /^(1|true|yes|on)$/i.test(String(
+  process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_CENTRAL_SIMULATOR || "",
+));
+const remoteManagedWorkspaceService = REMOTE_MANAGED_WORKSPACE_CENTRAL_SIMULATOR_ENABLED
+  ? createRemoteManagedWorkspaceService({
+    fs,
+    path,
+    crypto,
+    stateFile: process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_STATE_FILE
+      || path.join(RUNTIME_ROOT, "remote-managed-workspaces-simulator.json"),
+    enrollmentTokens: [
+      process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_TOKEN,
+      process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_ENROLLMENT_TOKEN,
+    ].filter(Boolean),
+    requireEnrollmentToken: true,
+  })
+  : null;
+const remoteManagedWorkspaceSettingsService = createRemoteManagedWorkspaceSettingsService({
+  fs,
+  path,
+  env: process.env,
+  settingsFile: process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_NODE_SETTINGS_FILE
+    || path.join(RUNTIME_ROOT, "remote-managed-workspace-node-settings.json"),
+  stateFile: process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_NODE_STATE_FILE
+    || path.join(RUNTIME_ROOT, "remote-managed-workspace-node-state.json"),
+  enrollmentTokenFile: process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_ENROLLMENT_TOKEN_FILE
+    || path.join(RUNTIME_ROOT, "remote-managed-workspace-enrollment-token"),
+  defaultAllowedRoot: process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_ALLOWED_ROOT || "",
+});
+const remoteManagedWorkspaceNodeClientService = createRemoteManagedWorkspaceNodeClientService({
+  fs,
+  path,
+  fetch,
+});
+const remoteManagedWorkspaceLocalExecutionService = createRemoteManagedWorkspaceLocalExecutionService({
+  fs,
+  path,
+  codex: { request: (...args) => codex.request(...args) },
+  applyPermissionModeOverride,
+  applyStartThreadRuntimeSettings,
+  applyTurnRuntimeSettings,
+  resolveThreadRuntimeSettings,
+  readStartThreadDeveloperInstructions: (...args) => readStartThreadDeveloperInstructions(...args),
+  threadIdFromStartResult: (...args) => threadIdFromStartResult(...args),
+  notifyLocalTurnStarted,
+  registerExecutionAuthority: (...args) => threadTaskCardService.registerExecutionAuthority(...args),
+  rememberStartedThread: (...args) => rememberStartedThread(...args),
+  persistThreadTitleToSessionIndex: (...args) => persistThreadTitleToSessionIndex(...args),
+  tryUpdateThreadTitle: (...args) => tryUpdateThreadTitle(...args),
+  mutationRpcTimeoutMs: MUTATION_RPC_TIMEOUT_MS,
+  readRpcTimeoutMs: READ_RPC_TIMEOUT_MS,
+  completionTimeoutMs: Number(process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_EXECUTION_TIMEOUT_MS || 0) || undefined,
+  completionPollIntervalMs: Number(process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_EXECUTION_POLL_MS || 0) || undefined,
+  logger: console,
+});
+const remoteManagedWorkspaceRunnerService = createRemoteManagedWorkspaceNodeRunnerService({
+  settingsService: remoteManagedWorkspaceSettingsService,
+  nodeClientService: remoteManagedWorkspaceNodeClientService,
+  taskCardExecutor: (card, context) => remoteManagedWorkspaceLocalExecutionService.execute(card, context),
+  taskCardHeartbeatIntervalMs: Number(process.env.CODEX_MOBILE_REMOTE_MANAGED_WORKSPACE_TASK_HEARTBEAT_MS || 0) || undefined,
+  logger: console,
+});
+
+function remoteManagedWorkspaceBindingAliases() {
+  if (!remoteManagedWorkspaceSettingsService || typeof remoteManagedWorkspaceSettingsService.publicSettings !== "function") return [];
+  const settings = remoteManagedWorkspaceSettingsService.publicSettings();
+  if (!settings || !settings.enabled || !settings.projectRoot) return [];
+  return [{
+    workspaceKind: "remote_managed_workspace",
+    role: "external_project_main",
+    projectRoot: settings.projectRoot,
+    source: "remote_managed_workspace_settings",
+  }];
+}
+
+const userBehaviorRepairCardService = createUserBehaviorRepairCardService({
+  createThreadTaskCardsFromSourceThread,
+  disabled: USER_BEHAVIOR_REPAIR_CARDS_DISABLED,
+  targetThreadId: USER_BEHAVIOR_REPAIR_TARGET_THREAD_ID,
+  targetRole: USER_BEHAVIOR_REPAIR_TARGET_ROLE,
+  targetWorkspace: USER_BEHAVIOR_REPAIR_TARGET_WORKSPACE,
+  dedupeWindowMs: USER_BEHAVIOR_REPAIR_DEDUPE_WINDOW_MS,
+  logger: console,
+});
 threadGoalActionService = createThreadGoalActionService({
   codexRequest: (...args) => codex.request(...args),
   goalForThread: (threadId) => threadGoalService.goalForThread(threadId),
@@ -941,6 +1117,7 @@ const threadListStateService = createThreadListStateService({
   threadTaskCardService,
   threadGoalService,
   upsertThreadListFallbackCacheThread,
+  upsertThreadListFallbackCacheThreadsBulk,
   readGlobalState,
   visibleWorkspaceRoots,
   visibilityFromGlobalState,
@@ -1017,6 +1194,12 @@ const threadDetailRuntimeService = createThreadDetailRuntimeService({
     threadDetailCompletedProgressMessages: THREAD_DETAIL_COMPLETED_PROGRESS_MESSAGES,
     threadDetailProgressiveActiveUserTextChars: THREAD_DETAIL_PROGRESSIVE_ACTIVE_USER_TEXT_CHARS,
     threadDetailSummaryAppServerRefreshTtlMs: THREAD_DETAIL_SUMMARY_APP_SERVER_REFRESH_TTL_MS,
+    threadDetailDeferredInitialSeedDelayMs: THREAD_DETAIL_DEFERRED_INITIAL_SEED_DELAY_MS,
+    threadDetailFirstPaintPrewarmEnabled: THREAD_DETAIL_FIRST_PAINT_PREWARM_ENABLED,
+    threadDetailFirstPaintPrewarmDelayMs: THREAD_DETAIL_FIRST_PAINT_PREWARM_DELAY_MS,
+    threadDetailFirstPaintPrewarmMinIntervalMs: THREAD_DETAIL_FIRST_PAINT_PREWARM_MIN_INTERVAL_MS,
+    threadDetailFirstPaintPrewarmMinBytes: THREAD_DETAIL_FIRST_PAINT_PREWARM_MIN_BYTES,
+    threadDetailFirstPaintPrewarmMaxPending: THREAD_DETAIL_FIRST_PAINT_PREWARM_MAX_PENDING,
     maxTextChars: MAX_TEXT_CHARS,
     maxCommandOutputChars: MAX_COMMAND_OUTPUT_CHARS,
     maxCommandOutputCharsPerTurn: MAX_COMMAND_OUTPUT_CHARS_PER_TURN,
@@ -1082,6 +1265,7 @@ const threadDetailRuntimeService = createThreadDetailRuntimeService({
 const {
   appendMissingRolloutCompletionTurnsToThread,
   appendRolloutActiveAssistantItemsToDetailResult,
+  appendRolloutLatestCompletedAssistantItemsToDetailResult,
   appendRolloutEmptyCompletionDiagnosticsToThread,
   appendRolloutFinalReceiptsToThread,
   appendRolloutToolOutputImagesToThread,
@@ -1139,6 +1323,7 @@ const {
   rolloutEvidenceIsRecent,
   rolloutTimestampFields,
   scheduleRecentWindowProjectionRefresh,
+  threadDetailFirstPaintPrewarmService,
   sortTurnsChronologically,
   threadDetailActiveWindowPrewarmService,
   threadDetailProjectionInput,
@@ -1158,6 +1343,7 @@ const threadSummaryReadModelService = createThreadSummaryReadModelService({
   fs,
   path,
   codexHome: CODEX_HOME,
+  globalStateFiles: DESKTOP_GLOBAL_STATE_READ_FILES,
   maxStartThreadDeveloperInstructionsChars: MAX_START_THREAD_DEVELOPER_INSTRUCTIONS_CHARS,
   startedThreadCacheTtlMs: STARTED_THREAD_CACHE_TTL_MS,
   startedThreadCacheMax: STARTED_THREAD_CACHE_MAX,
@@ -1285,12 +1471,12 @@ function threadListSummaryTimestampMs(...args) { return callThreadListServerBoun
 function sortThreadListSummaries(...args) { return callThreadListServerBoundary("sortThreadListSummaries", args); }
 
 const rateLimitRuntimeService = createRateLimitRuntimeService({
-  archivedSessionsDir: ARCHIVED_SESSIONS_DIR,
-  codexHome: CODEX_HOME,
+  archivedSessionsDir: () => resolveCurrentCodexRuntimeBinding().archivedSessionsDir,
+  codexHome: () => resolveCurrentCodexRuntimeBinding().codexHome,
   incrementBoundedDiagnosticCounter,
   isRateLimitRolloutSourceAccountScoped,
   modelOptions: MODEL_OPTIONS,
-  sessionsDir: SESSIONS_DIR,
+  sessionsDir: () => resolveCurrentCodexRuntimeBinding().sessionsDir,
 });
 const {
   compactRateLimitWindow,
@@ -1333,6 +1519,7 @@ threadEventNotificationService = createThreadEventNotificationService({
   applyThreadStatusPayloadToThreadListFallbackCache,
   getThreadDetailProjectionService: () => threadDetailProjectionService,
   threadDetailActiveWindowPrewarmService,
+  threadDetailFirstPaintPrewarmService,
   getCodex: () => codex,
   logThreadDetail,
   logger: console,
@@ -1345,8 +1532,10 @@ const runtimeSettingsService = createRuntimeSettingsService({
   workspaceDelegationToolFullName: WORKSPACE_DELEGATION_TOOL_FULL_NAME,
 });
 const {
+  frontendDiagnosticLogPublicSettings,
   readJsonFile,
   readRuntimeSettings,
+  setFrontendDiagnosticLogSettings,
   setThreadDisplaySettings,
   setWorkspaceDelegationEnabled,
   threadDisplayPublicSettings,
@@ -1427,7 +1616,7 @@ const {
 
 const resolveExternalEndpoint = createAppServerEndpointResolver({
   fs,
-  muxEndpointFile: MUX_ENDPOINT_FILE,
+  muxEndpointFile: () => resolveCurrentCodexRuntimeBinding().muxEndpointFile,
   externalAppServerWs: EXTERNAL_APP_SERVER_WS,
   externalAppServerTcp: EXTERNAL_APP_SERVER_TCP,
 });
@@ -1445,9 +1634,11 @@ const codex = createCodexAppServerClient({
   CODEX_HOME_RESOLUTION,
   RUNTIME_ROOT,
   PERSIST_MOBILE_OWNED_MUX,
+  runtimeProfileBindingProvider: resolveCurrentCodexRuntimeBinding,
   MUX_REPLAY_NOTIFICATION_LIMIT,
   READ_RPC_TIMEOUT_MS,
   DEFAULT_RPC_TIMEOUT_MS,
+  MAX_APP_SERVER_INBOUND_MESSAGE_BYTES,
   LIVE_RATE_LIMIT_REFRESH_MIN_INTERVAL_MS,
   SAFE_RETRY_METHODS,
   SERVER_REQUEST_METHODS,
@@ -1467,6 +1658,8 @@ const codex = createCodexAppServerClient({
   maybeApplyQueuedThreadSideChat,
   maybeSendTurnCompletedPush,
   publicServerRequest,
+  taskCardExecutionAuthorityDecisionForRequest: (...args) => threadTaskCardService.authorityDecisionForServerRequest(...args),
+  taskCardExecutionAuthorityLogPayload: (...args) => threadTaskCardService.authorityLogPayload(...args),
   workspaceSourceWriteGuardDecisionForRequest,
   serverRequestResponsePayload,
   workspaceSourceWriteGuardLogPayload,
@@ -1480,6 +1673,71 @@ const codex = createCodexAppServerClient({
   codexProfileService,
   liveQuotaSnapshotForProfiles,
 });
+
+modelOptionsRuntimeService = createModelOptionsRuntimeService({
+  codex,
+  fallbackModelOptions: MODEL_OPTIONS,
+  defaultModel: DEFAULT_MODEL,
+  readTimeoutMs: Math.min(READ_RPC_TIMEOUT_MS, 3000),
+});
+
+let taskCardExecutionWatchdogTimer = null;
+let taskCardExecutionWatchdogInitialTimer = null;
+let taskCardExecutionWatchdogRunning = false;
+
+async function runTaskCardExecutionWatchdog() {
+  if (taskCardExecutionWatchdogRunning) return;
+  if (!threadTaskCardService || typeof threadTaskCardService.resumeStaleExecutionLeases !== "function") return;
+  taskCardExecutionWatchdogRunning = true;
+  try {
+    const result = await threadTaskCardService.resumeStaleExecutionLeases({
+      staleAfterMs: THREAD_TASK_CARD_EXECUTION_WATCHDOG_STALE_MS,
+      limit: THREAD_TASK_CARD_EXECUTION_WATCHDOG_LIMIT,
+      source: "listener-watchdog",
+    });
+    if (result && (result.resumed || result.blocked || result.skipped)) {
+      console.log(`[thread task card] execution watchdog inspected=${result.inspected || 0} resumed=${result.resumed || 0} blocked=${result.blocked || 0} skipped=${result.skipped || 0}`);
+    }
+  } catch (err) {
+    console.error(`[thread task card] execution watchdog failed: ${compactOneLine(err && err.message || String(err))}`);
+  } finally {
+    taskCardExecutionWatchdogRunning = false;
+  }
+}
+
+function scheduleTaskCardExecutionWatchdog() {
+  if (taskCardExecutionWatchdogTimer || THREAD_TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS <= 0) return;
+  taskCardExecutionWatchdogTimer = setInterval(
+    () => runTaskCardExecutionWatchdog(),
+    THREAD_TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS,
+  );
+  if (taskCardExecutionWatchdogTimer && typeof taskCardExecutionWatchdogTimer.unref === "function") {
+    taskCardExecutionWatchdogTimer.unref();
+  }
+  const initialDelayMs = Math.min(
+    THREAD_TASK_CARD_EXECUTION_WATCHDOG_INTERVAL_MS,
+    10_000,
+  );
+  taskCardExecutionWatchdogInitialTimer = setTimeout(() => {
+    taskCardExecutionWatchdogInitialTimer = null;
+    runTaskCardExecutionWatchdog();
+  }, Math.max(1_000, initialDelayMs));
+  if (taskCardExecutionWatchdogInitialTimer && typeof taskCardExecutionWatchdogInitialTimer.unref === "function") {
+    taskCardExecutionWatchdogInitialTimer.unref();
+  }
+}
+
+function clearTaskCardExecutionWatchdog() {
+  if (taskCardExecutionWatchdogInitialTimer) {
+    clearTimeout(taskCardExecutionWatchdogInitialTimer);
+    taskCardExecutionWatchdogInitialTimer = null;
+  }
+  if (taskCardExecutionWatchdogTimer) {
+    clearInterval(taskCardExecutionWatchdogTimer);
+    taskCardExecutionWatchdogTimer = null;
+  }
+}
+
 const threadDetailCopyTextService = createThreadDetailCopyTextService({
   codex,
   appendRolloutFinalReceiptsToThread,
@@ -1563,6 +1821,7 @@ const { autoRecoverThreadTurn } = createAutoTurnRecoveryService({
 const threadMessageRouteService = createThreadMessageRouteService({
   codex,
   modelOptions: MODEL_OPTIONS,
+  resolveModelOptions: () => modelOptionsRuntimeService.effectiveModelOptions(),
   reasoningEffortOptions: REASONING_EFFORT_OPTIONS,
   mutationRpcTimeoutMs: MUTATION_RPC_TIMEOUT_MS,
   startThreadFromRequestBody,
@@ -1727,6 +1986,7 @@ function staleContextOnlyActiveStatus(...args) { return callThreadListServerBoun
 function clearThreadListFallbackCache(...args) { return callThreadListServerBoundary("clearThreadListFallbackCache", args); }
 function removeThreadFromThreadListFallbackCache(...args) { return callThreadListServerBoundary("removeThreadFromThreadListFallbackCache", args); }
 function upsertThreadListFallbackCacheThread(...args) { return callThreadListServerBoundary("upsertThreadListFallbackCacheThread", args); }
+function upsertThreadListFallbackCacheThreadsBulk(...args) { return callThreadListServerBoundary("upsertThreadListFallbackCacheThreadsBulk", args); }
 function updateThreadListFallbackCacheStatus(...args) { return callThreadListServerBoundary("updateThreadListFallbackCacheStatus", args); }
 function applyThreadStatusPayloadToThreadListFallbackCache(...args) { return callThreadListServerBoundary("applyThreadStatusPayloadToThreadListFallbackCache", args); }
 function trackThreadDetailRequestLifecycle(...args) { return callThreadListServerBoundary("trackThreadDetailRequestLifecycle", args); }
@@ -1739,6 +1999,11 @@ function readThreadListFallback(...args) { return callThreadListServerBoundary("
 function threadListFallbackPrewarmConfig(...args) { return callThreadListServerBoundary("threadListFallbackPrewarmConfig", args); }
 function threadListFallbackPrewarmPublicStatus(...args) { return callThreadListServerBoundary("threadListFallbackPrewarmPublicStatus", args); }
 function scheduleThreadListFallbackPrewarm(...args) { return callThreadListServerBoundary("scheduleThreadListFallbackPrewarm", args); }
+function threadDetailFirstPaintPrewarmStatus(threadId = "") {
+  return threadDetailFirstPaintPrewarmService && typeof threadDetailFirstPaintPrewarmService.status === "function"
+    ? threadDetailFirstPaintPrewarmService.status(threadId)
+    : null;
+}
 function threadListFallbackSourceDiagnosticTimingFields(...args) { return callThreadListServerBoundary("threadListFallbackSourceDiagnosticTimingFields", args); }
 function threadListFallbackBaselineWorkTimingFields(...args) { return callThreadListServerBoundary("threadListFallbackBaselineWorkTimingFields", args); }
 function threadListTokenUsageTimingFields(...args) { return callThreadListServerBoundary("threadListTokenUsageTimingFields", args); }
@@ -1801,6 +2066,7 @@ const serverRouteCompositionService = createServerRouteCompositionService({
   mergeThreadDisplaySummary,
   mergeThreadSummaryListWithDiagnostics,
   modelOptions: MODEL_OPTIONS,
+  resolveModelOptions: () => modelOptionsRuntimeService.effectiveModelOptions(),
   normalizeFsPath,
   normalizeStaleContextOnlyActiveThread,
   normalizeThreadListResultStatuses,
@@ -1832,9 +2098,15 @@ const serverRouteCompositionService = createServerRouteCompositionService({
   readStateDbThread,
   readThreadListCachedFallback,
   readThreadListFallback,
+  remoteManagedWorkspaceCentralSimulator: REMOTE_MANAGED_WORKSPACE_CENTRAL_SIMULATOR_ENABLED,
+  remoteManagedWorkspaceRunnerService,
+  remoteManagedWorkspaceService,
+  remoteManagedWorkspaceSettingsService,
+  restartDrainService: serverRestartDrainService,
   rememberStartedThread,
   removeEventClient,
   requestAuthToken,
+  requestAuthTokens,
   requestBaseUrl,
   reasoningEffortOptions: REASONING_EFFORT_OPTIONS,
   refreshAppUpdateStatus,
@@ -1843,12 +2115,16 @@ const serverRouteCompositionService = createServerRouteCompositionService({
   refreshPublicReleaseStatus,
   rolloutWarningBytes: ROLLOUT_WARNING_BYTES,
   rolloutStatsForPath,
+  runtimePressureDiagnostics,
   runThreadGoalAction,
   safeAppUpdateError,
+  atLoopRouteService,
   scheduleActiveWindowPrewarmFromThreadListResult,
+  scheduleBackgroundTask: (fn) => setImmediate(fn),
   scheduleAppRestart,
   sendJson,
   serveStatic,
+  setFrontendDiagnosticLogSettings,
   setProfileSwitchProgress,
   setThreadGoal,
   setThreadDisplaySettings,
@@ -1861,7 +2137,9 @@ const serverRouteCompositionService = createServerRouteCompositionService({
   syncRegisteredWorkspaceTrust,
   syncThreadDetailReadResultToThreadListFallbackCache,
   threadDetailCopyTextService,
+  threadDetailFirstPaintPrewarmStatus,
   threadDetailReadOrchestrationService,
+  frontendDiagnosticLogPublicSettings,
   threadDisplayPublicSettings,
   threadDisplaySummaryCache,
   threadListDefaultWarmFallbackEnabled: THREAD_LIST_DEFAULT_WARM_FALLBACK_ENABLED,
@@ -1879,6 +2157,7 @@ const serverRouteCompositionService = createServerRouteCompositionService({
   trackThreadDetailRequestLifecycle,
   tryUpdateThreadTitle,
   upsertThreadListFallbackCacheThreads,
+  userBehaviorRepairCardService,
   visibilityFromGlobalState,
   viteShellArtifactService,
   webPushRuntimeService: notificationRuntimeService.webPushRuntimeService,
@@ -1888,6 +2167,7 @@ const serverRouteCompositionService = createServerRouteCompositionService({
   logger: console,
 });
 const server = http.createServer(serverRouteCompositionService.handleRequest);
+let shutdownStarted = false;
 
 server.on("clientError", serverRouteCompositionService.handleClientError);
 
@@ -1899,20 +2179,45 @@ process.on("unhandledRejection", (err) => {
   console.error(`[server] unhandled rejection: ${err && err.stack ? err.stack : err}`);
 });
 
-process.on("SIGINT", () => shutdown());
-process.on("SIGTERM", () => shutdown());
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-function shutdown() {
+function shutdown(reason = "signal") {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
   try {
-    if (codex.ws) codex.ws.close();
+    serverRestartDrainService.beginDrain({
+      reason: "listener_shutdown",
+      source: reason,
+      maxDrainMs: 15_000,
+    });
   } catch (_) {}
   try {
-    if (codex.child && codex.child.exitCode === null) codex.child.kill();
+    remoteManagedWorkspaceRunnerService.stop();
   } catch (_) {}
   try {
-    if (!PERSIST_MOBILE_OWNED_MUX && codex.muxChild && codex.muxChild.exitCode === null) codex.muxChild.kill();
+    clearTaskCardExecutionWatchdog();
   } catch (_) {}
-  process.exit(0);
+  try {
+    if (codex.ws && typeof codex.closeTransportOnly === "function") codex.closeTransportOnly();
+  } catch (_) {}
+  if (!REQUIRE_SHARED_APP_SERVER) {
+    try {
+      if (codex.child && codex.child.exitCode === null) codex.child.kill();
+    } catch (_) {}
+  }
+  if (!PERSIST_MOBILE_OWNED_MUX) {
+    try {
+      if (!PERSIST_MOBILE_OWNED_MUX && codex.muxChild && codex.muxChild.exitCode === null) codex.muxChild.kill();
+    } catch (_) {}
+  }
+  const forceExit = setTimeout(() => process.exit(0), 5_000);
+  if (forceExit && typeof forceExit.unref === "function") forceExit.unref();
+  try {
+    server.close(() => process.exit(0));
+  } catch (_) {
+    process.exit(0);
+  }
 }
 
 function startServer() {
@@ -1928,6 +2233,10 @@ function startServer() {
     console.log(DISABLE_AUTH ? "Authentication disabled by CODEX_MOBILE_DISABLE_AUTH." : `Authentication enabled; key source is env CODEX_MOBILE_KEY or ${AUTH_KEY_FILE}.`);
     scheduleStartupAppUpdateCheck();
     scheduleThreadListFallbackPrewarm();
+    scheduleTaskCardExecutionWatchdog();
+    if (remoteManagedWorkspaceSettingsService.publicSettings().enabled) {
+      remoteManagedWorkspaceRunnerService.start();
+    }
   });
 }
 
@@ -1940,6 +2249,7 @@ module.exports = {
   anyThreadMatchesVisibleWorkspace,
   attachRolloutFallbackStatus,
   appendRolloutActiveAssistantItemsToDetailResult,
+  appendRolloutLatestCompletedAssistantItemsToDetailResult,
   applyLocalActiveThreadStatusToSummary,
   backfillMissingRolloutCompletionTurnsForDetailResult,
   codeGraphMcpElicitationToolName,

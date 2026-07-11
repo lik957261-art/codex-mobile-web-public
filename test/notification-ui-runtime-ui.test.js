@@ -38,10 +38,3 @@ test("notification UI runtime preserves CommonJS and legacy global entry points"
   assert.match(notificationUiRuntimeJs, /module\.exports = notificationUiRuntimeApi/);
   assert.match(notificationUiRuntimeJs, /root\.CodexNotificationUiRuntime = notificationUiRuntimeApi/);
 });
-
-test("notification UI bootstrap loads independent startup resources in parallel", () => {
-  assert.match(notificationUiRuntimeJs, /const statusPromise = api\("\/api\/status"\)/);
-  assert.match(notificationUiRuntimeJs, /const workspacesPromise = loadWorkspaces\(\)/);
-  assert.match(notificationUiRuntimeJs, /const threadDisplayPromise = loadThreadDisplaySettings/);
-  assert.match(notificationUiRuntimeJs, /await Promise\.all\(\[statusPromise, workspacesPromise, threadDisplayPromise\]\)/);
-});

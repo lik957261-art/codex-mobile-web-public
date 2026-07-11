@@ -16,6 +16,9 @@ const {
   createThreadManagementRouteService,
 } = require("./thread-management-route-service");
 const {
+  createRemoteManagedWorkspaceRouteService,
+} = require("./remote-managed-workspace-route-service");
+const {
   createWorkspaceRouteService,
 } = require("./workspace-route-service");
 
@@ -25,6 +28,7 @@ function createApiDispatchRouteService(dependencies = {}) {
   const CODEX_HOME = dependencies.CODEX_HOME;
   const archiveThreadId = dependencies.archiveThreadId;
   const archivedSessionThreadIds = dependencies.archivedSessionThreadIds;
+  const atLoopRouteService = dependencies.atLoopRouteService;
   const attachThreadListStateToResult = dependencies.attachThreadListStateToResult;
   const chatGptProBridgeService = dependencies.chatGptProBridgeService;
   const chatGptProMcpService = dependencies.chatGptProMcpService;
@@ -69,6 +73,14 @@ function createApiDispatchRouteService(dependencies = {}) {
   const readStateDbThread = dependencies.readStateDbThread;
   const readThreadListCachedFallback = dependencies.readThreadListCachedFallback;
   const readThreadListFallback = dependencies.readThreadListFallback;
+  const remoteManagedWorkspaceService = dependencies.remoteManagedWorkspaceService;
+  const remoteManagedWorkspaceRouteService = dependencies.remoteManagedWorkspaceRouteService
+    || (dependencies.remoteManagedWorkspaceCentralSimulator === true && remoteManagedWorkspaceService
+      ? createRemoteManagedWorkspaceRouteService({
+        remoteManagedWorkspaceService,
+        centralSimulator: true,
+      })
+      : null);
   const rememberStartedThread = dependencies.rememberStartedThread;
   const removeEventClient = dependencies.removeEventClient;
   const rolloutStatsForPath = dependencies.rolloutStatsForPath;
@@ -103,6 +115,8 @@ function createApiDispatchRouteService(dependencies = {}) {
   const workspaceRouteService = createWorkspaceRouteService({
     CODEX_HOME,
     listWorkspaces,
+    normalizeFsPath,
+    tokenUsageWorkspaceCwds,
     workspaceRegistryService,
     syncRegisteredWorkspaceTrust,
     syncKnownCodexMobileMcpToolsets,
@@ -151,16 +165,48 @@ function createApiDispatchRouteService(dependencies = {}) {
 
   async function handleApi(req, res) {
     const url = getUrl(req);
+    const startedAt = Date.now();
+    let responseRecorded = false;
+    function trackedSendJson(status, body, headers) {
+      if (!responseRecorded && dependencies.runtimePressureDiagnostics && typeof dependencies.runtimePressureDiagnostics.recordRoute === "function") {
+        responseRecorded = true;
+        let responseBytes = 0;
+        try {
+          responseBytes = Buffer.byteLength(JSON.stringify(body));
+        } catch (_) {}
+        dependencies.runtimePressureDiagnostics.recordRoute({
+          method: req.method,
+          path: url.pathname,
+          status,
+          elapsedMs: Date.now() - startedAt,
+          responseBytes,
+          responseObjectCount: typeof dependencies.runtimePressureDiagnostics.responseObjectCount === "function"
+            ? dependencies.runtimePressureDiagnostics.responseObjectCount(body)
+            : 0,
+        });
+      }
+      return sendJson(res, status, body, headers);
+    }
     const publicCoreRouteResult = await coreApiRouteService.handlePublicRoute({
       url,
       req,
       res,
       readBody: () => readBody(req),
-      sendJson: (status, body, headers) => sendJson(res, status, body, headers),
+      sendJson: trackedSendJson,
     });
     if (publicCoreRouteResult.handled) return;
+    if (remoteManagedWorkspaceRouteService && typeof remoteManagedWorkspaceRouteService.handleRoute === "function") {
+      const remoteManagedWorkspaceRouteResult = await remoteManagedWorkspaceRouteService.handleRoute({
+        url,
+        method: req.method,
+        req,
+        readBody: () => readBody(req),
+        sendJson: trackedSendJson,
+      });
+      if (remoteManagedWorkspaceRouteResult.handled) return;
+    }
     if (!isAuthorized(req)) {
-      sendJson(res, 401, { error: "Unauthorized" });
+      trackedSendJson(401, { error: "Unauthorized" });
       return;
     }
     const authorizedCoreRouteResult = await coreApiRouteService.handleAuthorizedRoute({
@@ -168,7 +214,7 @@ function createApiDispatchRouteService(dependencies = {}) {
       req,
       res,
       readBody: () => readBody(req),
-      sendJson: (status, body, headers) => sendJson(res, status, body, headers),
+      sendJson: trackedSendJson,
     });
     if (authorizedCoreRouteResult.handled) return;
     const webPushRouteResult = await webPushRuntimeService.handleRoute({
@@ -176,7 +222,7 @@ function createApiDispatchRouteService(dependencies = {}) {
       method: req.method,
       req,
       readBody: () => readBody(req),
-      sendJson: (status, body) => sendJson(res, status, body),
+      sendJson: trackedSendJson,
     });
     if (webPushRouteResult.handled) {
       return;
@@ -186,7 +232,7 @@ function createApiDispatchRouteService(dependencies = {}) {
       method: req.method,
       req,
       res,
-      sendJson: (status, body) => sendJson(res, status, body),
+      sendJson: trackedSendJson,
     });
     if (mediaFileRouteResult.handled) {
       return;
@@ -197,16 +243,27 @@ function createApiDispatchRouteService(dependencies = {}) {
       readBody: () => readBody(req),
       threadSideChatService,
       orchestrationService: threadSideChatOrchestrationService,
-      sendJson: (status, body) => sendJson(res, status, body),
+      sendJson: trackedSendJson,
     });
     if (threadSideChatRouteResult.handled) {
       return;
+    }
+    if (atLoopRouteService && typeof atLoopRouteService.handleRoute === "function") {
+      const atLoopRouteResult = await atLoopRouteService.handleRoute({
+        url,
+        method: req.method,
+        readBody: () => readBody(req),
+        sendJson: trackedSendJson,
+      });
+      if (atLoopRouteResult.handled) {
+        return;
+      }
     }
     const threadTaskCardRouteResult = await threadTaskCardRouteService.handleRoute({
       url,
       method: req.method,
       readBody: () => readBody(req),
-      sendJson: (status, body) => sendJson(res, status, body),
+      sendJson: trackedSendJson,
     });
     if (threadTaskCardRouteResult.handled) {
       return;
@@ -215,7 +272,7 @@ function createApiDispatchRouteService(dependencies = {}) {
       url,
       method: req.method,
       readBody: () => readBody(req),
-      sendJson: (status, body) => sendJson(res, status, body),
+      sendJson: trackedSendJson,
     });
     if (workspaceRouteResult.handled) {
       return;
@@ -224,7 +281,7 @@ function createApiDispatchRouteService(dependencies = {}) {
       url,
       method: req.method,
       readBody: () => readBody(req),
-      sendJson: (status, body) => sendJson(res, status, body),
+      sendJson: trackedSendJson,
     });
     if (threadContinuationRouteResult.handled) {
       return;
@@ -233,7 +290,7 @@ function createApiDispatchRouteService(dependencies = {}) {
       url,
       method: req.method,
       readBody: () => readBody(req),
-      sendJson: (status, body) => sendJson(res, status, body),
+      sendJson: trackedSendJson,
     });
     if (chatGptProRouteResult.handled) {
       return;
@@ -243,7 +300,7 @@ function createApiDispatchRouteService(dependencies = {}) {
       method: req.method,
       readBody: () => readBody(req),
       readMessageBody: (threadId) => readMessageBody(req, threadId),
-      sendJson: (status, body) => sendJson(res, status, body),
+      sendJson: trackedSendJson,
     });
     if (threadMessageRouteResult.handled) {
       return;
@@ -251,7 +308,7 @@ function createApiDispatchRouteService(dependencies = {}) {
     const threadCopyTextRouteResult = await threadCopyTextRouteService.handleRoute({
       url,
       method: req.method,
-      sendJson: (status, body) => sendJson(res, status, body),
+      sendJson: trackedSendJson,
     });
     if (threadCopyTextRouteResult.handled) {
       return;
@@ -260,7 +317,7 @@ function createApiDispatchRouteService(dependencies = {}) {
       url,
       method: req.method,
       readBody: () => readBody(req),
-      sendJson: (status, body) => sendJson(res, status, body),
+      sendJson: trackedSendJson,
     });
     if (threadManagementRouteResult.handled) {
       return;
@@ -268,7 +325,7 @@ function createApiDispatchRouteService(dependencies = {}) {
     const threadListRouteResult = await handleThreadListRoute({
       url,
       method: req.method,
-      sendJson: (status, body, headers) => sendJson(res, status, body, headers),
+      sendJson: trackedSendJson,
       archivedSessionThreadIds,
       readSessionIndexEntries,
       rolloutStatsForPath,
@@ -311,13 +368,13 @@ function createApiDispatchRouteService(dependencies = {}) {
         threadId,
         url,
         readThreadDetail: (request) => threadDetailReadOrchestrationService.readThreadDetail(request),
-        sendJson: (status, body) => sendJson(res, status, body),
+        sendJson: trackedSendJson,
         onThreadDetailReadResult: (payload) => syncThreadDetailReadResultToThreadListFallbackCache(payload),
         logThreadDetail,
       });
       return;
     }
-    sendJson(res, 404, { error: "Not found" });
+    trackedSendJson(404, { error: "Not found" });
   }
 
   function handleEvents(req, res) {

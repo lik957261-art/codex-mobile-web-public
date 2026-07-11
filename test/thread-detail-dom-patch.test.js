@@ -573,6 +573,32 @@ test("conversation DOM authority invalidation covers non-empty projection shape 
   assert.equal(plan.reason, "stable-signature-dom-turn-mismatch");
 });
 
+test("conversation DOM authority invalidation keeps thread-tile self-healing out of Home AI failure reports", () => {
+  const plan = domPatch.planConversationDomAuthorityInvalidation({
+    updatePlan: {
+      action: "set-inner-html",
+      reason: "stable-signature-dom-item-mismatch",
+    },
+    action: "thread-tile-empty-state",
+    routeKind: "thread-tile",
+    expectedVisibleTurnCount: 3,
+    renderedDomTurnCount: 3,
+    expectedVisibleItemCount: 7,
+    renderedDomItemCount: 4,
+    previousChildCount: 2,
+    threadId: "thread-123",
+  });
+
+  assert.equal(plan.shouldRecordMismatch, false);
+  assert.equal(plan.mismatchReason, "");
+  assert.equal(plan.mismatchPayload, null);
+  assert.equal(plan.shouldPostClientEvent, true);
+  assert.equal(plan.clientEventName, "conversation_dom_authority_invalidated");
+  assert.equal(plan.clientEventPayload.diagnosticFailureSuppressed, true);
+  assert.equal(plan.clientEventPayload.diagnosticFailureSuppressedReason, "thread-tile-dom-authority-self-healing");
+  assert.equal(plan.reason, "stable-signature-dom-item-mismatch");
+});
+
 test("conversation DOM authority invalidation stays quiet for healthy updates", () => {
   assert.deepEqual(domPatch.planConversationDomAuthorityInvalidation({
     updatePlan: {
@@ -752,6 +778,7 @@ test("conversation HTML patch fallback client event plan bounds payload fields",
       reason: "stable-signature-dom-empty-private-detail-that-should-be-bounded-and-not-grow-longer-than-needed",
     },
     threadId: "thread-1",
+    clientBuildId: "0.1.11|client-a",
     expectedVisibleTurnCount: 3.9,
     renderedDomTurnCount: "0",
   });
@@ -761,6 +788,7 @@ test("conversation HTML patch fallback client event plan bounds payload fields",
   assert.equal(plan.reason, "patch-html-fallback");
   assert.deepEqual(plan.payload, {
     threadId: "thread-1",
+    clientBuildId: "0.1.11|client-a",
     reason: "missing-document-private-detail-that-should-be-bounded-and-not-grow-longer-than-",
     updateReason: "stable-signature-dom-empty-private-detail-that-should-be-bounded-and-not-grow-lo",
     expectedVisibleTurnCount: 3,
@@ -785,6 +813,9 @@ test("conversation HTML performance event plan owns bounded render payload", () 
     childCount: 3.1,
     stickToBottom: true,
     threadId: "thread-1",
+    threadHash: "h_thread_1",
+    previousRenderedThreadHash: "h_thread_1",
+    sameThreadRender: true,
     currentThreadStatus: "active",
     slowThresholdMs: 120,
     minIntervalMs: 500,
@@ -799,7 +830,11 @@ test("conversation HTML performance event plan owns bounded render payload", () 
       childCount: 3,
       stickToBottom: true,
       threadId: "thread-1",
+      threadHash: "h_thread_1",
+      previousRenderedThreadHash: "h_thread_1",
+      sameThreadRender: true,
       currentThreadStatus: "active",
+      source: "",
       updateReason: "signature-changed",
       domUpdateAction: "patch-html",
       patchFallbackApplied: false,
@@ -1375,6 +1410,58 @@ test("visible item dom patch removes stale visible item nodes after filtering", 
     article.childNodes.map((node) => node.getAttribute("data-render-key")),
     ["item|thread|turn|durable-user", "status|thread|turn"],
   );
+});
+
+test("duplicate user message DOM cleanup removes same-message local residue", () => {
+  const local = createDomElement("section", {
+    class: "item userMessage entry-animate",
+    "data-render-key": "item|thread|turn|local-user-submit",
+    "data-item": "local-user-submit",
+    "data-client-submission-hash": "h_local",
+  }, [
+    createDomElement("div", { class: "item-body" }, [createDomText("same submitted text")]),
+  ]);
+  const durable = createDomElement("section", {
+    class: "item userMessage",
+    "data-render-key": "item|thread|turn|durable-user",
+    "data-item": "durable-user",
+  }, [
+    createDomElement("div", { class: "item-body" }, [createDomText("same submitted text")]),
+  ]);
+  const article = createDomElement("article", { class: "turn", "data-turn": "turn-1" }, [local, durable]);
+  const root = createDomElement("div", {}, [article]);
+
+  const result = domPatch.removeDuplicateUserMessageDomNodes({ root });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.removed, 1);
+  assert.equal(local.parentNode, null);
+  assert.equal(durable.parentNode, article);
+  assert.deepEqual(article.childNodes, [durable]);
+});
+
+test("duplicate user message DOM cleanup preserves distinct user messages", () => {
+  const first = createDomElement("section", {
+    class: "item userMessage",
+    "data-render-key": "item|thread|turn|user-a",
+    "data-item": "user-a",
+  }, [
+    createDomElement("div", { class: "item-body" }, [createDomText("first submitted text")]),
+  ]);
+  const second = createDomElement("section", {
+    class: "item userMessage",
+    "data-render-key": "item|thread|turn|user-b",
+    "data-item": "user-b",
+  }, [
+    createDomElement("div", { class: "item-body" }, [createDomText("second submitted text")]),
+  ]);
+  const article = createDomElement("article", { class: "turn", "data-turn": "turn-1" }, [first, second]);
+
+  const result = domPatch.removeDuplicateUserMessageDomNodes({ root: article });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.removed, 0);
+  assert.deepEqual(article.childNodes, [first, second]);
 });
 
 test("visible item dom patch returns bounded failure reasons", () => {

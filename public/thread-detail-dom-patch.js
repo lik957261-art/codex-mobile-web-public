@@ -90,6 +90,120 @@
     return true;
   }
 
+  function removeUnexpectedVisibleItemNodes(article, expectedKeys) {
+    const remaining = new Map();
+    for (const key of normalizedStringList(expectedKeys)) {
+      remaining.set(key, Number(remaining.get(key) || 0) + 1);
+    }
+    for (const child of Array.from(article && article.childNodes || [])) {
+      const key = visibleItemRenderKeyForNode(child);
+      if (!key) continue;
+      const count = Number(remaining.get(key) || 0);
+      if (count > 0) {
+        remaining.set(key, count - 1);
+        continue;
+      }
+      if (typeof child.remove === "function") child.remove();
+      else if (child.parentNode) child.parentNode.removeChild(child);
+    }
+  }
+
+  function classText(node) {
+    if (!node) return "";
+    if (typeof node.className === "string") return node.className;
+    if (node.getAttribute) return String(node.getAttribute("class") || "");
+    return "";
+  }
+
+  function hasClasses(node, names) {
+    const classes = new Set(classText(node).split(/\s+/).filter(Boolean));
+    return names.every((name) => classes.has(name));
+  }
+
+  function attributeText(node, name) {
+    return node && typeof node.getAttribute === "function" ? String(node.getAttribute(name) || "") : "";
+  }
+
+  function nodeText(node) {
+    if (!node) return "";
+    if (typeof node.innerText === "string") return node.innerText;
+    if (typeof node.textContent === "string") return node.textContent;
+    if (node.nodeType === TEXT_NODE) return String(node.nodeValue || "");
+    return Array.from(node.childNodes || []).map(nodeText).join("");
+  }
+
+  function walkElementNodes(root, callback) {
+    if (!root || typeof callback !== "function") return;
+    if (root.nodeType === ELEMENT_NODE) callback(root);
+    for (const child of Array.from(root.childNodes || [])) walkElementNodes(child, callback);
+  }
+
+  function turnArticleNodes(root) {
+    const nodes = [];
+    walkElementNodes(root, (node) => {
+      const isTurn = hasClasses(node, ["turn"]) && attributeText(node, "data-turn");
+      const isThreadTileTurn = hasClasses(node, ["thread-tile-turn"]) && attributeText(node, "data-thread-tile-turn");
+      if (node.tagName === "ARTICLE" && (isTurn || isThreadTileTurn)) nodes.push(node);
+    });
+    return nodes;
+  }
+
+  function userMessageItemNodes(article) {
+    const nodes = [];
+    walkElementNodes(article, (node) => {
+      if (hasClasses(node, ["item", "userMessage"])) nodes.push(node);
+    });
+    return nodes;
+  }
+
+  function userMessageDomDuplicateSignature(node) {
+    const body = Array.from(node && node.childNodes || [])
+      .find((child) => hasClasses(child, ["item-body"])) || node;
+    const text = nodeText(body).replace(/\s+/g, " ").trim();
+    const submissionHash = attributeText(node, "data-client-submission-hash").trim();
+    if (text) return `text:${text}`;
+    if (submissionHash) return `submission:${submissionHash}`;
+    return "";
+  }
+
+  function userMessageDomNodePriority(node) {
+    const item = attributeText(node, "data-item") || attributeText(node, "data-item-id");
+    const renderKey = renderKeyForNode(node);
+    const submissionHash = attributeText(node, "data-client-submission-hash");
+    const localLike = /^local-user\b/.test(item)
+      || /(?:^|[|:])local-user/.test(renderKey)
+      || /(?:^|[|:])mux-user/.test(renderKey)
+      || Boolean(submissionHash);
+    return localLike ? 0 : 1;
+  }
+
+  function removeDuplicateUserMessageDomNodes(input = {}) {
+    const root = input.root || input.conversation || input.article || input;
+    if (!root) return result(true, "no-root", { removed: 0 });
+    let removed = 0;
+    for (const article of turnArticleNodes(root)) {
+      const seen = new Map();
+      for (const node of userMessageItemNodes(article)) {
+        const signature = userMessageDomDuplicateSignature(node);
+        if (!signature) continue;
+        const current = seen.get(signature);
+        if (!current) {
+          seen.set(signature, node);
+          continue;
+        }
+        const currentPriority = userMessageDomNodePriority(current);
+        const nextPriority = userMessageDomNodePriority(node);
+        const removeNode = nextPriority > currentPriority ? current : node;
+        const keepNode = removeNode === current ? node : current;
+        if (typeof removeNode.remove === "function") removeNode.remove();
+        else if (removeNode.parentNode) removeNode.parentNode.removeChild(removeNode);
+        removed += 1;
+        seen.set(signature, keepNode);
+      }
+    }
+    return result(true, removed ? "duplicate-user-messages-removed" : "no-duplicate-user-messages", { removed });
+  }
+
   function placeVisibleItemNode(article, node, lastPatchedNode) {
     if (!article || typeof article.insertBefore !== "function" || !node) return node;
     const anchor = lastPatchedNode ? lastPatchedNode.nextSibling : article.firstChild || null;
@@ -520,6 +634,7 @@
       eventName: "conversation_patch_html_fallback",
       payload: {
         threadId: String(input.threadId || ""),
+        clientBuildId: String(input.clientBuildId || ""),
         reason: String(applicationPlan.patchRejectReason || applicationPlan.reason || "patch-html-failed").slice(0, 80),
         updateReason: String(updatePlan.reason || "").slice(0, 80),
         expectedVisibleTurnCount: boundedCount(input.expectedVisibleTurnCount),
@@ -547,6 +662,9 @@
     const duplicateUserMessageCount = boundedCount(input.duplicateUserMessageCount);
     const expectedDuplicateUserMessageCount = boundedCount(input.expectedDuplicateUserMessageCount);
     const reason = String(updatePlan.reason || "");
+    const source = String(input.source || "conversation-update").slice(0, 120);
+    const action = optionalBoundedString(input, "action", 80);
+    const routeKind = optionalBoundedString(input, "routeKind", 80);
     const invalidationReasons = new Set([
       "stable-signature-dom-empty",
       "stable-signature-dom-turn-mismatch",
@@ -575,10 +693,11 @@
         reason: invalidationReasons.has(reason) ? "no-expected-visible-content" : "not-authority-invalidated",
       };
     }
+    const threadTileSelfHealingInvalidation = routeKind === "thread-tile" || action === "thread-tile-empty-state";
     const mismatchPayload = {
-      source: String(input.source || "conversation-update").slice(0, 120),
-      action: optionalBoundedString(input, "action", 80),
-      routeKind: optionalBoundedString(input, "routeKind", 80),
+      source,
+      action,
+      routeKind,
       threadHash: optionalBoundedString(input, "threadHash", 80),
       renderMode: String(updatePlan.action || "full-render").slice(0, 40),
       currentTurns: hasOwn(input, "currentTurns") ? input.currentTurns : undefined,
@@ -590,24 +709,29 @@
       expectedDuplicateUserMessageCount,
       previousCount: boundedCount(input.previousChildCount),
     };
+    const clientEventPayload = {
+      threadId: String(input.threadId || ""),
+      reason: reason.slice(0, 80),
+      expectedVisibleTurnCount,
+      renderedDomTurnCount,
+      expectedVisibleItemCount,
+      renderedDomItemCount,
+      duplicateRenderKeyCount,
+      duplicateUserMessageCount,
+      expectedDuplicateUserMessageCount,
+      action: String(updatePlan.action || "").slice(0, 40),
+    };
+    if (threadTileSelfHealingInvalidation) {
+      clientEventPayload.diagnosticFailureSuppressed = true;
+      clientEventPayload.diagnosticFailureSuppressedReason = "thread-tile-dom-authority-self-healing";
+    }
     return {
-      shouldRecordMismatch: true,
-      mismatchReason: compactMismatchReason(reason),
-      mismatchPayload,
+      shouldRecordMismatch: !threadTileSelfHealingInvalidation,
+      mismatchReason: threadTileSelfHealingInvalidation ? "" : compactMismatchReason(reason),
+      mismatchPayload: threadTileSelfHealingInvalidation ? null : mismatchPayload,
       shouldPostClientEvent: true,
       clientEventName: "conversation_dom_authority_invalidated",
-      clientEventPayload: {
-        threadId: String(input.threadId || ""),
-        reason: reason.slice(0, 80),
-        expectedVisibleTurnCount,
-        renderedDomTurnCount,
-        expectedVisibleItemCount,
-        renderedDomItemCount,
-        duplicateRenderKeyCount,
-        duplicateUserMessageCount,
-        expectedDuplicateUserMessageCount,
-        action: String(updatePlan.action || "").slice(0, 40),
-      },
+      clientEventPayload,
       reason,
     };
   }
@@ -628,7 +752,11 @@
         childCount: boundedCount(input.childCount),
         stickToBottom: input.stickToBottom === true,
         threadId: String(input.threadId || ""),
+        threadHash: String(input.threadHash || "").slice(0, 80),
+        previousRenderedThreadHash: String(input.previousRenderedThreadHash || "").slice(0, 80),
+        sameThreadRender: input.sameThreadRender === true,
         currentThreadStatus: String(input.currentThreadStatus || ""),
+        source: String(input.source || "").slice(0, 80),
         updateReason: String(updatePlan.reason || "").slice(0, 80),
         domUpdateAction: String(applicationPlan.finalAction || "").slice(0, 40),
         patchFallbackApplied: applicationPlan.fallbackApplied === true,
@@ -952,16 +1080,18 @@
       lastPatchedNode = source;
       counts.inserted += 1;
     }
-    const nextKeys = new Set(patchPlan.operations
+    const expectedKeys = patchPlan.operations
       .map((operation) => normalizeOperation(operation))
       .filter(Boolean)
-      .map((operation) => operation.key));
+      .map((operation) => operation.key);
+    const nextKeys = new Set(expectedKeys);
     for (const child of Array.from(article.childNodes || [])) {
       const key = visibleItemRenderKeyForNode(child);
       if (!key || nextKeys.has(key)) continue;
       if (typeof child.remove === "function") child.remove();
     }
-    if (!visibleItemOrderMatches(article, Array.from(nextKeys))) {
+    removeUnexpectedVisibleItemNodes(article, expectedKeys);
+    if (!visibleItemOrderMatches(article, expectedKeys)) {
       return result(false, "post-apply-visible-item-order-mismatch", counts);
     }
     return result(true, "applied", counts);
@@ -1169,6 +1299,7 @@
     patchChildNodes,
     patchHtml,
     patchNode,
+    removeDuplicateUserMessageDomNodes,
     planConversationHtmlUpdate,
     planConversationHtmlUpdateEffects,
     planConversationHtmlUpdateApplication,

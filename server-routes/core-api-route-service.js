@@ -37,6 +37,14 @@ function createCoreApiRouteService(deps = {}) {
     defaultModel,
     defaultPermissionModeFromConfigDefaults,
     disableAuth,
+    frontendDiagnosticLogPublicSettings = () => ({
+      enabled: false,
+      upload: true,
+      scopes: ["submitted_echo"],
+      maxEntries: 400,
+      source: "default",
+      updatedAt: "",
+    }),
     getProfileSwitchProgress,
     hermesNotificationDelegateService,
     hermesOriginFromRequest,
@@ -62,15 +70,23 @@ function createCoreApiRouteService(deps = {}) {
     publicReleaseRepository,
     rateLimitsByModelObject,
     reasoningEffortOptions,
+    remoteManagedWorkspaceRunnerService,
+    remoteManagedWorkspaceSettingsService,
+    restartDrainService,
     refreshAppUpdateStatus,
     refreshGitHubLinkPreview,
     refreshPublicPullRequestStatus,
     refreshPublicReleaseStatus,
     requestAuthToken,
+    requestAuthTokens,
     requestBaseUrl,
+    resolveModelOptions,
     rolloutWarningBytes,
+    runtimePressureDiagnostics,
     safeAppUpdateError,
+    scheduleBackgroundTask = (fn) => setImmediate(fn),
     scheduleAppRestart,
+    setFrontendDiagnosticLogSettings,
     setProfileSwitchProgress,
     setThreadDisplaySettings,
     setWorkspaceDelegationEnabled,
@@ -80,8 +96,10 @@ function createCoreApiRouteService(deps = {}) {
     syncKnownCodexMobileMcpToolsets,
     syncRegisteredWorkspaceTrust,
     threadDisplayPublicSettings,
+    threadDetailFirstPaintPrewarmStatus = () => null,
     threadListFallbackPrewarmPublicStatus,
     timingSafeEquals,
+    userBehaviorRepairCardService,
     viteShellArtifactService,
     workspaceDelegationPublicSettings,
     workspaceRegistryService,
@@ -115,9 +133,108 @@ function createCoreApiRouteService(deps = {}) {
     return statusRefreshInFlight;
   }
 
+  function requestAuthTokenCandidates(req) {
+    if (typeof requestAuthTokens === "function") {
+      return requestAuthTokens(req);
+    }
+    const token = typeof requestAuthToken === "function" ? requestAuthToken(req) : "";
+    return token ? [token] : [];
+  }
+
+  function readPluginSessionFromRequest(req) {
+    if (!hermesPluginService || typeof hermesPluginService.readSession !== "function") return null;
+    for (const token of requestAuthTokenCandidates(req)) {
+      const session = hermesPluginService.readSession({ token });
+      if (session && session.session_key) return session;
+    }
+    return null;
+  }
+
+  function launchTokenFromRequest(req) {
+    const candidates = requestAuthTokenCandidates(req);
+    if (hermesPluginService && typeof hermesPluginService.isLaunchTokenAuthorized === "function") {
+      const launchToken = candidates.find((token) => hermesPluginService.isLaunchTokenAuthorized(token));
+      if (launchToken) return launchToken;
+    }
+    return candidates[0] || "";
+  }
+
+  function normalizeOptionList(values) {
+    return [...new Set((Array.isArray(values) ? values : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean))];
+  }
+
+  async function effectiveModelOptions() {
+    const fallback = normalizeOptionList(modelOptions);
+    if (typeof resolveModelOptions !== "function") return fallback;
+    try {
+      const resolved = normalizeOptionList(await resolveModelOptions());
+      return resolved.length ? resolved : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function restartReadinessStatus(input = {}) {
+    if (restartDrainService && typeof restartDrainService.status === "function") {
+      return restartDrainService.status(input);
+    }
+    return { ok: true, ready: true, draining: false, issueCodes: [], activeTurnCount: 0 };
+  }
+
+  function sendRestartReadiness(sendJson, status) {
+    const code = status && status.ready === false ? 503 : 200;
+    const retryAfter = status && status.retryAfterSeconds
+      ? { "Retry-After": String(status.retryAfterSeconds) }
+      : {};
+    sendJson(code, status, retryAfter);
+  }
+
+  function defaultModelForOptions(options = []) {
+    const configured = String(codexConfigDefaults && codexConfigDefaults.model || "").trim();
+    const fallback = String(defaultModel || "").trim();
+    if (configured && options.includes(configured)) return configured;
+    if (fallback && options.includes(fallback)) return fallback;
+    return options[0] || configured || fallback;
+  }
+
+  function scheduleQuotaHydration() {
+    if (typeof scheduleBackgroundTask !== "function") return;
+    scheduleBackgroundTask(() => {
+      try {
+        const refresh = codex && typeof codex.refreshRateLimitsIfMissing === "function"
+          ? codex.refreshRateLimitsIfMissing()
+          : null;
+        if (refresh && typeof refresh.catch === "function") {
+          refresh.catch((err) => {
+            console.error(`[runtime-pressure] rate-limit refresh failed: ${String(err && err.message || err).slice(0, 180)}`);
+          });
+        }
+      } catch (err) {
+        console.error(`[runtime-pressure] rate-limit refresh failed: ${String(err && err.message || err).slice(0, 180)}`);
+      }
+      if (typeof loadRecentRateLimitsFromRollouts === "function") {
+        try {
+          loadRecentRateLimitsFromRollouts();
+        } catch (err) {
+          console.error(`[runtime-pressure] rollout quota scan failed: ${String(err && err.message || err).slice(0, 180)}`);
+        }
+      }
+    });
+  }
+
   async function handlePublicRoute(context = {}) {
     const { url, req, res, readBody, sendJson } = context;
     if (!url || !req || !res) return { handled: false };
+    if (url.pathname === "/api/healthz" && req.method === "GET") {
+      sendJson(200, { ok: true, ready: true, service: "codex-mobile-web" });
+      return { handled: true };
+    }
+    if (url.pathname === "/api/readyz" && req.method === "GET") {
+      sendRestartReadiness(sendJson, restartReadinessStatus());
+      return { handled: true };
+    }
     if (url.pathname === "/api/v1/hermes/plugin/manifest" && req.method === "GET") {
       const buildConfig = typeof deps.currentPublicBuildConfig === "function"
         ? deps.currentPublicBuildConfig()
@@ -133,10 +250,11 @@ function createCoreApiRouteService(deps = {}) {
       return { handled: true };
     }
     if (url.pathname === "/api/public-config") {
-      scheduleStatusBackgroundRefresh();
+      scheduleQuotaHydration();
       const buildConfig = deps.currentPublicBuildConfig();
       const workspaceDelegation = workspaceDelegationPublicSettings();
       const activeQuota = liveQuotaSnapshotForProfiles();
+      const runtimeModelOptions = await effectiveModelOptions();
       const profileState = publicConfigRuntimeCache.getProfileState({
         activeQuota,
         loadProfiles: (options) => codexProfileService.profiles(options),
@@ -153,10 +271,10 @@ function createCoreApiRouteService(deps = {}) {
         shellCacheName: buildConfig.shellCacheName,
         ...mediaFileService.publicConfig(),
         rolloutWarningBytes,
-        modelOptions,
+        modelOptions: runtimeModelOptions,
         reasoningEffortOptions,
         permissionModeOptions,
-        defaultModel: codexConfigDefaults.model || defaultModel,
+        defaultModel: defaultModelForOptions(runtimeModelOptions),
         defaultReasoningEffort: codexConfigDefaults.reasoningEffort,
         defaultPermissionMode: defaultPermissionModeFromConfigDefaults(),
         rateLimits: activeRateLimits(),
@@ -184,6 +302,11 @@ function createCoreApiRouteService(deps = {}) {
           roots: workspaceRegistryService.createRoots(),
         },
         workspaceDelegation,
+        remoteManagedWorkspace: remoteManagedWorkspaceSettingsService
+          && typeof remoteManagedWorkspaceSettingsService.publicSettings === "function"
+          ? remoteManagedWorkspaceSettingsService.publicSettings()
+          : { enabled: false, workspaceKind: "remote_managed_workspace", connectionStatus: "disconnected" },
+        frontendDiagnosticLog: frontendDiagnosticLogPublicSettings(),
         hermesPlugin: {
           id: "codex-mobile",
           manifestPath: "/api/v1/hermes/plugin/manifest",
@@ -386,6 +509,106 @@ function createCoreApiRouteService(deps = {}) {
       }
       return { handled: true };
     }
+    if (url.pathname === "/api/settings/remote-managed-workspace" && (req.method === "GET" || req.method === "POST")) {
+      try {
+        if (!remoteManagedWorkspaceSettingsService || typeof remoteManagedWorkspaceSettingsService.publicSettings !== "function") {
+          throw httpStatusError(503, "remote_managed_workspace_settings_unavailable");
+        }
+        if (req.method === "GET") {
+          sendJson(200, { ok: true, remoteManagedWorkspace: remoteManagedWorkspaceSettingsService.publicSettings() });
+          return { handled: true };
+        }
+        const body = await readBody();
+        const remoteManagedWorkspace = remoteManagedWorkspaceSettingsService.saveSettings(body);
+        if (remoteManagedWorkspaceRunnerService && typeof remoteManagedWorkspaceRunnerService.handleSettingsChanged === "function") {
+          remoteManagedWorkspaceRunnerService.handleSettingsChanged();
+        }
+        sendJson(200, { ok: true, remoteManagedWorkspace });
+      } catch (err) {
+        sendJson(err.statusCode || 500, { ok: false, error: err.code || err.message || String(err) });
+      }
+      return { handled: true };
+    }
+    if (url.pathname === "/api/settings/remote-managed-workspace/workspace" && req.method === "POST") {
+      try {
+        if (!remoteManagedWorkspaceSettingsService || typeof remoteManagedWorkspaceSettingsService.enableWorkspace !== "function") {
+          throw httpStatusError(503, "remote_managed_workspace_settings_unavailable");
+        }
+        const body = await readBody();
+        const action = String(body && body.action || "enable").trim().toLowerCase();
+        const remoteManagedWorkspace = action === "disable"
+          ? remoteManagedWorkspaceSettingsService.disableWorkspace(body)
+          : remoteManagedWorkspaceSettingsService.enableWorkspace(body);
+        if (remoteManagedWorkspaceRunnerService && typeof remoteManagedWorkspaceRunnerService.handleSettingsChanged === "function") {
+          remoteManagedWorkspaceRunnerService.handleSettingsChanged();
+        }
+        sendJson(200, { ok: true, remoteManagedWorkspace });
+      } catch (err) {
+        sendJson(err.statusCode || 500, {
+          ok: false,
+          error: err.code || err.message || String(err),
+          remoteManagedWorkspace: remoteManagedWorkspaceSettingsService
+            && typeof remoteManagedWorkspaceSettingsService.publicSettings === "function"
+            ? remoteManagedWorkspaceSettingsService.publicSettings()
+            : undefined,
+        });
+      }
+      return { handled: true };
+    }
+    if (url.pathname === "/api/settings/remote-managed-workspace/test-connection" && req.method === "POST") {
+      try {
+        if (!remoteManagedWorkspaceRunnerService || typeof remoteManagedWorkspaceRunnerService.testConnection !== "function") {
+          throw httpStatusError(503, "remote_managed_workspace_runner_unavailable");
+        }
+        sendJson(200, await remoteManagedWorkspaceRunnerService.testConnection());
+      } catch (err) {
+        sendJson(err.statusCode || 500, {
+          ok: false,
+          error: err.code || err.message || String(err),
+          remoteManagedWorkspace: remoteManagedWorkspaceSettingsService
+            && typeof remoteManagedWorkspaceSettingsService.publicSettings === "function"
+            ? remoteManagedWorkspaceSettingsService.publicSettings()
+            : undefined,
+        });
+      }
+      return { handled: true };
+    }
+    if (url.pathname === "/api/settings/remote-managed-workspace/register" && req.method === "POST") {
+      try {
+        if (!remoteManagedWorkspaceRunnerService || typeof remoteManagedWorkspaceRunnerService.registerNow !== "function") {
+          throw httpStatusError(503, "remote_managed_workspace_runner_unavailable");
+        }
+        sendJson(200, await remoteManagedWorkspaceRunnerService.registerNow());
+      } catch (err) {
+        sendJson(err.statusCode || 500, {
+          ok: false,
+          error: err.code || err.message || String(err),
+          remoteManagedWorkspace: remoteManagedWorkspaceSettingsService
+            && typeof remoteManagedWorkspaceSettingsService.publicSettings === "function"
+            ? remoteManagedWorkspaceSettingsService.publicSettings()
+            : undefined,
+        });
+      }
+      return { handled: true };
+    }
+    if (url.pathname === "/api/settings/remote-managed-workspace/poll-once" && req.method === "POST") {
+      try {
+        if (!remoteManagedWorkspaceRunnerService || typeof remoteManagedWorkspaceRunnerService.runOnce !== "function") {
+          throw httpStatusError(503, "remote_managed_workspace_runner_unavailable");
+        }
+        sendJson(200, await remoteManagedWorkspaceRunnerService.runOnce({ force: true, suppressErrors: true }));
+      } catch (err) {
+        sendJson(err.statusCode || 500, {
+          ok: false,
+          error: err.code || err.message || String(err),
+          remoteManagedWorkspace: remoteManagedWorkspaceSettingsService
+            && typeof remoteManagedWorkspaceSettingsService.publicSettings === "function"
+            ? remoteManagedWorkspaceSettingsService.publicSettings()
+            : undefined,
+        });
+      }
+      return { handled: true };
+    }
     if (url.pathname === "/api/settings/thread-display" && (req.method === "GET" || req.method === "POST")) {
       try {
         if (req.method === "GET") {
@@ -402,11 +625,39 @@ function createCoreApiRouteService(deps = {}) {
       }
       return { handled: true };
     }
+    if (url.pathname === "/api/settings/frontend-diagnostic-log" && (req.method === "GET" || req.method === "POST")) {
+      try {
+        if (req.method === "GET") {
+          sendJson(200, { ok: true, frontendDiagnosticLog: frontendDiagnosticLogPublicSettings() });
+          return { handled: true };
+        }
+        if (typeof setFrontendDiagnosticLogSettings !== "function") {
+          throw httpStatusError(503, "frontend_diagnostic_log_settings_unavailable");
+        }
+        const body = await readBody();
+        sendJson(200, {
+          ok: true,
+          frontendDiagnosticLog: setFrontendDiagnosticLogSettings(body),
+        });
+      } catch (err) {
+        sendJson(err.statusCode || 500, { ok: false, error: err.message || String(err) });
+      }
+      return { handled: true };
+    }
     if (url.pathname === "/api/v1/hermes/plugin/session" && req.method === "POST") {
       try {
         const body = await readBody();
+        const explicitLaunchToken = body.codexPluginLaunch || body.pluginLaunch || body.launchToken || body.token || "";
+        if (!explicitLaunchToken) {
+          const existingSession = readPluginSessionFromRequest(req);
+          if (existingSession) {
+            const cookie = pluginSessionCookieHeader(req, existingSession);
+            sendJson(200, existingSession, cookie ? { "Set-Cookie": cookie } : {});
+            return { handled: true };
+          }
+        }
         const session = hermesPluginService.createSession(Object.assign({}, body, {
-          token: body.codexPluginLaunch || body.pluginLaunch || body.launchToken || body.token || requestAuthToken(req),
+          token: explicitLaunchToken || launchTokenFromRequest(req),
         }));
         const cookie = pluginSessionCookieHeader(req, session);
         sendJson(200, session, cookie ? { "Set-Cookie": cookie } : {});
@@ -504,6 +755,41 @@ function createCoreApiRouteService(deps = {}) {
         details,
         userAgent: String(req.headers["user-agent"] || "").slice(0, 160),
       });
+      if (userBehaviorRepairCardService && typeof userBehaviorRepairCardService.handleClientEvent === "function") {
+        scheduleBackgroundTask(async () => {
+          try {
+            const result = await userBehaviorRepairCardService.handleClientEvent(event, {
+              threadId: body.threadId || "",
+              path: body.path || "",
+              details,
+              userAgent: String(req.headers["user-agent"] || "").slice(0, 160),
+            });
+            if (result && result.created) {
+              logClientEvent("user_behavior_repair_card_created", {
+                threadId: body.threadId || "",
+                issueCode: result.issueCode || "",
+                cardId: result.cardId || "",
+                direct: result.direct === true,
+                autoApprove: result.autoApprove === true,
+              });
+            } else if (result && result.ok === false) {
+              logClientEvent("user_behavior_repair_card_failed", {
+                threadId: body.threadId || "",
+                issueCode: result.issueCode || "",
+                reason: result.reason || "",
+                error: result.error || "",
+              });
+            }
+          } catch (err) {
+            logClientEvent("user_behavior_repair_card_failed", {
+              threadId: body.threadId || "",
+              issueCode: "",
+              reason: "task_card_dispatch_exception",
+              error: err && err.message ? err.message : String(err || ""),
+            });
+          }
+        });
+      }
       res.writeHead(204, { "Cache-Control": "no-store" });
       res.end();
       return { handled: true };
@@ -572,14 +858,45 @@ function createCoreApiRouteService(deps = {}) {
       }
       return { handled: true };
     }
+    if (url.pathname === "/api/restart/drain" && req.method === "POST") {
+      try {
+        const body = await readBody();
+        const result = restartDrainService && typeof restartDrainService.beginDrain === "function"
+          ? restartDrainService.beginDrain({
+            reason: body.reason || "listener_restart",
+            source: body.source || "api",
+            maxDrainMs: body.maxDrainMs,
+            activeTurnCount: body.activeTurnCount,
+          })
+          : restartReadinessStatus();
+        sendJson(202, result);
+      } catch (err) {
+        sendJson(err.statusCode || 500, { error: err.message || String(err) });
+      }
+      return { handled: true };
+    }
+    if (url.pathname === "/api/restart/drain" && req.method === "DELETE") {
+      const result = restartDrainService && typeof restartDrainService.clearDrain === "function"
+        ? restartDrainService.clearDrain()
+        : restartReadinessStatus();
+      sendJson(200, result);
+      return { handled: true };
+    }
     if (url.pathname === "/api/status") {
       scheduleStatusBackgroundRefresh();
+      scheduleQuotaHydration();
       const status = codex.status();
       status.statusRefresh = {
         background: true,
         inFlight: Boolean(statusRefreshInFlight),
         lastStartedAtMs: statusRefreshLastStartedAtMs,
       };
+      if (truthyParam(url.searchParams.get("detail")) && runtimePressureDiagnostics && typeof runtimePressureDiagnostics.status === "function") {
+        status.runtimePressure = runtimePressureDiagnostics.status();
+        status.threadDetailFirstPaintPrewarm = threadDetailFirstPaintPrewarmStatus(
+          url.searchParams.get("threadId") || url.searchParams.get("thread") || "",
+        );
+      }
       if (truthyParam(url.searchParams.get("muxMetrics"))) {
         try {
           status.muxMetrics = await Promise.race([
@@ -610,8 +927,23 @@ function createCoreApiRouteService(deps = {}) {
     if (approvalResponse && req.method === "POST") {
       const requestId = decodeURIComponent(approvalResponse[1]);
       const body = await readBody();
-      const request = codex.answerServerRequest(requestId, body);
-      sendJson(200, { ok: true, request });
+      try {
+        const request = codex.answerServerRequest(requestId, body);
+        sendJson(200, { ok: true, request });
+      } catch (err) {
+        const message = String(err && err.message || err || "approval_request_failed");
+        const stale = /no longer pending|not pending|not found|not available/i.test(message);
+        const alreadyAnswered = /already been answered|already answered/i.test(message);
+        sendJson(stale ? 404 : alreadyAnswered ? 409 : err && err.statusCode || 500, {
+          ok: false,
+          error: message,
+          code: stale
+            ? "approval_request_no_longer_pending"
+            : alreadyAnswered
+              ? "approval_request_already_answered"
+              : "approval_request_failed",
+        });
+      }
       return { handled: true };
     }
     return { handled: false };

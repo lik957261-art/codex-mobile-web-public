@@ -17,6 +17,12 @@ function toggleQuotaDetailsFromRuntime(anchor) {
   return false;
 }
 
+function quotaDetailsAreOpen(anchor) {
+  if (anchor && anchor.getAttribute("aria-expanded") === "true") return true;
+  const panel = document.getElementById("quotaDetailPanel");
+  return Boolean(panel && panel.hidden === false);
+}
+
 function appShellStartupErrorCode(err) {
   return String(err && err.message || err || "app_shell_start_failed").slice(0, 160);
 }
@@ -37,6 +43,97 @@ function recordViteAppPreviewStartFailure(err) {
   return true;
 }
 
+const MODEL_OPTIONS_REFRESH_MIN_INTERVAL_MS = 5000;
+
+function applyRuntimeModelOptionsConfig(config = {}, source = "public-config", options = {}) {
+  const apply = runtimeSettings && typeof runtimeSettings.applyModelOptionsRefresh === "function"
+    ? runtimeSettings.applyModelOptionsRefresh
+    : null;
+  if (!apply) return { changed: false, reason: "runtime_settings_unavailable" };
+  const result = apply(state, config) || {};
+  if (!result.changed) return result;
+  state.modelOptionsLastRefreshAt = Date.now();
+  state.modelOptionsRefreshCount = Number(state.modelOptionsRefreshCount || 0) + 1;
+  if (options.render !== false) {
+    renderComposerSettings();
+    updateComposerControls();
+    renderQuotaUsage();
+    if (state.composerMenuKind === "model") {
+      const modelControl = $("composerModelControl");
+      if (modelControl) openComposerRuntimeMenu("model", modelControl);
+    }
+  }
+  if (result.selectionChanged && options.saveDraft !== false) saveCurrentDraftNow();
+  postClientEvent("model_options_refresh_applied", {
+    source: String(source || "public-config").slice(0, 80),
+    optionsChanged: Boolean(result.optionsChanged),
+    defaultChanged: Boolean(result.defaultChanged),
+    selectionChanged: Boolean(result.selectionChanged),
+    optionCount: Array.isArray(result.modelOptions) ? result.modelOptions.length : 0,
+    hasGpt56: Array.isArray(result.modelOptions) && result.modelOptions.some((value) => /^gpt-5\.6/i.test(String(value || ""))),
+    sameClientBuildId: String(config.clientBuildId || "") === String(CLIENT_BUILD_ID || ""),
+  });
+  return result;
+}
+
+async function fetchPublicConfigForModelOptions() {
+  const suffix = `modelOptionsCheck=${Date.now()}`;
+  if (typeof fetchJsonWithTimeout === "function") {
+    return fetchJsonWithTimeout(`/api/public-config?${suffix}`, {
+      timeoutMs: 12000,
+      cache: "no-store",
+    });
+  }
+  const response = await fetch(`/api/public-config?${suffix}`, {
+    cache: "no-store",
+    credentials: "same-origin",
+  });
+  if (!response.ok) throw new Error(`public_config_model_options_refresh_failed:${response.status}`);
+  return response.json();
+}
+
+async function refreshModelOptionsFromPublicConfig(options = {}) {
+  const force = options.force === true;
+  const now = Date.now();
+  const last = Number(state.modelOptionsLastRefreshAt || 0);
+  if (!force && last && now - last < MODEL_OPTIONS_REFRESH_MIN_INTERVAL_MS) return null;
+  if (state.modelOptionsRefreshInFlight) return state.modelOptionsRefreshInFlight;
+  state.modelOptionsLastRefreshAt = now;
+  state.modelOptionsRefreshInFlight = fetchPublicConfigForModelOptions()
+    .then((config) => applyRuntimeModelOptionsConfig(config, options.source || "model-options-refresh"))
+    .catch((err) => {
+      postClientEvent("model_options_refresh_failed", {
+        source: String(options.source || "model-options-refresh").slice(0, 80),
+        errorCode: String(err && err.message || err || "model_options_refresh_failed").slice(0, 120),
+      });
+      return null;
+    })
+    .finally(() => {
+      state.modelOptionsRefreshInFlight = null;
+    });
+  return state.modelOptionsRefreshInFlight;
+}
+
+function scheduleModelOptionsRefresh(delayMs = 0, options = {}) {
+  window.setTimeout(() => {
+    refreshModelOptionsFromPublicConfig(options).catch(() => {});
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function handleComposerRuntimeControlWithModelRefresh(event, kind, button) {
+  if (kind !== "model") return handleComposerRuntimeControl(event, kind, button);
+  event.preventDefault();
+  event.stopPropagation();
+  refreshModelOptionsFromPublicConfig({ source: "composer-model-menu", force: true })
+    .finally(() => {
+      handleComposerRuntimeControl({
+        type: event.type,
+        preventDefault() {},
+        stopPropagation() {},
+      }, kind, button);
+    });
+}
+
 function wireUi() {
   $("loginForm").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -44,7 +141,8 @@ function wireUi() {
   });
   const sidebarWorkspaceSelect = $("workspaceSelect");
   const sidebarWorkspaceMenu = $("workspaceSelectMenu");
-  if (sidebarWorkspaceSelect && sidebarWorkspaceMenu) {
+  if (sidebarWorkspaceSelect && sidebarWorkspaceMenu && sidebarWorkspaceSelect.dataset.workspaceSelectWired !== "true") {
+    sidebarWorkspaceSelect.dataset.workspaceSelectWired = "true";
     const closeSidebarWorkspaceMenu = () => {
       sidebarWorkspaceMenu.hidden = true;
       sidebarWorkspaceMenu.style.removeProperty("--workspace-menu-max-height");
@@ -89,7 +187,12 @@ function wireUi() {
         closeSidebarWorkspaceMenu();
       }
     };
-    sidebarWorkspaceSelect.addEventListener("pointerdown", toggleSidebarWorkspaceMenu);
+    const onSidebarWorkspaceKeydown = (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      toggleSidebarWorkspaceMenu(event);
+    };
+    sidebarWorkspaceSelect.addEventListener("click", toggleSidebarWorkspaceMenu);
+    sidebarWorkspaceSelect.addEventListener("keydown", onSidebarWorkspaceKeydown);
     sidebarWorkspaceMenu.addEventListener("click", onSidebarWorkspaceOption);
     closeSidebarWorkspaceMenu();
   }
@@ -160,7 +263,9 @@ function wireUi() {
     if (event.target === $("goalDialog")) closeThreadGoalDialog(false);
   });
   if ($("themeSettingsToggle")) $("themeSettingsToggle").addEventListener("click", () => {
+    refreshModelOptionsFromPublicConfig({ source: "settings-open", force: true }).catch(() => {});
     loadCodexProfiles().catch(showError);
+    loadRemoteManagedWorkspaceSettings().catch(showError);
     setTimeout(() => publishPluginNavigationState({ force: true }), 0);
   });
   const settingsPanel = $("themeSettingsPanel");
@@ -169,6 +274,7 @@ function wireUi() {
     settingsPanel.addEventListener("click", handleThreadTileModeChoice);
     settingsPanel.addEventListener("click", (event) => handleCodexProfileSettingsClick(event).catch(showError));
     settingsPanel.addEventListener("click", (event) => handleWorkspaceDelegationSettingsClick(event).catch(showError));
+    settingsPanel.addEventListener("click", (event) => handleRemoteManagedWorkspaceSettingsClick(event).catch(showError));
   }
   const commandControl = $("composerCommandControl");
   if (commandControl) {
@@ -204,7 +310,7 @@ function wireUi() {
       state.lastComposerRuntimePointerAt = Date.now();
       state.lastComposerRuntimePointerKind = kind;
       state.lastComposerRuntimePointerTarget = button;
-      handleComposerRuntimeControl(event, kind, button);
+      handleComposerRuntimeControlWithModelRefresh(event, kind, button);
     });
     button.addEventListener("click", (event) => {
       const pointerAlreadyHandled = state.lastComposerRuntimePointerTarget === button
@@ -218,7 +324,7 @@ function wireUi() {
         event.stopPropagation();
         return;
       }
-      handleComposerRuntimeControl(event, kind, button);
+      handleComposerRuntimeControlWithModelRefresh(event, kind, button);
     });
   }
   const runtimeMenu = $("composerRuntimeMenu");
@@ -233,13 +339,24 @@ function wireUi() {
   }
   const intentMenu = $("composerIntentMenu");
   if (intentMenu) {
-    intentMenu.addEventListener("click", (event) => {
+    let lastComposerIntentOptionAt = 0;
+    let suppressSyntheticComposerIntentOptionUntil = 0;
+    const handleComposerIntentOption = (event) => {
       const option = event.target.closest("[data-composer-intent]");
       if (!option) return;
       event.preventDefault();
       event.stopPropagation();
-      selectComposerIntent(option.dataset.composerIntent || "");
-    });
+      const now = Date.now();
+      const eventType = String(event.type || "");
+      if ((eventType === "click" || eventType === "touchend") && now < suppressSyntheticComposerIntentOptionUntil) return;
+      if (now - lastComposerIntentOptionAt < 650) return;
+      lastComposerIntentOptionAt = now;
+      if (eventType === "pointerdown") suppressSyntheticComposerIntentOptionUntil = now + 2200;
+      selectComposerIntent(option.dataset.composerIntent || "", { openDialog: true, source: eventType });
+    };
+    intentMenu.addEventListener("pointerdown", handleComposerIntentOption);
+    intentMenu.addEventListener("touchend", handleComposerIntentOption, { passive: false });
+    intentMenu.addEventListener("click", handleComposerIntentOption);
   }
   if ($("composerIntentForm")) $("composerIntentForm").addEventListener("submit", (event) => submitComposerIntentDialog(event).catch(showError));
   if ($("composerIntentSaveButton")) $("composerIntentSaveButton").addEventListener("click", saveComposerIntentDialogDraft);
@@ -248,31 +365,42 @@ function wireUi() {
   if ($("composerIntentDialog")) $("composerIntentDialog").addEventListener("click", (event) => {
     if (event.target === $("composerIntentDialog")) closeComposerIntentDialog(false);
   });
-  const quotaUsage = $("quotaUsage");
-  if (quotaUsage) {
-    let lastQuotaToggleAt = 0;
-    let suppressSyntheticQuotaToggleUntil = 0;
-    const handleQuotaToggle = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const now = Date.now();
-      const eventType = String(event.type || "");
-      if ((eventType === "click" || eventType === "touchend") && now < suppressSyntheticQuotaToggleUntil) return;
-      if (now - lastQuotaToggleAt < 650) return;
-      if (!toggleQuotaDetailsFromRuntime(quotaUsage)) {
-        if (eventType !== "pointerdown") showError(new Error("quota_details_runtime_unavailable"));
-        return;
-      }
+  let lastQuotaToggleAt = 0;
+  let suppressSyntheticQuotaToggleUntil = 0;
+  const handleQuotaToggle = (event) => {
+    const target = event && event.target;
+    const quotaUsage = target && typeof target.closest === "function" ? target.closest("#quotaUsage") : null;
+    if (!quotaUsage) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const now = Date.now();
+    const eventType = String(event.type || "");
+    if ((eventType === "click" || eventType === "touchend") && now < suppressSyntheticQuotaToggleUntil) return;
+    if (now - lastQuotaToggleAt < 650) return;
+    if (quotaDetailsAreOpen(quotaUsage)) {
       lastQuotaToggleAt = now;
       if (eventType === "pointerdown") suppressSyntheticQuotaToggleUntil = now + 2200;
-    };
-    quotaUsage.addEventListener("pointerdown", handleQuotaToggle);
-    quotaUsage.addEventListener("click", handleQuotaToggle);
-    quotaUsage.addEventListener("touchend", handleQuotaToggle, { passive: false });
-  }
+      return;
+    }
+    if (!toggleQuotaDetailsFromRuntime(quotaUsage)) {
+      if (eventType !== "pointerdown") showError(new Error("quota_details_runtime_unavailable"));
+      return;
+    }
+    lastQuotaToggleAt = now;
+    if (eventType === "pointerdown") suppressSyntheticQuotaToggleUntil = now + 2200;
+  };
+  document.addEventListener("pointerdown", handleQuotaToggle);
+  document.addEventListener("click", handleQuotaToggle);
+  document.addEventListener("touchend", handleQuotaToggle, { passive: false });
   document.addEventListener("pointerdown", primeCompletionAudio, { passive: true });
   document.addEventListener("touchend", primeCompletionAudio, { passive: true });
   document.addEventListener("keydown", primeCompletionAudio);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && closeFilePreviewHtmlFullscreen()) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  });
   $("threadSearch").addEventListener("input", () => {
     clearTimeout(state.searchTimer);
     state.searchTimer = setTimeout(() => loadThreads().catch(showError), 250);
@@ -309,22 +437,20 @@ function wireUi() {
   window.addEventListener("popstate", handleAndroidBackToSidebarPopState);
   ensureAndroidBackToSidebarSentinel();
   $("openMenu").addEventListener("click", handleOpenMenuClick);
+  if ($("sidebarLayoutToggle")) $("sidebarLayoutToggle").addEventListener("click", (event) => {
+    event.preventDefault();
+    handleSidebarLayoutToggle();
+  });
   window.addEventListener("resize", syncThreadDetailLayoutState);
   window.addEventListener("orientationchange", syncThreadDetailLayoutState);
-  $("closeMenu").addEventListener("click", closeSidebarMenu);
+  $("closeMenu").addEventListener("click", () => {
+    closeSidebarMenu();
+    syncThreadDetailLayoutState();
+  });
   const pageRefreshPrompt = $("pageRefreshPrompt");
   if (pageRefreshPrompt) pageRefreshPrompt.addEventListener("click", refreshPageForNewBuild);
   $("composer").addEventListener("submit", sendMessage);
   const sendButton = $("sendMessage");
-  sendButton.addEventListener("pointerdown", handlePluginVoiceInputSendPointerDown);
-  sendButton.addEventListener("pointerup", handlePluginVoiceInputSendPointerUp);
-  sendButton.addEventListener("pointercancel", handlePluginVoiceInputSendPointerCancel);
-  sendButton.addEventListener("contextmenu", (event) => {
-    if (!state.pluginVoiceInputPress) return;
-    event.preventDefault();
-  });
-  sendButton.addEventListener("click", handlePluginVoiceInputSendClick);
-  sendButton.addEventListener("pointerup", requestComposerSubmitFromButton);
   sendButton.addEventListener("click", requestComposerSubmitFromButton);
   $("interruptTurn").addEventListener("click", interruptActiveTurn);
   if ($("scrollToBottom")) $("scrollToBottom").addEventListener("click", () => {
@@ -525,6 +651,18 @@ function wireUi() {
         openLocalFilePreview(localFileLink, { threadId: state.filePreviewThreadId }).catch(showError);
         return;
       }
+      const htmlPreviewButton = event.target.closest("[data-file-preview-html-view]");
+      if (htmlPreviewButton && handleFilePreviewHtmlViewClick(htmlPreviewButton)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      const htmlFullscreenButton = event.target.closest("[data-file-preview-html-fullscreen]");
+      if (htmlFullscreenButton && handleFilePreviewHtmlFullscreenClick(htmlFullscreenButton)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       const mermaidButton = event.target.closest("[data-mermaid-action]");
       if (mermaidButton) {
         event.preventDefault();
@@ -623,6 +761,7 @@ function wireUi() {
     if (document.visibilityState === "visible") {
       ensureAndroidBackToSidebarSentinel();
       schedulePageRefreshCheck(200, { force: true });
+      scheduleModelOptionsRefresh(250, { source: "visibility", force: true });
     }
     scheduleMobileResume("visibility");
   });
@@ -635,6 +774,7 @@ function wireUi() {
     const pluginRouteHint = applyUrlPluginRouteHint({ load: true });
     ensureAndroidBackToSidebarSentinel();
     schedulePageRefreshCheck(200, { force: true });
+    scheduleModelOptionsRefresh(260, { source: "pageshow", force: true });
     scheduleMobileResume("pageshow", threadId || pluginRouteHint ? 240 : 80);
   });
   window.addEventListener("focus", () => {
@@ -642,6 +782,7 @@ function wireUi() {
     const pluginRouteHint = applyUrlPluginRouteHint({ load: true });
     ensureAndroidBackToSidebarSentinel();
     schedulePageRefreshCheck(600);
+    scheduleModelOptionsRefresh(650, { source: "focus" });
     scheduleMobileResume("focus", threadId || pluginRouteHint ? 300 : 150);
   });
   window.addEventListener("blur", () => scheduleVisualRecovery("window-blur", 180, { render: false }));
@@ -737,6 +878,7 @@ async function start() {
     state.startupInProgress = false;
     return;
   }
+  applyFrontendDiagnosticLogPublicConfig(config);
   initializePageBuildState(config);
   startPageRefreshChecks();
   state.appVersion = String(config.version || "");
@@ -744,7 +886,7 @@ async function start() {
   state.maxUploadBytes = Number(config.maxUploadBytes || state.maxUploadBytes);
   state.maxUploadFiles = Number(config.maxUploadFiles || state.maxUploadFiles);
   state.rolloutWarningThresholdBytes = Number(config.rolloutWarningBytes || state.rolloutWarningThresholdBytes);
-  state.modelOptions = normalizeOptionList(config.modelOptions || []);
+  applyRuntimeModelOptionsConfig(config, "startup", { render: false, saveDraft: false });
   state.reasoningEffortOptions = normalizeOptionList(config.reasoningEffortOptions || []);
   state.permissionModeOptions = normalizeOptionList((config.permissionModeOptions || state.permissionModeOptions)
     .map(normalizePermissionModeValue));
@@ -772,6 +914,7 @@ async function start() {
   state.workspaceCreateRoot = String(config.workspaceCreate && config.workspaceCreate.defaultRoot || "").trim();
   state.workspaceCreateRoots = normalizeOptionList(config.workspaceCreate && config.workspaceCreate.roots || []);
   rememberWorkspaceDelegationConfig(config.workspaceDelegation || null);
+  rememberRemoteManagedWorkspaceConfig(config.remoteManagedWorkspace || null);
   state.publicPrStatus = {
     enabled: state.publicPrEnabled,
     repository: state.publicPrRepository,
@@ -887,6 +1030,8 @@ function createAppShellRuntime() {
   return {
     wireUi: typeof wireUi === "function" ? wireUi : null,
     start: typeof start === "function" ? start : null,
+    applyRuntimeModelOptionsConfig: typeof applyRuntimeModelOptionsConfig === "function" ? applyRuntimeModelOptionsConfig : null,
+    refreshModelOptionsFromPublicConfig: typeof refreshModelOptionsFromPublicConfig === "function" ? refreshModelOptionsFromPublicConfig : null,
     startCodexMobileAppWithRecovery: typeof startCodexMobileAppWithRecovery === "function" ? startCodexMobileAppWithRecovery : null,
   };
 }
