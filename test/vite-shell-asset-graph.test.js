@@ -41,7 +41,7 @@ test("Vite shell asset graph covers the current ordered frontend shell", async (
   const manifest = buildShellAssetManifest(path.resolve(__dirname, ".."));
   assert.equal(manifest.validation.ok, true);
   assert.match(manifest.shellCacheName, /^codex-mobile-shell-v629-[a-f0-9]{12}$/);
-  assert.match(manifest.clientBuildId, /^0\.1\.13\|codex-mobile-shell-v629-[a-f0-9]{12}$/);
+  assert.match(manifest.clientBuildId, /^0\.1\.14\|codex-mobile-shell-v629-[a-f0-9]{12}$/);
   assert.equal(manifest.indexScriptAssets[0], "/shell-asset-manifest.js");
   assert.equal(manifest.indexScriptAssets.at(-1), "/app.js");
   assert.ok(manifest.indexScriptAssets.includes("/app-bootstrap.js"));

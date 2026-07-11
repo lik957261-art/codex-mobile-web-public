@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.14 - 2026-07-11
+
+- Restore the most recent unfiltered thread summaries from a bounded client
+  cache before mobile network refreshes complete.
+- Persist at most 40 summary-only rows for seven days; conversation turns,
+  message items, and message bodies are never written to this cache.
+- Move the startup workspace refresh off the critical path, add bounded status
+  and display-settings timeouts, and retry workspace refresh once in the
+  background.
+- Refresh the sidebar list independently of workspace metadata so opening the
+  menu never waits on a slow workspace request.
+- Keep the current thread and cached list usable when a silent background list
+  refresh times out instead of replacing the working UI with a red error.
+- Preserve the v0.1.13 upstream source integration, classic production shell,
+  Home AI plugin contract, ports, and credential exclusions.
+
 ## 0.1.13 - 2026-07-11
 
 - Restore the complete production `services/runtime/` source tree that an

@@ -24,6 +24,42 @@ function basenameForFsPath(value) {
   return parts.length ? parts[parts.length - 1] : "";
 }
 
+function createMemoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem: (key) => values.has(key) ? values.get(key) : null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+}
+
+function createThreadListElements() {
+  const list = {
+    innerHTML: "",
+    querySelectorAll: () => [],
+  };
+  const search = { value: "" };
+  return {
+    list,
+    search,
+    get: (id) => id === "threadList" ? list : id === "threadSearch" ? search : null,
+  };
+}
+
+function createThreadListState(overrides = {}) {
+  return Object.assign({
+    selectedCwd: "",
+    workspaces: [],
+    threads: [],
+    currentThread: null,
+    currentThreadId: "",
+    unreadThreadIds: new Set(),
+    renderedThreadListSignature: "",
+    threadListLoadSeq: 0,
+    threadListLoadedAtMs: 0,
+  }, overrides);
+}
+
 function createRuntime(state, overrides = {}) {
   return createThreadListRuntime(Object.assign({
     state,
@@ -166,4 +202,71 @@ test("thread list deferred fallback waits while a thread detail is selected", ()
   assert.equal(apiCallCount, 0);
   assert.equal(timers.length, 1);
   assert.equal(timers[0].delayMs, 1000);
+});
+
+test("thread list cache persists only bounded summaries and restores them before workspace fetch", async () => {
+  const storage = createMemoryStorage();
+  const sourceElements = createThreadListElements();
+  const sourceState = createThreadListState({
+    threads: Array.from({ length: 45 }, (_, index) => ({
+      id: `cached-${index}`,
+      name: `Cached ${index}`,
+      cwd: "/repo",
+      updatedAt: 1000 - index,
+      turns: [{ id: `private-turn-${index}`, items: [{ text: "not cached" }] }],
+    })),
+  });
+  const sourceRuntime = createRuntime(sourceState, {
+    $: sourceElements.get,
+    localStorage: storage,
+  });
+
+  assert.equal(sourceRuntime.persistThreadListCache(), true);
+  const payload = JSON.parse(storage.getItem("codexMobileThreadListCacheV1"));
+  assert.equal(payload.version, 1);
+  assert.equal(payload.threads.length, 40);
+  assert.equal(Object.hasOwn(payload.threads[0], "turns"), false);
+
+  let resolveWorkspaces;
+  let workspaceRequestOptions = null;
+  const targetElements = createThreadListElements();
+  const targetState = createThreadListState({
+    threads: [{ id: "current", name: "Current", cwd: "/repo", updatedAt: 2000 }],
+  });
+  const targetRuntime = createRuntime(targetState, {
+    $: targetElements.get,
+    localStorage: storage,
+    api: async (_path, options) => {
+      workspaceRequestOptions = options;
+      return new Promise((resolve) => { resolveWorkspaces = resolve; });
+    },
+  });
+
+  const workspacePromise = targetRuntime.loadWorkspaces({ timeoutMs: 8000 });
+  assert.equal(targetState.threads.length, 40);
+  assert.equal(targetState.threads[0].id, "current");
+  assert.match(targetElements.list.innerHTML, /Cached 0/);
+  assert.deepEqual(workspaceRequestOptions, { timeoutMs: 8000 });
+
+  resolveWorkspaces({ data: [] });
+  await workspacePromise;
+});
+
+test("silent thread list refresh keeps an existing cached list when the network times out", async () => {
+  const elements = createThreadListElements();
+  const state = createThreadListState({
+    threads: [{ id: "cached", name: "Cached", cwd: "/repo", updatedAt: 1000 }],
+  });
+  let renderedErrorCount = 0;
+  const runtime = createRuntime(state, {
+    $: elements.get,
+    api: async () => { throw new Error("Request timed out: /api/threads"); },
+    renderThreadLoadError: () => { renderedErrorCount += 1; },
+  });
+
+  const result = await runtime.loadThreads({ silent: true, allowDuringDetail: true });
+
+  assert.equal(result, null);
+  assert.equal(renderedErrorCount, 0);
+  assert.deepEqual(state.threads.map((thread) => thread.id), ["cached"]);
 });

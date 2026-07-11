@@ -410,7 +410,7 @@ test("visual harness can replay empty cached detail openings without exposing th
 });
 
 test("public app shell cache advances with static frontend changes", () => {
-  assert.match(shellManifest.clientBuildId, /^0\.1\.13\|codex-mobile-shell-v629-[a-f0-9]{12}$/);
+  assert.match(shellManifest.clientBuildId, /^0\.1\.14\|codex-mobile-shell-v629-[a-f0-9]{12}$/);
   assert.match(shellManifest.shellCacheName, /^codex-mobile-shell-v629-[a-f0-9]{12}$/);
   assert.match(swJs, /shell-asset-manifest\.js/);
   assert.ok(shellManifest.precacheAssets.includes("/home-ai-diagnostic-reporting.js"));
@@ -534,9 +534,15 @@ test("public app shell cache advances with static frontend changes", () => {
   assert.match(appJs, /state\.startupThreadOpenPending = Boolean\([\s\S]*savedThreadId && !deferStartupRestoreForTileMode[\s\S]*startupPluginRouteHint && startupPluginRouteHint\.threadId[\s\S]*\);/);
   assert.match(appJs, /(?:const|var) earlyRestorePromise = savedThreadId && !startupThreadId && !deferStartupRestoreForTileMode[\s\S]*loadThread\(savedThreadId, \{ source: "restore-startup", suppressLoadFailureDiagnostic: true \}\)/);
   assert.match(appJs, /postStartupStage\("restore_deferred"[\s\S]*reason: "tile-startup"/);
-  assert.match(appJs, /(?:const|var) status = await api\("\/api\/status"\)\.catch/);
-  assert.match(appJs, /(?:const|var) workspacesStartedAt = nowPerfMs\(\);\s*\n\s*await loadWorkspaces\(\);/);
-  assert.match(appJs, /await loadWorkspaces\(\);[\s\S]*await loadThreads\(\{ silent: startupThreadOpenPending, deferFallback: true \}\);/);
+  assert.match(appJs, /(?:const|var) status = await api\("\/api\/status", \{ timeoutMs: 8000 \}\)\.catch/);
+  assert.match(appJs, /(?:const|var) workspacesStartedAt = nowPerfMs\(\);\s*\n\s*loadWorkspaces\(\{ timeoutMs: 8000 \}\)\.then/);
+  assert.doesNotMatch(functionBody("bootstrap"), /await loadWorkspaces\(\);/);
+  assert.match(functionBody("bootstrap"), /loadWorkspaces\(\{ timeoutMs: 8000 \}\)\.then[\s\S]*await loadThreads\(\{ silent: startupThreadOpenPending, deferFallback: true \}\);/);
+  assert.match(functionBody("bootstrap"), /loadThreadDisplaySettings\(\{ render: false, timeoutMs: 3000 \}\)/);
+  assert.doesNotMatch(functionBody("bootstrap"), /loadThreadDisplaySettings[\s\S]*\.catch\(showError\)/);
+  assert.match(functionBody("refreshSidebarListAfterOpen"), /loadWorkspaces\(\{ timeoutMs: 8000 \}\)\.catch\(\(\) => \{\}\);/);
+  assert.match(functionBody("refreshSidebarListAfterOpen"), /loadThreads\(\{[\s\S]*silent: Boolean\(state\.threads\.length\),[\s\S]*allowDuringDetail: true,[\s\S]*\}\)/);
+  assert.doesNotMatch(functionBody("refreshSidebarListAfterOpen"), /loadWorkspaces\(\)\s*\.then/);
   assert.match(appJs, /postStartupStage\("status_done"/);
   assert.match(appJs, /postStartupStage\("threads_done"/);
   assert.match(appJs, /startupInProgress: false/);

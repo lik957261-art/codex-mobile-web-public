@@ -19,6 +19,52 @@ function createThreadListRuntime(deps = {}) {
   const THREAD_LIST_DEFERRED_FALLBACK_RETRY_MS = deps.THREAD_LIST_DEFERRED_FALLBACK_RETRY_MS;
   const THREAD_LIST_SLOW_PATH_MS = deps.THREAD_LIST_SLOW_PATH_MS;
   const STORAGE_THREAD_ID = deps.STORAGE_THREAD_ID;
+  const THREAD_LIST_CACHE_STORAGE_KEY = "codexMobileThreadListCacheV1";
+  const THREAD_LIST_CACHE_VERSION = 1;
+  const THREAD_LIST_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+  const THREAD_LIST_CACHE_MAX_THREADS = Math.max(1, Math.min(40, Number(THREAD_LIST_PAGE_LIMIT) || 40));
+  const THREAD_LIST_CACHE_FIELDS = Object.freeze([
+    "id",
+    "name",
+    "preview",
+    "cwd",
+    "updatedAt",
+    "status",
+    "goal",
+    "archived",
+    "archivedAt",
+    "archived_at",
+    "isArchived",
+    "deleted",
+    "deletedAt",
+    "deleted_at",
+    "isDeleted",
+    "removed",
+    "removedAt",
+    "displayTitle",
+    "threadTitle",
+    "thread_name",
+    "title",
+    "rolloutSizeBytes",
+    "rolloutSizeUpdatedAtMs",
+    "rolloutWarningThresholdBytes",
+    "rolloutOverWarningThreshold",
+    "pendingTaskCardCount",
+    "pendingIncomingTaskCardCount",
+    "pendingOutgoingTaskCardCount",
+    "returnReceiptTaskCardCount",
+    "returnFollowUpTaskCardCount",
+    "returnFollowUpPending",
+    "latestReturnReceiptTaskCardId",
+    "latestReturnReceiptAt",
+    "latestReturnReceiptStatus",
+    "latestReturnFollowUpTaskCardId",
+    "latestReturnFollowUpAt",
+    "latestReturnFollowUpStatus",
+    "mobileFallback",
+    "mobileSessionIndexTitle",
+    "mobileSessionIndexTitleUpdatedAtMs",
+  ]);
   const {
     normalizeFsPath,
     escapeHtml,
@@ -94,8 +140,91 @@ function createThreadListRuntime(deps = {}) {
     rolloutSizeBytes,
   } = deps;
 
-async function loadWorkspaces() {
-  const result = await api("/api/workspaces");
+function threadListSearchText() {
+  const input = $("threadSearch");
+  return input ? String(input.value || "").trim() : "";
+}
+
+function isDefaultThreadListCacheScope() {
+  return !String(state.selectedCwd || "").trim() && !threadListSearchText();
+}
+
+function cachedThreadSummary(thread) {
+  const source = threadListSummaryFromDetailThread(thread) || thread;
+  if (!source || typeof source !== "object" || !source.id) return null;
+  const summary = {};
+  for (const field of THREAD_LIST_CACHE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(source, field)) summary[field] = source[field];
+  }
+  try {
+    return JSON.parse(JSON.stringify(summary));
+  } catch (_) {
+    return null;
+  }
+}
+
+function readThreadListCache() {
+  if (!isDefaultThreadListCacheScope()) return [];
+  try {
+    const payload = JSON.parse(localStorage.getItem(THREAD_LIST_CACHE_STORAGE_KEY) || "null");
+    const savedAt = Number(payload && payload.savedAt || 0);
+    const ageMs = Date.now() - savedAt;
+    if (!payload || payload.version !== THREAD_LIST_CACHE_VERSION || !savedAt || ageMs < -300000 || ageMs > THREAD_LIST_CACHE_MAX_AGE_MS) {
+      localStorage.removeItem(THREAD_LIST_CACHE_STORAGE_KEY);
+      return [];
+    }
+    return (Array.isArray(payload.threads) ? payload.threads : [])
+      .map(cachedThreadSummary)
+      .filter(Boolean)
+      .slice(0, THREAD_LIST_CACHE_MAX_THREADS);
+  } catch (_) {
+    try { localStorage.removeItem(THREAD_LIST_CACHE_STORAGE_KEY); } catch (_) {}
+    return [];
+  }
+}
+
+function restoreThreadListCache() {
+  if (state.threadListClientCacheRestoreAttempted) return 0;
+  if (!isDefaultThreadListCacheScope()) return 0;
+  state.threadListClientCacheRestoreAttempted = true;
+  const cachedThreads = readThreadListCache();
+  if (!cachedThreads.length) return 0;
+  const existingThreads = visibleThreads(state.threads || []).map(cachedThreadSummary).filter(Boolean);
+  const existingById = new Map(existingThreads.map((thread) => [String(thread.id), thread]));
+  const merged = cachedThreads.map((thread) => Object.assign({}, thread, existingById.get(String(thread.id)) || {}));
+  const cachedIds = new Set(merged.map((thread) => String(thread.id)));
+  for (let index = existingThreads.length - 1; index >= 0; index -= 1) {
+    const thread = existingThreads[index];
+    if (!cachedIds.has(String(thread.id))) merged.unshift(thread);
+  }
+  state.threads = visibleThreads(merged).slice(0, THREAD_LIST_CACHE_MAX_THREADS);
+  reconcileThreadStatusHints(state.threads);
+  renderThreads();
+  return state.threads.length;
+}
+
+function persistThreadListCache(threads = state.threads) {
+  if (!isDefaultThreadListCacheScope()) return false;
+  const summaries = visibleThreads(Array.isArray(threads) ? threads : [])
+    .map(cachedThreadSummary)
+    .filter(Boolean)
+    .slice(0, THREAD_LIST_CACHE_MAX_THREADS);
+  try {
+    localStorage.setItem(THREAD_LIST_CACHE_STORAGE_KEY, JSON.stringify({
+      version: THREAD_LIST_CACHE_VERSION,
+      savedAt: Date.now(),
+      threads: summaries,
+    }));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function loadWorkspaces(options = {}) {
+  restoreThreadListCache();
+  const requestOptions = Number(options.timeoutMs) > 0 ? { timeoutMs: Number(options.timeoutMs) } : undefined;
+  const result = await api("/api/workspaces", requestOptions);
   state.workspaces = result.data || [];
   const select = $("workspaceSelect");
   const menu = $("workspaceSelectMenu");
@@ -394,6 +523,7 @@ function scheduleThreadListDeferredSilentRefresh(delayMs = 700, options = {}) {
 }
 
 async function loadThreads(options = {}) {
+  restoreThreadListCache();
   const silent = options.silent === true;
   if (silent && state.threadListLoadController) return null;
   if (options.deferFallback !== true) clearThreadListDeferredFallbackTimer();
@@ -434,7 +564,7 @@ async function loadThreads(options = {}) {
   if (state.threadListLoadController) state.threadListLoadController.abort();
   const controller = new AbortController();
   state.threadListLoadController = controller;
-  if (!silent) renderThreadListLoading();
+  if (!silent && !state.threads.length) renderThreadListLoading();
   try {
     const apiStartedAt = nowPerfMs();
     const result = await api(`/api/threads?${params}`, { timeoutMs: 45000, signal: controller.signal });
@@ -456,6 +586,7 @@ async function loadThreads(options = {}) {
     state.workspaceTokenUsage = result.mobileTokenUsage || null;
     state.threadListLoadedAtMs = Date.now();
     reconcileThreadStatusHints(state.threads);
+    persistThreadListCache(state.threads);
     renderWorkspaceTokenUsage();
     renderThreads(result);
     if (state.currentThread && state.threadTileMode && !isThreadTileKeyboardFocusActive()) {
@@ -536,6 +667,7 @@ async function loadThreads(options = {}) {
         },
       }],
     });
+    if (silent && Array.isArray(state.threads) && state.threads.length) return null;
     throw err;
   } finally {
     if (state.threadListLoadController === controller) state.threadListLoadController = null;
@@ -911,6 +1043,9 @@ async function selectWorkspaceShortcut(cwd) {
 
   return {
     loadWorkspaces,
+    readThreadListCache,
+    restoreThreadListCache,
+    persistThreadListCache,
     workspaceSidebarOptionsHtml,
     syncSidebarWorkspaceSelect,
     workspaceOptionsHtml,

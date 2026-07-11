@@ -331,7 +331,8 @@ function applyThreadDisplaySettings(settings = {}, options = {}) {
 
 async function loadThreadDisplaySettings(options = {}) {
   try {
-    const result = await api("/api/settings/thread-display");
+    const requestOptions = Number(options.timeoutMs) > 0 ? { timeoutMs: Number(options.timeoutMs) } : undefined;
+    const result = await api("/api/settings/thread-display", requestOptions);
     const settings = result && result.threadDisplay && typeof result.threadDisplay === "object" ? result.threadDisplay : {};
     state.threadDisplaySettingsLoaded = true;
     const plan = threadTileStatePolicy.displaySettingsLoadPlan({

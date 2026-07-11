@@ -123,7 +123,7 @@ test("media preview runtime is wired into the static shell", () => {
   assert.match(shellManifest.shellCacheName, /^codex-mobile-shell-v629-[a-f0-9]{12}$/);
   assert.match(swJs, /shell-asset-manifest\.js/);
   assert.match(appJs, /"\/media-preview-runtime\.js"/);
-  assert.match(shellManifest.clientBuildId, /^0\.1\.13\|codex-mobile-shell-v629-[a-f0-9]{12}$/);
+  assert.match(shellManifest.clientBuildId, /^0\.1\.14\|codex-mobile-shell-v629-[a-f0-9]{12}$/);
   assert.ok(shellManifest.hashAssets.includes("/media-preview-runtime.js"));
   assert.match(serverRuntimeUtilsJs, /shell-asset-manifest\.json/);
   assert.match(appJs, /(?:const|var) mediaPreviewRuntimeApi = window\.CodexMediaPreviewRuntime/);

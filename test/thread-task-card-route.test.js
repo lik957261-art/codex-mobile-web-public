@@ -1449,7 +1449,7 @@ test("server materializes structured task-card drafts from thread detail", () =>
 });
 
 test("conversation render includes task card signature, toolbar, and action handlers", () => {
-  assert.match(appJs, /clientBuildId": "0\.1\.13\|codex-mobile-shell-v\d+(?:-[a-f0-9]{12})?"/);
+  assert.match(appJs, /clientBuildId": "0\.1\.14\|codex-mobile-shell-v\d+(?:-[a-f0-9]{12})?"/);
   assert.match(appJs, /function threadTaskCardsForThread\(/);
   assert.match(appJs, /function taskCardVisibleInThread\(/);
   assert.match(functionBody(appJs, "taskCardVisibleInThread"), /status === "pending"/);

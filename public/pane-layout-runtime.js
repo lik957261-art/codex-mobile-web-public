@@ -1776,17 +1776,18 @@ function showHermesPluginPrimaryPage(options = {}) {
 function refreshSidebarListAfterOpen() {
   const loadedAt = Number(state.threadListLoadedAtMs || 0);
   if (!loadedAt) {
-    loadWorkspaces()
-      .then(() => loadThreads())
-      .catch(showError);
+    loadWorkspaces({ timeoutMs: 8000 }).catch(() => {});
+    loadThreads({
+      silent: Boolean(state.threads.length),
+      allowDuringDetail: true,
+    }).catch((err) => {
+      if (!state.threads.length) showError(err);
+    });
     return;
   }
   if (Date.now() - loadedAt < 60000) return;
-  loadWorkspaces()
-    .then(() => loadThreads({ silent: true }))
-    .catch(() => {
-      // Sidebar opening should stay instant; visible refresh still reports errors.
-    });
+  loadWorkspaces({ timeoutMs: 8000 }).catch(() => {});
+  loadThreads({ silent: true, allowDuringDetail: true }).catch(() => {});
 }
 
 function openSidebarMenu() {

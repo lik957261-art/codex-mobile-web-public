@@ -1060,10 +1060,28 @@ async function bootstrap() {
       reason: "tile-startup",
     });
   }
+  const workspacesStartedAt = nowPerfMs();
+  loadWorkspaces({ timeoutMs: 8000 }).then(() => {
+    postStartupStage("workspaces_done", bootstrapStartedAt, {
+      durationMs: roundedDurationMs(workspacesStartedAt),
+      workspaceCount: Array.isArray(state.workspaces) ? state.workspaces.length : 0,
+    });
+  }).catch((err) => {
+    postStartupStage("workspaces_failed", bootstrapStartedAt, {
+      durationMs: roundedDurationMs(workspacesStartedAt),
+      error: String(err && err.message || err || "workspace_load_failed").slice(0, 160),
+    });
+    setTimeout(() => {
+      if (document.visibilityState === "hidden") return;
+      loadWorkspaces({ timeoutMs: 12000 }).catch(() => {});
+    }, 3500);
+  });
   const statusStartedAt = nowPerfMs();
-  const status = await api("/api/status").catch((err) => {
-    $("connectionState").textContent = err.message;
-    $("connectionState").classList.add("error");
+  const status = await api("/api/status", { timeoutMs: 8000 }).catch((err) => {
+    postStartupStage("status_failed", bootstrapStartedAt, {
+      durationMs: roundedDurationMs(statusStartedAt),
+      error: String(err && err.message || err || "status_load_failed").slice(0, 160),
+    });
     return null;
   });
   postStartupStage("status_done", bootstrapStartedAt, {
@@ -1073,16 +1091,15 @@ async function bootstrap() {
   if (status) updateConnectionState(status);
   if (status) rememberRateLimitsFromConfig(status);
   if (status && status.codexProfiles) rememberCodexProfiles(status.codexProfiles);
-  const workspacesStartedAt = nowPerfMs();
-  await loadWorkspaces();
-  postStartupStage("workspaces_done", bootstrapStartedAt, {
-    durationMs: roundedDurationMs(workspacesStartedAt),
-    workspaceCount: Array.isArray(state.workspaces) ? state.workspaces.length : 0,
-  });
   const threadDisplayStartedAt = nowPerfMs();
-  await loadThreadDisplaySettings({ render: false }).catch(showError);
+  let threadDisplayError = "";
+  await loadThreadDisplaySettings({ render: false, timeoutMs: 3000 }).catch((err) => {
+    threadDisplayError = String(err && err.message || err || "thread_display_load_failed").slice(0, 160);
+  });
   postStartupStage("thread_display_done", bootstrapStartedAt, {
     durationMs: roundedDurationMs(threadDisplayStartedAt),
+    ok: !threadDisplayError,
+    error: threadDisplayError,
     mode: state.threadTileMode ? "tile" : "single",
     paneCount: normalizeThreadTilePaneCount(state.threadTilePaneCount, 0),
     paneSlotCount: normalizeThreadTilePinnedIds(state.threadTilePinnedIds).length,
