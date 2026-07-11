@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -60,4 +61,22 @@ test("PWA shell refresh smoke error reporting is code-only", () => {
   assert.equal(smoke.safeErrorCode(new Error("AbortError: operation timed out")), "request_timeout");
   assert.equal(smoke.safeErrorCode(new Error("screenshot_failed:/Users/private/file.png")), "screenshot_failed");
   assert.doesNotMatch(smoke.safeErrorCode(new Error("401:https://host.invalid/?cookie=value")), /host|cookie|value/);
+});
+
+test("hashed Vite shell assets are cache-first while stable shell entries stay network-first", () => {
+  const serviceWorker = fs.readFileSync(path.join(__dirname, "..", "public", "sw.js"), "utf8");
+  const networkFirstMatcher = serviceWorker.match(
+    /function shouldNetworkFirstShellAsset\(url\) \{([\s\S]*?)\n\}/,
+  );
+  const immutableMatcher = serviceWorker.match(
+    /function isImmutableViteShellAsset\(url\) \{([\s\S]*?)\n\}/,
+  );
+
+  assert.match(serviceWorker, /function isImmutableViteShellAsset\(url\)/);
+  assert.match(serviceWorker, /event\.respondWith\(immutableCacheFirst\(request\)\)/);
+  assert.match(serviceWorker, /path === "\/vite-shell\/app-preview-entry\.js"/);
+  assert.ok(networkFirstMatcher, "network-first shell matcher should exist");
+  assert.ok(immutableMatcher, "immutable Vite asset matcher should exist");
+  assert.match(networkFirstMatcher[1], /vite-shell\\\/assets\\\/vite-shell-entry/);
+  assert.match(immutableMatcher[1], /&& !\/\^/);
 });

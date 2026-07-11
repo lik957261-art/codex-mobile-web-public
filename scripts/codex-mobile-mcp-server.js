@@ -5,6 +5,10 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const {
+  normalizeSecretRefsFromInput,
+  publicSensitiveContext,
+} = require("../services/runtime/home-ai-secret-ref-service");
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "codex_mobile";
@@ -115,15 +119,31 @@ function toolsList() {
           },
           targetWorkspace: { type: "string", maxLength: 1000 },
           targetCwd: { type: "string", maxLength: 1000 },
+          replyToThreadId: { type: "string", maxLength: 220 },
+          replyToWorkspaceId: { type: "string", maxLength: 260 },
+          replyToThreadTitle: { type: "string", maxLength: 200 },
+          replyToCardId: { type: "string", maxLength: 180 },
           title: { type: "string", minLength: 1, maxLength: 120 },
           summary: { type: "string", maxLength: 300 },
           bodyMarkdown: { type: "string", minLength: 1 },
+          secretRef: { type: "string", maxLength: 180, description: "Home AI short-lived secretRef. Do not put plaintext secrets in bodyMarkdown." },
+          secretRefs: {
+            type: "array",
+            maxItems: 8,
+            items: {
+              anyOf: [
+                { type: "string", maxLength: 180 },
+                { type: "object", additionalProperties: true },
+              ],
+            },
+          },
           requestId: { type: "string", maxLength: 180 },
           idempotencyKey: { type: "string", maxLength: 180 },
           workflowMode: { type: "string", enum: ["manual", "autonomous"] },
           workflowId: { type: "string", maxLength: 180 },
           reasoningEffort: { type: "string", enum: ["low", "medium", "high", "xhigh"] },
           cardKind: { type: "string", maxLength: 80 },
+          pluginId: { type: "string", maxLength: 100 },
           category: { type: "string", maxLength: 80 },
         },
       },
@@ -201,7 +221,10 @@ async function requestJson(context, method, pathname, body = null) {
     throw new Error(`codex_mobile_mcp_http_${response.status}`);
   }
   if (!response.ok || payload.ok === false) {
-    throw new Error(String(payload.error || payload.message || `codex_mobile_mcp_http_${response.status}`));
+    const err = new Error(String(payload.error || payload.message || `codex_mobile_mcp_http_${response.status}`));
+    err.statusCode = response.status;
+    err.details = payload.details && typeof payload.details === "object" ? payload.details : undefined;
+    throw err;
   }
   return payload;
 }
@@ -233,6 +256,11 @@ async function delegateToThread(context, args = {}) {
   const sourceThreadId = boundedString(args.sourceThreadId, "source_thread_id", 120, true);
   const title = boundedString(args.title, "title", 120, true);
   const bodyMarkdown = boundedString(args.bodyMarkdown || args.body, "body_markdown", 50_000, true);
+  const sensitiveContext = normalizeSecretRefsFromInput(args, {
+    source: "mcp-delegate",
+    targetPlugin: "codex",
+    sourceThreadId,
+  });
   const payload = {
     sourceThreadId,
     title,
@@ -245,13 +273,19 @@ async function delegateToThread(context, args = {}) {
     targetThreadTitles: boundedStringArray(args.targetThreadTitles, "target_thread_titles"),
     targetWorkspace: boundedString(args.targetWorkspace, "target_workspace", 1000, false),
     targetCwd: boundedString(args.targetCwd, "target_cwd", 1000, false),
+    replyToThreadId: boundedString(args.replyToThreadId || args.reply_to_thread_id || args.returnTargetThreadId || args.return_target_thread_id, "reply_to_thread_id", 220, false),
+    replyToWorkspaceId: boundedString(args.replyToWorkspaceId || args.reply_to_workspace_id || args.returnTargetWorkspaceId || args.return_target_workspace_id, "reply_to_workspace_id", 260, false),
+    replyToThreadTitle: boundedString(args.replyToThreadTitle || args.reply_to_thread_title || args.returnTargetThreadTitle || args.return_target_thread_title, "reply_to_thread_title", 200, false),
+    replyToCardId: boundedString(args.replyToCardId || args.reply_to_card_id || args.originalTaskCardId || args.original_task_card_id, "reply_to_card_id", 180, false),
     requestId: boundedString(args.requestId, "request_id", 180, false),
     idempotencyKey: boundedString(args.idempotencyKey, "idempotency_key", 180, false),
     workflowMode: boundedString(args.workflowMode || "manual", "workflow_mode", 40, false) || "manual",
     workflowId: boundedString(args.workflowId, "workflow_id", 180, false),
     reasoningEffort: boundedString(args.reasoningEffort || args.reasoning_effort || args.effort, "reasoning_effort", 40, false),
     cardKind: boundedString(args.cardKind || args.card_kind || args.taskCardKind || args.task_card_kind, "card_kind", 80, false),
+    pluginId: boundedString(args.pluginId || args.plugin_id, "plugin_id", 100, false),
     category: boundedString(args.category, "category", 80, false),
+    sensitiveContext,
     direct: true,
     autoApprove: true,
     pending: false,
@@ -268,10 +302,12 @@ async function delegateToThread(context, args = {}) {
       id: String(card.id || ""),
       status: String(card.status || ""),
       targetThreadId: String(card.target && card.target.threadId || card.injectedThreadId || ""),
+      replyToThreadId: String(card.replyTo && card.replyTo.threadId || ""),
       injectedTurnId: String(card.injectedTurnId || ""),
       targetApprovalBypassed: Boolean(card.delivery && card.delivery.targetApprovalBypassed),
       reasoningEffort: String(card.delivery && card.delivery.reasoningEffort || card.injectionRuntime && card.injectionRuntime.requestedReasoningEffort || ""),
       runtimeReasoningEffort: String(card.injectionRuntime && card.injectionRuntime.reasoningEffort || ""),
+      sensitiveContext: publicSensitiveContext(card.sensitiveContext),
     })),
   };
 }
@@ -282,12 +318,14 @@ async function returnToSource(context, args = {}) {
   const title = boundedString(args.title, "title", 120, true);
   const bodyMarkdown = boundedString(args.bodyMarkdown || args.body, "body_markdown", 50_000, true);
   const status = normalizedReturnStatus(args.status);
+  const workflowId = boundedString(args.workflowId || args.workflow_id, "workflow_id", 220, false);
   const seed = boundedString(args.idempotencyKey, "idempotency_key", 180, false)
     || boundedString(args.requestId, "request_id", 180, false)
-    || JSON.stringify({ taskCardId, threadId, status, title, body: bodyMarkdown });
+    || JSON.stringify({ taskCardId, threadId, workflowId, status, title, body: bodyMarkdown });
   const payload = {
     threadId,
     status,
+    workflowId,
     returnToSource: true,
     title: /^Return:/i.test(title) ? title : `Return: ${title}`,
     summary: boundedString(args.summary, "summary", 300, false) || status,
@@ -307,21 +345,29 @@ async function returnToSource(context, args = {}) {
     ok: result.ok !== false,
     taskCardId,
     threadId,
-      status: String(result.card && result.card.status || ""),
-      replyCard: {
-        id: String(replyCard.id || ""),
-        status: String(replyCard.status || ""),
-        sourceThreadId: String(replyCard.source && replyCard.source.threadId || ""),
-        targetThreadId: String(replyCard.target && replyCard.target.threadId || ""),
-        injectedTurnId: String(replyCard.injectedTurnId || ""),
-        returnToSource: Boolean(replyCard.delivery && replyCard.delivery.returnToSource),
-        returnStatus: String(replyCard.delivery && replyCard.delivery.returnStatus || ""),
-        terminal: Boolean(replyCard.terminal || replyCard.delivery && replyCard.delivery.terminal),
-        requiresReturn: Boolean(replyCard.requiresReturn),
-        ackPolicy: String(replyCard.ackPolicy || replyCard.delivery && replyCard.delivery.ackPolicy || ""),
-      },
-    };
-  }
+    status: String(result.card && result.card.status || ""),
+    requestedActorThreadId: String(result.returnResolution && result.returnResolution.requestedActorThreadId || threadId),
+    resolvedActorThreadId: String(result.returnResolution && result.returnResolution.resolvedActorThreadId || threadId),
+    returnNoOp: Boolean(result.returnResolution && result.returnResolution.noOp),
+    returnNoOpReason: String(result.returnResolution && result.returnResolution.reason || ""),
+    workflowRecovered: Boolean(result.returnResolution && result.returnResolution.workflowRecovered),
+    actorThreadInferred: Boolean(result.returnResolution && result.returnResolution.actorThreadInferred),
+    expectedTargetThreadId: String(result.returnResolution && result.returnResolution.expectedTargetThreadId || ""),
+    resolverVersion: String(result.returnResolution && result.returnResolution.resolverVersion || ""),
+    replyCard: {
+      id: String(replyCard.id || ""),
+      status: String(replyCard.status || ""),
+      sourceThreadId: String(replyCard.source && replyCard.source.threadId || ""),
+      targetThreadId: String(replyCard.target && replyCard.target.threadId || ""),
+      injectedTurnId: String(replyCard.injectedTurnId || ""),
+      returnToSource: Boolean(replyCard.delivery && replyCard.delivery.returnToSource),
+      returnStatus: String(replyCard.delivery && replyCard.delivery.returnStatus || ""),
+      terminal: Boolean(replyCard.terminal || replyCard.delivery && replyCard.delivery.terminal),
+      requiresReturn: Boolean(replyCard.requiresReturn),
+      ackPolicy: String(replyCard.ackPolicy || replyCard.delivery && replyCard.delivery.ackPolicy || ""),
+    },
+  };
+}
 
 async function handleMessage(context, message = {}) {
   const method = String(message.method || "");

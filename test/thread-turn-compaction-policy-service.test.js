@@ -18,6 +18,7 @@ function policy() {
   return createThreadTurnCompactionPolicyService({
     isOperationalItem: (item) => Boolean(item && item.operation),
     isUserQuestionItem: (item) => Boolean(item && item.kind === "user"),
+    isUserVisibleInputItem: (item) => Boolean(item && (item.kind === "user" || item.kind === "context")),
     isAssistantReceiptItem: (item) => Boolean(item && item.kind === "assistant"),
     isVisualReceiptItem: (item) => Boolean(item && item.kind === "visual"),
     isTurnUsageSummaryItem: (item) => Boolean(item && item.kind === "usage"),
@@ -73,6 +74,17 @@ test("receiptOnlyItemIndexes preserves user, visual, diagnostic, usage, and the 
   assert.deepEqual(setValues(service.receiptOnlyItemIndexes(items)), [0, 3, 4, 5, 6]);
 });
 
+test("receiptOnlyItemIndexes preserves non-message visible input anchors", () => {
+  const service = policy();
+  const items = [
+    { kind: "context" },
+    { kind: "assistant", id: "final" },
+    { kind: "usage" },
+  ];
+
+  assert.deepEqual(setValues(service.receiptOnlyItemIndexes(items)), [0, 1, 2]);
+});
+
 test("operationDetailTurnIndexes keeps latest live, previous visible, and previous ended turns", () => {
   const service = policy();
   const turns = [
@@ -119,10 +131,13 @@ test("default live-turn detection preserves interrupted shell behavior", () => {
 });
 
 test("server compaction merges rollout operations into operation-detail turns", () => {
-  const serverJs = fs.readFileSync(path.resolve(__dirname, "..", "server.js"), "utf8");
-  const compactThreadBody = functionBody(serverJs, "compactThread");
-  assert.match(serverJs, /function mergeRecentRawOperationsIntoTurn\(/);
-  assert.doesNotMatch(serverJs, /function mergeRecentRawOperationsIntoLiveTurn\(/);
+  const compactionJs = fs.readFileSync(
+    path.resolve(__dirname, "..", "adapters", "thread-detail-compaction-service.js"),
+    "utf8",
+  );
+  const compactThreadBody = functionBody(compactionJs, "compactThread");
+  assert.match(compactionJs, /function mergeRecentRawOperationsIntoTurn\(/);
+  assert.doesNotMatch(compactionJs, /function mergeRecentRawOperationsIntoLiveTurn\(/);
   assert.match(compactThreadBody, /const operationDetailIndexes = operationDetailTurnIndexes\(out\.turns\);/);
   assert.match(compactThreadBody, /for \(const index of operationDetailIndexes\) \{[\s\S]*mergeRecentRawOperationsIntoTurn\(out, out\.turns\[index\], \{ maxOperations: 50, allowNewOperations: true \}\);[\s\S]*\}/);
   assert.ok(
@@ -130,4 +145,15 @@ test("server compaction merges rollout operations into operation-detail turns", 
       compactThreadBody.indexOf("out.turns = out.turns.map"),
     "rollout operations must be merged before compactTurn filters operational items",
   );
+});
+
+test("server compaction policy preserves context compaction as a visible input anchor", () => {
+  const compactionJs = fs.readFileSync(
+    path.resolve(__dirname, "..", "adapters", "thread-detail-compaction-service.js"),
+    "utf8",
+  );
+  assert.match(compactionJs, /function isUserVisibleInputItem\(/);
+  assert.match(functionBody(compactionJs, "isUserVisibleInputItem"), /isUserQuestionItem\(item\)/);
+  assert.match(functionBody(compactionJs, "isUserVisibleInputItem"), /isContextCompactionType\(item && item\.type\)/);
+  assert.match(compactionJs, /createThreadTurnCompactionPolicyService\(\{[\s\S]*isUserVisibleInputItem,[\s\S]*isAssistantReceiptItem,/);
 });

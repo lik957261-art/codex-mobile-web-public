@@ -67,6 +67,37 @@
       : "";
   }
 
+  function visibleItemRenderKeyForNode(node) {
+    if (!node || node.nodeType !== ELEMENT_NODE || typeof node.getAttribute !== "function") return "";
+    if (node.getAttribute("data-item") == null) return "";
+    return renderKeyForNode(node);
+  }
+
+  function visibleItemRenderKeysForArticle(article) {
+    return Array.from(article && article.childNodes || [])
+      .map(visibleItemRenderKeyForNode)
+      .filter(Boolean);
+  }
+
+  function visibleItemOrderMatches(article, expectedKeys) {
+    const expected = normalizedStringList(expectedKeys);
+    const rendered = visibleItemRenderKeysForArticle(article);
+    if (!expected.length || !rendered.length) return true;
+    if (expected.length !== rendered.length) return false;
+    for (let index = 0; index < expected.length; index += 1) {
+      if (expected[index] !== rendered[index]) return false;
+    }
+    return true;
+  }
+
+  function placeVisibleItemNode(article, node, lastPatchedNode) {
+    if (!article || typeof article.insertBefore !== "function" || !node) return node;
+    const anchor = lastPatchedNode ? lastPatchedNode.nextSibling : article.firstChild || null;
+    if (node === anchor) return node;
+    article.insertBefore(node, anchor || null);
+    return node;
+  }
+
   function canPatchNode(target, source) {
     if (!target || !source || target.nodeType !== source.nodeType) return false;
     if (target.nodeType !== ELEMENT_NODE) return true;
@@ -163,9 +194,27 @@
     return fallback;
   }
 
+  function callbackTarget(value) {
+    if (!value || typeof value !== "object") return null;
+    return value.target || value.node || value.element || null;
+  }
+
   function firstTurnElementFrom(input) {
     if (typeof input.firstTurnElement === "function") return input.firstTurnElement() || null;
     return input.firstTurnElement || null;
+  }
+
+  function placeTurnNode(conversation, node, lastPlacedNode, firstTurnElement) {
+    if (!conversation || typeof conversation.insertBefore !== "function") {
+      return result(false, "missing-turn-order-root");
+    }
+    if (!node) return result(false, "place-turn-missing-element");
+    const anchor = lastPlacedNode
+      ? lastPlacedNode.nextSibling || null
+      : firstTurnElement || conversation.firstChild || null;
+    if (node === anchor) return result(true, "turn-already-placed", { target: node, moved: false });
+    conversation.insertBefore(node, anchor || null);
+    return result(true, "turn-placed", { target: node, moved: true });
   }
 
   function documentFrom(input = {}) {
@@ -209,6 +258,9 @@
     const expectedVisibleItemCount = boundedCount(input.expectedVisibleItemCount);
     const renderedDomItemCount = boundedCount(input.renderedDomItemCount);
     const duplicateRenderKeyCount = boundedCount(input.duplicateRenderKeyCount);
+    const duplicateUserMessageCount = boundedCount(input.duplicateUserMessageCount);
+    const expectedDuplicateUserMessageCount = boundedCount(input.expectedDuplicateUserMessageCount);
+    const excessiveDuplicateUserMessages = Math.max(0, duplicateUserMessageCount - expectedDuplicateUserMessageCount);
     const stableSignatureButMissingTurns = Boolean(
       stableSignature
       && expectedVisibleTurnCount > 0
@@ -221,13 +273,16 @@
       && renderedDomItemCount < expectedVisibleItemCount
     );
     const stableSignatureButDuplicateKeys = Boolean(stableSignature && duplicateRenderKeyCount > 0);
+    const stableSignatureButDuplicateUserMessages = Boolean(stableSignature && excessiveDuplicateUserMessages > 0);
     const stableSignatureButTurnOrderMismatch = Boolean(stableSignature && visibleTurnOrderMismatch(input));
     const stableSignatureDomInvalid = stableSignatureButMissingTurns
       || stableSignatureButMissingItems
       || stableSignatureButDuplicateKeys
+      || stableSignatureButDuplicateUserMessages
       || stableSignatureButTurnOrderMismatch;
     let invalidationReason = "signature-changed";
     if (stableSignatureButDuplicateKeys) invalidationReason = "stable-signature-duplicate-render-keys";
+    else if (stableSignatureButDuplicateUserMessages) invalidationReason = "stable-signature-duplicate-user-messages";
     else if (stableSignatureButTurnOrderMismatch) invalidationReason = "stable-signature-turn-order-mismatch";
     else if (stableSignatureButMissingItems) invalidationReason = "stable-signature-dom-item-mismatch";
     else if (stableSignatureButMissingTurns) {
@@ -397,6 +452,11 @@
     const expectedVisibleItemCount = boundedCount(input.expectedVisibleItemCount);
     const renderedDomItemCount = boundedCount(input.renderedDomItemCount);
     const duplicateRenderKeyCount = boundedCount(input.duplicateRenderKeyCount);
+    const duplicateUserMessageCount = boundedCount(input.duplicateUserMessageCount);
+    const expectedDuplicateUserMessageCount = boundedCount(input.expectedDuplicateUserMessageCount);
+    if (Math.max(0, duplicateUserMessageCount - expectedDuplicateUserMessageCount) > 0) {
+      return "post-apply-duplicate-user-messages";
+    }
     if (duplicateRenderKeyCount > 0) return "post-apply-duplicate-render-keys";
     if (visibleTurnOrderMismatch(input)) return "post-apply-turn-order-mismatch";
     if (expectedVisibleItemCount > 0
@@ -484,17 +544,25 @@
     const expectedVisibleItemCount = boundedCount(input.expectedVisibleItemCount);
     const renderedDomItemCount = boundedCount(input.renderedDomItemCount);
     const duplicateRenderKeyCount = boundedCount(input.duplicateRenderKeyCount);
+    const duplicateUserMessageCount = boundedCount(input.duplicateUserMessageCount);
+    const expectedDuplicateUserMessageCount = boundedCount(input.expectedDuplicateUserMessageCount);
     const reason = String(updatePlan.reason || "");
     const invalidationReasons = new Set([
       "stable-signature-dom-empty",
       "stable-signature-dom-turn-mismatch",
       "stable-signature-dom-item-mismatch",
       "stable-signature-duplicate-render-keys",
+      "stable-signature-duplicate-user-messages",
       "stable-signature-turn-order-mismatch",
     ]);
     const shouldInvalidate = Boolean(
       invalidationReasons.has(reason)
-      && (expectedVisibleTurnCount > 0 || expectedVisibleItemCount > 0 || duplicateRenderKeyCount > 0)
+      && (
+        expectedVisibleTurnCount > 0
+        || expectedVisibleItemCount > 0
+        || duplicateRenderKeyCount > 0
+        || duplicateUserMessageCount > expectedDuplicateUserMessageCount
+      )
     );
     if (!shouldInvalidate) {
       return {
@@ -518,6 +586,8 @@
       domCount: renderedDomTurnCount,
       domItemCount: renderedDomItemCount,
       duplicateRenderKeyCount,
+      duplicateUserMessageCount,
+      expectedDuplicateUserMessageCount,
       previousCount: boundedCount(input.previousChildCount),
     };
     return {
@@ -534,6 +604,8 @@
         expectedVisibleItemCount,
         renderedDomItemCount,
         duplicateRenderKeyCount,
+        duplicateUserMessageCount,
+        expectedDuplicateUserMessageCount,
         action: String(updatePlan.action || "").slice(0, 40),
       },
       reason,
@@ -862,23 +934,35 @@
         const existingNode = findElementByKey(operation.key, nextEntry);
         if (!existingNode) return result(false, "missing-existing-node", counts);
         if (operation.type === "reuse") {
-          lastPatchedNode = existingNode;
+          lastPatchedNode = placeVisibleItemNode(article, existingNode, lastPatchedNode);
           counts.reused += 1;
           continue;
         }
         const patchedNode = patchElement(existingNode, nextEntry);
         if (!patchedNode) return result(false, "patch-existing-node-failed", counts);
-        lastPatchedNode = patchedNode;
+        lastPatchedNode = placeVisibleItemNode(article, patchedNode, lastPatchedNode);
         counts.patched += 1;
         continue;
       }
       if (operation.type !== "insert") return result(false, "unknown-operation", counts);
       const source = renderElement(nextEntry);
       if (!source) return result(false, "render-insert-node-failed", counts);
-      const anchor = lastPatchedNode ? lastPatchedNode.nextSibling : article.firstChild;
+      const anchor = lastPatchedNode ? lastPatchedNode.nextSibling : article.firstChild || null;
       article.insertBefore(source, anchor || null);
       lastPatchedNode = source;
       counts.inserted += 1;
+    }
+    const nextKeys = new Set(patchPlan.operations
+      .map((operation) => normalizeOperation(operation))
+      .filter(Boolean)
+      .map((operation) => operation.key));
+    for (const child of Array.from(article.childNodes || [])) {
+      const key = visibleItemRenderKeyForNode(child);
+      if (!key || nextKeys.has(key)) continue;
+      if (typeof child.remove === "function") child.remove();
+    }
+    if (!visibleItemOrderMatches(article, Array.from(nextKeys))) {
+      return result(false, "post-apply-visible-item-order-mismatch", counts);
     }
     return result(true, "applied", counts);
   }
@@ -893,21 +977,46 @@
     const renderTurnElement = typeof input.renderTurnElement === "function" ? input.renderTurnElement : null;
     const insertTurnElement = typeof input.insertTurnElement === "function" ? input.insertTurnElement : null;
     const replaceTurnElement = typeof input.replaceTurnElement === "function" ? input.replaceTurnElement : null;
+    const removeTurnElement = typeof input.removeTurnElement === "function" ? input.removeTurnElement : null;
+    const findTurnElementByKey = typeof input.findTurnElementByKey === "function" ? input.findTurnElementByKey : null;
+    const conversation = input.conversation || input.root || null;
+    const firstTurnElement = firstTurnElementFrom(input);
     if (!findTurnByKey) return result(false, "missing-find-turn", { itemPatched: 0, replaced: 0 });
     if (!applyItemPatch) return result(false, "missing-apply-item-patch", { itemPatched: 0, replaced: 0 });
     if (!renderTurnElement) return result(false, "missing-render-turn", { itemPatched: 0, replaced: 0 });
     if (!insertTurnElement) return result(false, "missing-insert-turn", { itemPatched: 0, replaced: 0 });
     if (!replaceTurnElement) return result(false, "missing-replace-turn", { itemPatched: 0, replaced: 0 });
 
-    const counts = { reused: 0, patched: 0, inserted: 0, itemPatched: 0, replaced: 0 };
+    const counts = { reused: 0, patched: 0, inserted: 0, itemPatched: 0, replaced: 0, removed: 0, reordered: 0 };
+    let lastPlacedTurnElement = null;
+    function placeAppliedTurn(operation, callbackValue, fallbackNode = null) {
+      const target = callbackTarget(callbackValue)
+        || fallbackNode
+        || (findTurnElementByKey ? findTurnElementByKey(operation.key, operation) : null);
+      if (!target) return result(false, findTurnElementByKey ? "place-turn-missing-element" : "missing-find-turn-element", counts);
+      const placeResult = placeTurnNode(conversation, target, lastPlacedTurnElement, firstTurnElement);
+      if (!placeResult.ok) return result(false, placeResult.reason || "place-turn-failed", counts);
+      lastPlacedTurnElement = callbackTarget(placeResult) || target;
+      if (placeResult.moved) counts.reordered += 1;
+      return null;
+    }
     for (const rawOperation of patchPlan.operations) {
       const operation = normalizeTurnOperation(rawOperation);
       if (!operation) return result(false, "invalid-turn-operation", counts);
+      if (operation.type === "remove-turn") {
+        if (!removeTurnElement) return result(false, "missing-remove-turn", counts);
+        const removeResult = removeTurnElement(operation);
+        if (!callbackOk(removeResult)) return result(false, callbackReason(removeResult, "remove-turn-failed"), counts);
+        counts.removed += 1;
+        continue;
+      }
       const turn = findTurnByKey(operation.key, operation);
       if (!turn) return result(false, "turn-patch-operation-missing-turn", counts);
       if (operation.type === "item-patch") {
         const itemPatchResult = applyItemPatch(turn, operation);
         if (!callbackOk(itemPatchResult)) return result(false, callbackReason(itemPatchResult, "item-patch-failed"), counts);
+        const placeFailure = placeAppliedTurn(operation, itemPatchResult);
+        if (placeFailure) return placeFailure;
         counts.itemPatched += 1;
         counts.patched += 1;
         continue;
@@ -920,11 +1029,15 @@
       if (operation.type === "insert-turn") {
         const insertResult = insertTurnElement(source, turn, operation);
         if (!callbackOk(insertResult)) return result(false, callbackReason(insertResult, "insert-turn-failed"), counts);
+        const placeFailure = placeAppliedTurn(operation, insertResult, source);
+        if (placeFailure) return placeFailure;
         counts.inserted += 1;
         continue;
       }
       const replaceResult = replaceTurnElement(source, turn, operation);
       if (!callbackOk(replaceResult)) return result(false, callbackReason(replaceResult, "replace-turn-failed"), counts);
+      const placeFailure = placeAppliedTurn(operation, replaceResult);
+      if (placeFailure) return placeFailure;
       counts.replaced += 1;
       counts.patched += 1;
     }
@@ -933,7 +1046,7 @@
 
   function resultCounts(source = {}) {
     const counts = {};
-    for (const key of ["reused", "patched", "inserted", "itemPatched", "replaced"]) {
+    for (const key of ["reused", "patched", "inserted", "itemPatched", "replaced", "removed", "reordered"]) {
       if (Number.isFinite(Number(source[key]))) counts[key] = Number(source[key]);
     }
     return counts;

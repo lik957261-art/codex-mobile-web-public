@@ -88,6 +88,48 @@ root-cause-first rule or introducing masking fallbacks.
 
 Current acceleration targets:
 
+0. `server.js` split/refactor must proceed by ownership domain, not by
+   cosmetic line slicing. The working pattern is: first extract an adapter that
+   owns a coherent domain decision or route group, inject all server-local side
+   effects as dependencies, add focused service/route tests, then leave
+   `server.js` as request/auth/context/dependency glue. The first extraction
+   in this sequence moved current-thread side-chat orchestration into
+   `adapters/thread-side-chat-orchestration-service.js`; route handling for
+   `/api/threads/:threadId/side-chat*` now lives in
+   `server-routes/thread-side-chat-route-service.js`, with the old adapter path
+   kept as a compatibility export only. The next extraction moved the
+   upload/local-file-preview/generated-image route group, upload message-body
+   parsing, upload submission dedupe, and preview authorization policy into
+   `adapters/media-file-service.js`. The third extraction moved continuation
+   source-handoff/bootstrap/lineage/job orchestration and continuation goal
+   migration into `adapters/continuation-thread-service.js`. The fourth
+   extraction moved the `GET /api/threads` route-level fallback/app-server
+   merge/decorate orchestration into `server-routes/thread-list-route-service.js`,
+   with `adapters/thread-list-route-service.js` kept as a compatibility export,
+   leaving `server.js` to inject request, state, cache, and Codex RPC
+   dependencies. The fifth extraction moved Codex app-server/mux client
+   lifecycle, transport RPC, rate-limit refresh, server-request approval
+   handling, and dynamic tool-call dispatch into
+   `services/runtime/codex-app-server-client-service.js`; the follow-up runtime
+   transport boundary also moved JSONL connection handling, TCP endpoint
+   parsing, mux endpoint-file resolution, free-port allocation, and JSON
+   byte measurement into that service, leaving `server.js` to inject
+   runtime state, task-card/profile helpers, endpoint config, and logging
+   callbacks while the old adapter path remains a compatibility export. The current
+   backend split also moved task-card route execution, message route execution,
+   fallback source recovery, summary-state synchronization, and thread-detail
+   response preparation into dedicated adapters/routes. The current route-boundary
+   phase has started moving HTTP coordinators out of `adapters/` and into
+   `server-routes/`; the main authenticated `/api/*` dispatcher is owned by
+   `server-routes/api-dispatch-route-service.js`, `/api/threads/:id` detail
+   routing is owned by `server-routes/thread-detail-route-service.js`, and the
+   old adapter paths remain compatibility exports. Future high-yield
+   candidates should follow the same domain boundary: public/profile config routes, GitHub/utility
+   routes, remaining thread-detail enrichment helpers, and
+   notification/runtime side-effect groups. Avoid moving helper functions only
+   to reduce line count; each extraction must reduce a real `server.js`
+   ownership responsibility and gain focused tests.
+
 1. Active large-thread detail opens still have the highest full-read risk. The
    active-read policy intentionally disables partial projection and bounded
    turns-list shortcuts unless an authoritative active-window overlay can prove
@@ -107,7 +149,10 @@ Current acceleration targets:
    The route-boundary slice then extracts `/api/threads/:id` detail route
    coordination into a testable service so `mode=recent`, bounded request logs,
    response send, and `complete=false` semantics can be verified without
-   relying on `server.js` source-string assertions. The route-smoke slice now
+   relying on `server.js` source-string assertions. The main API dispatch route
+   then moved to `server-routes/api-dispatch-route-service.js` so `server.js`
+   imports route composition from the canonical route namespace while the old
+   adapter path stays compatibility-only. The route-smoke slice now
    proves that this route boundary can call the real read orchestration and
    return `projection-active-overlay` for a recent active-window read without
    invoking full `thread/read` or `turns-list`.
@@ -185,7 +230,15 @@ Current acceleration targets:
    `thread-detail-response-budget-service` trims operation/reasoning tails and
    rebuilds v4 visible keys, while task-card lists now carry summary metadata
    only and load full card bodies through `GET /api/thread-task-cards/:id` when
-   the user expands a card.
+   the user expands a card. Later first-paint byte slices keep the same service
+   boundary for task-card metadata: when active progressive response budgeting
+   has already protected all visible items but the detail JSON is still over
+   the active first-paint ceiling, task cards are reduced to an action-safe
+   first-paint shape that keeps pending-card buttons and minimal
+   workflow/source/target/message metadata while the single-card detail endpoint
+   remains authoritative for full card details. Settled non-actionable cards
+   can be reduced further to id/status/thread-role placeholders because the
+   thread-detail renderer only exposes pending target cards for action.
    The follow-up active-detail hot-path slice keeps that same proof gate but
    changes the common active window source. A naive reuse of the active dynamic
    projection regressed production because the lookup still cloned/normalized
@@ -218,8 +271,37 @@ Current acceleration targets:
    1.3 seconds in `activeOverlayWindowMs`, while repeated reads immediately
    returned with `activeOverlayWindowMs=0`. That is not the older timeout
    failure; it is a synchronous active-window rebuild from app-server
+   on the first read. A later active Codex Mobile sample showed a different
+   warm-path peak: `activeOverlayWindowMs=0`, `prepareResponseMs` around
+   35-45ms, but `activeOverlayMs` still around 1.8-3.0s. The owning layer was
+   local active-overlay backfill merge, not app-server RPC. The backfill helper
+   was deep-cloning every active-window and live-overlay item with
+   `JSON.stringify` before merging, so large command/assistant payloads paid a
+   repeated CPU serialization cost even when the overlay proof itself was
+   ready. The root-cause fix is to keep top-level result immutability while
+   using shallow item copies for the merge and to expose
+   `activeOverlayBackfillWindowMs`, `activeOverlayFullProjectionMs`, and
+   `activeOverlayHistoryBaselineMs` through detail diagnostics / Phase-B
+   readback so future peaks are attributable instead of hidden under
+   `activeOverlayMs`. The next residual showed that the remaining peak was not
+   the merge helper itself but the orchestration rule that treated every
+   `projection-live` overlay as requiring a fresh app-server active-window read.
+   The corrected rule only forces that read for partial, notification-shell,
+   missing-signature, or otherwise incomplete live overlays. Complete signed
+   live overlays can reuse the projection cache; partial projection windows
+   still repair history from the local full projection baseline instead of
+   weakening the evidence gate.
+   A later Phase B sample exposed another active-window ordering gap:
+   `turnsListInitialMs` dominated while the response still ended as
+   `projection-active-overlay` with `activeFullReadReason=initial-window-active-turn`.
+   In that shape, summary state missed active status but the live overlay
+   provider already had a concrete active turn. Read orchestration now uses that
+   live overlay preprobe to try the dedicated `turns-list-active-overlay-window`
+   before generic `turns-list-initial`, so active evidence is proved through the
+   active-window path first and repeated reads can seed/reuse the active-window
+   projection cache.
    `thread/turns/list`. The follow-up server slice adds
-   `thread-detail-active-window-prewarm-service`: turn/status notifications and
+   `services/thread-detail/thread-detail-active-window-prewarm-service.js`: turn/status notifications and
    thread-list refreshes now schedule a deduplicated background
    `turns-list-active-overlay-window` prewarm for active/running threads. The
    prewarm reuses the same projection-window lookup, turns-list read, and
@@ -230,15 +312,31 @@ Current acceleration targets:
    status metadata. This does not loosen the active-overlay proof gate; it
    moves the expected window build out of the user-visible first-detail request
    whenever the notification/list path has enough time to prewarm it. The
+   `turn/started`, `turn/completed`, and active `thread/status/changed`
+   notification-triggered prewarm path now starts with zero delay and bypasses
+   the recent-attempt throttle, because the client often refetches detail
+   immediately after receiving the same turn/status notification. Notification
+   jobs can preempt older pending thread-list prewarm so a stale ordinary job
+   cannot block completion-boundary active-window repair; thread-list batch
+   prewarm remains delayed and throttled. The
    follow-up active-overlay policy fix treats that preseeded window as
    history-only evidence: its projection revision cannot mark the separately
    supplied live active-turn overlay stale, while ordinary projection windows
    still keep the stale assistant-delta fail-closed rule.
+   A later production log sample showed most background prewarm attempts from
+   `thread-list:warm_fallback_*` skipping with `projection-input-unavailable`:
+   the fallback row proved active status but did not carry enough rollout-path
+   and stat evidence for a projection signature. The prewarm coordinator now
+   treats that as an incomplete-summary case, refreshes the canonical summary
+   once, and retries projection input before skipping. This keeps ownership at
+   the projection-input boundary and avoids moving the same app-server
+   active-window read back into the foreground detail request.
    A later runtime sample showed a remaining cold-path gap: background prewarm
    and the foreground first detail open could race and both start the same
    `turns-list-active-overlay-window` app-server read for one active thread.
    The coalescing slice adds
-   `thread-detail-turns-list-read-coalescer-service`, injected into both the
+   `services/thread-detail/thread-detail-turns-list-read-coalescer-service.js`,
+   injected into both the
    prewarm coordinator and the detail orchestrator. It shares only in-flight
    reads for the same thread/mode/limit, logs `turns_list_coalesced` for
    joiners, returns cloned JSON results to each caller, and clears failures so
@@ -256,7 +354,9 @@ Current acceleration targets:
    active thread summaries are passed through an internal hook to schedule
    active-window prewarm. The hook does not alter public fallback status or
    expose private row data; it only starts the existing bounded active-window
-   prewarm earlier after restart.
+   prewarm earlier after restart. Startup fallback prewarm now defaults to
+   zero delay after listener start while retaining the active-detail-in-flight
+   defer/retry guard.
    The stale-full-history follow-up handles a remaining successful-but-slow
    case after process restart or active-turn growth: a full projection may still
    contain a valid history window, but the ordinary signature check rejects it
@@ -265,6 +365,21 @@ Current acceleration targets:
    full entry into a history-only `turns-list-active-overlay-window`; ordinary
    lookups and resting threads keep rejecting the mismatch and reseed through
    the authoritative app-server path.
+   Once that history-only active-window cache is seeded, its comparable
+   signature also ignores active-turn rollout size/mtime movement after an
+   exact hash miss. The live active turn is supplied by the overlay proof seam,
+   so active growth alone should not force the history window to be rebuilt;
+   `turn/started` and `turn/completed` remain the explicit boundary events that
+   clear and repair that window.
+   A follow-up closes the foreground/prewarm contract gap where background
+   prewarm could report `active-window-already-cached`, but the active-summary
+   foreground detail path still looked up the projection window without
+   `omitActiveTurnId` and rebuilt `turns-list-active-overlay-window`. The
+   orchestrator now retries the dedicated active-overlay projection-window
+   lookup with the live active turn omitted after an initial active-window miss.
+   If that history-only retry succeeds and the live overlay evidence is already
+   complete, the foreground merge uses the cached history rows directly instead
+   of paying a fresh active-window backfill read.
    The history-baseline follow-up handles the related restart race where the
    active notification stream reaches the process before the warm full
    projection has been loaded into memory. The projection service now restores a
@@ -278,11 +393,13 @@ Current acceleration targets:
    recently completed detail responses could still carry dozens of intermediate
    `agentMessage`/`plan` items. That makes the successful response large enough
    to look like a long stall on mobile and increases DOM merge pressure. The
-   response-budget v2 slice keeps retained text intact but removes intermediate
-   assistant/plan items by server-side item budget: completed turns default to
-   the latest assistant/plan receipt, active turns keep a bounded recent tail,
-   and `mobileDetailResponseBudget.omittedAssistantItems` records the bounded
-   evidence. This is a payload-owner fix, not a client-side refresh fallback.
+   response-budget v2 slice originally used a server-side assistant item
+   budget for the current turn. That was corrected after production evidence
+   showed active/latest replay turns could lose user-visible intermediate
+   assistant progress. Current active turns and the latest completed replay now
+   protect assistant/plan progress rows; operation/reasoning rows and oversized
+   text/payload fields remain the first-paint budget owners. This is a
+   payload-owner fix, not a client-side refresh fallback.
    The following projection-hit slice addresses a different warm-path cost:
    repeated `projection-v4-cache` / `projection-v4-dynamic` opens were still
    paying a whole-result v4 visible-item normalization pass even though cached
@@ -642,11 +759,12 @@ call app-server `thread/turns/list`.
   fallback without changing the actual read strategy. It also records
   `activeFullReadRequired` / `activeFullReadReason` when an active/running
   summary intentionally skips partial projection or bounded turns-list shortcuts
-  and falls back to full `thread/read`; `thread-detail-active-read-policy-service`
+  and falls back to full `thread/read`;
+  `services/thread-detail/thread-detail-active-read-policy-service.js`
   now owns that decision boundary, so any later active-turn overlay optimization
   has to prove itself against a pure policy surface rather than patching the
   orchestration path inline. The follow-up
-  `thread-detail-active-window-overlay-policy-service` defines that proof gate:
+  `services/thread-detail/thread-detail-active-window-overlay-policy-service.js` defines that proof gate:
   active projection overlay remains fail-closed unless the active turn id,
   projection window, authoritative overlay source, matched active turn, operation
   coverage, upload visibility, assistant delta freshness, and usage/diagnostic
@@ -879,7 +997,7 @@ turn/item counts, loaded/loading/error flags, read mode, and DOM counts.
 `codex-mobile-shell-v523` closes the next ownership boundary for the same
 visible failure class. `/api/threads` list rows are not detail authorities and
 must never expose `turns: []`, `mobileDetailLoaded`, projection metadata, visible
-item keys, or pending server request bodies. `adapters/thread-list-summary-service.js`
+item keys, or pending server request bodies. `services/thread-list/thread-list-summary-service.js`
 now strips those fields during list merge/status normalization/task-card count
 decoration so fallback/app-server summaries cannot overwrite a loaded detail
 surface with an empty shell. The client also records
@@ -1930,6 +2048,13 @@ acknowledgement, or block normal terminal return-card delivery. Unknown Home AI
 task-card ids are recorded as bounded `unknown_task_card` audit status on the
 return card.
 
+The Home AI return-card event client is now under
+`services/task-cards/home-ai-autonomous-delivery-return-service.js`; the adapter
+path is compatibility-only. This keeps terminal return-card workflow ownership,
+return-card observer event normalization, and outbound Home AI delivery-loop
+event reporting in the same task-card service boundary while preserving the
+existing backend web-key path.
+
 Remaining target:
 
 - Keep return-card delivery and Home AI delivery-loop event reporting separate:
@@ -1938,6 +2063,203 @@ Remaining target:
 - Continue hardening active task-card lease queueing, pause/cancel/resume
   affordances, same-workspace routing, archived-target rejection, and manual
   return-path visibility with executable tests.
+
+### 2026-06-30 Server Route Boundary Extraction Checkpoint
+
+This local checkpoint starts the large `server.js` split by moving route
+ownership groups, fallback/source recovery, summary-state synchronization, and
+thread-detail response preparation out of the entrypoint without changing
+public behavior:
+
+- `server-routes/thread-task-card-route-service.js` now owns task-card HTTP routes,
+  task-card dynamic-tool schemas/response payloads, fallback guidance, visible
+  target hints, deploy-lane route integration, source-draft materialization, and
+  thread-detail task-card attachment. `adapters/thread-task-card-route-service.js`
+  is a compatibility export only.
+- `services/task-cards/task-card-runtime-policy-service.js` now owns task-card
+  runtime model/effort/guidance inheritance, source-thread/runtime cwd
+  resolution, workspace-delegation sandbox and source-write approval guards,
+  guard-exemption classification, full-access compatibility mode, source-write
+  guard log payloads, and Codex Fast service-tier selection. `server.js` injects
+  state readers, visible workspace roots, and runtime permission helpers.
+- `services/task-cards/thread-task-card-service.js` now owns the core
+  cross-thread task-card store and workflow state machine: normalization,
+  JSON persistence/locking, idempotent create/reply, source/target
+  authorization, approval transitions, execution leases, autonomous workflow
+  grants, terminal return-card events, and pending-count decoration inputs.
+  `adapters/thread-task-card-service.js` is compatibility-only.
+- `services/task-cards/thread-task-card-routing-service.js` and
+  `services/task-cards/thread-task-card-deploy-lane-policy-service.js` now own
+  the task-card routing and deployment-lane policy boundary: exact
+  id/title/workspace target resolution, visible/deliverable filtering,
+  archived/hidden/subagent/sidecar rejection, same-cwd canonical selection,
+  Home AI deploy-lane title/pool matching, routine plugin deployment detection,
+  plugin-id lane routing, fail-closed lane diagnostics, deploy-lane summary
+  normalization, and target hint prioritization. Adapter paths are
+  compatibility-only.
+- `server-routes/thread-message-route-service.js` now owns thread creation,
+  new-message/existing-message, resume, auto-recover, and turn interrupt route
+  behavior while `server.js` injects runtime settings, parsers, Codex transport,
+  and mutation helpers. `adapters/thread-message-route-service.js` is a
+  compatibility export only.
+- `services/thread-list/thread-list-fallback-source-service.js` now owns session-index title
+  hydration/persistence, rollout-session fallback summary recovery, rollout
+  active/completed/stale-context status inference, rollout stat metadata reuse,
+  and projectless session-index fallback rows. The old adapter path is
+  compatibility-only.
+- `services/thread-list/thread-summary-state-service.js` now owns state DB single-thread
+  fallback-row reads, local active overlays, stale/live/rest status
+  classification, display-summary merge semantics, state DB runtime metadata
+  merge, and detail-read-to-thread-list fallback-cache synchronization. The old
+  adapter path is compatibility-only.
+- `services/thread-list/thread-summary-read-model-service.js` now owns thread
+  summary read-model runtime glue: global-state/projectless-thread updates,
+  AGENTS startup instruction aggregation, recent started-thread cache, app-server
+  summary fallback through the display-summary cache, title-update fallback, and
+  display-title normalization. The old adapter path is compatibility-only.
+- `services/thread-list/thread-list-app-server-fetch-policy-service.js`,
+  `thread-list-route-merge-service.js`,
+  `thread-list-summary-merge-service.js`,
+  `thread-list-request-context-service.js`,
+  `thread-list-response-coalescer-service.js`,
+  `thread-list-cold-path-diagnosis-service.js`, and
+  `thread-list-summary-service.js` now own the remaining thread-list request
+  policy, merge, request context, coalescing, cold-path diagnosis, and summary
+  stripping boundaries. Their old adapter paths are compatibility-only.
+- `services/thread-list/thread-list-state-service.js` now owns thread-list row
+  extraction, batch fallback-cache upsert delegation, thread-goal and
+  pending-task-card list decoration, All Workspaces row input assembly, and
+  token-usage workspace cwd snapshots. `server.js` now injects the task-card,
+  goal, visibility, registry, fallback-cache, and app-server request
+  dependencies instead of keeping those read-model helpers inline.
+- `services/thread-list/thread-list-runtime-service.js` now owns the thread-list
+  runtime composition layer: summary-merge service construction, fallback-cache
+  and persistent-cache composition, response coalescer construction,
+  active-detail fallback-defer tracking, startup fallback prewarm
+  scheduling/status, and metadata-only fallback/token-usage timing field
+  shaping. `server.js` keeps narrow compatibility wrappers only for earlier
+  service initialization and route injection.
+- `services/runtime/runtime-turn-event-pipeline-service.js` now owns the
+  app-server turn-event pipeline: thread/turn id extraction, rollout-path
+  thread id recovery, bounded turn-to-thread memory, old-event filtering,
+  completed-turn token usage recording, task-card auto-return/interruption
+  resume hooks, queued side-chat apply notification, server-side task-card draft
+  materialization, and Web Push completed-turn delegation. `server.js` injects
+  Codex transport, state readers, task-card, side-chat, token-usage, and Web
+  Push dependencies.
+- `services/runtime/server-event-runtime-boundary-service.js` now owns the
+  late-bound lazy delegation facade for thread event notification and turn-event
+  pipeline functions that earlier route/service constructors need before the
+  backing services are fully wired. `server.js` consumes that facade instead of
+  carrying duplicated one-line compatibility wrappers.
+- `services/thread-detail/thread-detail-response-preparation-service.js` now owns
+  turns-list/raw/full/fallback read-result shaping, rollout Usage decoration,
+  rollout completion/user-input/active-assistant/final-receipt preparation
+  order, task-card/pending-request detail decoration, response-budget compaction
+  invocation, and the read-result helpers consumed by detail orchestration.
+- `services/thread-detail/thread-detail-active-turn-evidence-service.js` now owns
+  active turn evidence normalization and reconciliation: live/completed status
+  checks, superseded live shell pruning, rollout active-runtime evidence lookup,
+  materialized active-turn recovery, and empty resting active-shell removal
+  before compaction and response preparation.
+- `adapters/static-file-service.js` now owns public static file serving,
+  Brotli/gzip negotiation, compressed-body cache state, and HTML
+  frame-ancestor header injection.
+- `adapters/codex-profile-switch-service.js` now owns profile-switch progress
+  snapshots, target-account preflight spawn/connect/initialize/rate-limit checks,
+  and preflight error/warning classification while `server.js` keeps HTTP
+  sequencing, active-profile persistence, trust/toolset sync, and restart
+  orchestration.
+- `services/runtime/runtime-settings-service.js` now owns runtime JSON read/write
+  helpers, thread-display public settings normalization, and workspace
+  delegation settings snapshots/toggles while `server.js` injects the runtime
+  file path and dynamic-tool constants. The old adapter path is compatibility-only.
+- `services/runtime/server-runtime-config-service.js` now owns pure
+  env/default/path/limit resolution for runtime roots, Codex Home, mux/app-server
+  flags, auth/runtime file paths, plugin notification settings, workspace
+  delegation flags, thread-detail/list budgets, model/effort/permission options,
+  RPC/cache budgets, and retry method declarations. `server.js` now consumes one
+  resolved config object before constructing services instead of carrying these
+  parsing rules inline.
+- `server-routes/core-api-route-service.js` now owns the public and core authorized
+  API route groups for public config/login, Codex Profile list/switch/progress,
+  Hermes plugin manifest/session/registration/launch/notifications, runtime
+  settings routes, client events, app update/public PR/public release/GitHub
+  preview utility routes, shared-chain restart, app status/reconnect, browser
+  approvals, and the pre-browser-auth ChatGPT Pro MCP connector. `server.js`
+  now keeps only request context/body/response injection, the auth boundary,
+  and the remaining thread/list/detail route-service composition; the old
+  `adapters/core-api-route-service.js` path remains compatibility-only.
+- `adapters/app-maintenance-service.js` now owns the stateful implementation
+  behind app update/public PR/public release/GitHub preview utility routes:
+  safe git ref validation, credential-masked remote URLs, git status/apply
+  execution, restart scheduling, bounded GitHub fetches, in-memory status
+  caches, GitHub preview normalization, and public-release commit comparison.
+  `server-routes/core-api-route-service.js` remains the HTTP route owner; `server.js` only
+  injects environment-derived constants and shutdown wiring.
+- `adapters/auto-turn-recovery-service.js` now owns automatic active-turn
+  recovery policy: running/cooldown/in-flight checks, recent live-turn
+  inspection, `turn/steer`, stale/unsupported steer fallback through
+  `thread/resume` and `turn/start`, mux user-message notification for steered
+  recovery, and local turn-start notification for replacement recovery turns.
+  `server.js` injects Codex RPC, runtime-setting helpers, classifiers, timeout
+  values, and `notifyLocalTurnStarted`.
+
+Local line-count evidence after the latest extraction: `server.js` is 3,288 lines,
+`server-routes/thread-task-card-route-service.js` is 1,275 lines,
+`services/task-cards/task-card-runtime-policy-service.js` is 345 lines, and
+`services/task-cards/thread-task-card-service.js` is 1,857 lines,
+`services/task-cards/thread-task-card-routing-service.js` is 364 lines,
+`services/task-cards/thread-task-card-deploy-lane-policy-service.js` is 412 lines, and
+`server-routes/thread-message-route-service.js` is 363 lines, and
+`services/thread-list/thread-list-fallback-source-service.js` is 683 lines,
+`services/thread-list/thread-summary-state-service.js` is 400 lines, and
+`services/thread-list/thread-summary-read-model-service.js` is 230 lines, and
+the remaining canonical `services/thread-list/` policy/merge/context/coalescer/
+diagnosis/summary services are 257, 212, 183, 86, 147, 165, and 47 lines, and
+`services/thread-detail/thread-detail-response-preparation-service.js` is 256 lines, and
+`services/thread-detail/thread-detail-active-turn-evidence-service.js` is 293 lines. The newer
+low-coupling static/profile-switch/runtime-settings/runtime-config/core-API/auto-recovery
+adapters/services are 195, 385, 236, 386, 554, and 153 lines respectively; the
+new app maintenance adapter is 709 lines.
+This is a checkpoint, not the target state; `server.js` remains too large. The
+next high-yield backend splits should target remaining thread-detail enrichment
+helpers, the remaining thread-list composition wrappers, residual notification/
+runtime side-effect groups, and any remaining API dispatcher glue because core
+route execution, app maintenance state/IO, thread-list fallback/source/cache/
+prewarm/summary-state/read-model runtime, static serving, runtime settings,
+profile preflight, thread-detail active-turn evidence, and the main detail response-preparation
+order are now out of the entrypoint.
+
+Validation boundary:
+
+- syntax checks for `server.js` and the new adapters;
+- focused route/protocol/task-card tests covering route delegation, dynamic
+  tools, deploy-lane policy wiring, new-thread/message behavior, and app-server
+  protocol integration;
+- focused task-card runtime-policy tests covering inherited model/effort/guidance,
+  source-thread cwd precedence, workspace-delegation sandbox/source-write guard
+  behavior, guard exemptions, and full-access compatibility mode;
+- focused task-card store/workflow tests covering JSON store locking,
+  idempotency, direct/source approval, execution leases, autonomous workflows,
+  terminal return cards, and compatibility adapter exports;
+- focused thread-list visibility/fallback tests covering session-index reuse,
+  rollout status inference, local active overlay interaction, and fallback cache
+  source diagnostics;
+- focused static compression and Codex profile switch/preflight UI tests after
+  the static/profile-switch extractions;
+- focused thread-task-card route, thread visibility, and new-thread route tests
+  after the runtime-settings extraction;
+- focused core-route source-boundary tests covering public config/Profile,
+  Hermes plugin, ChatGPT Pro MCP, workspace delegation, app update/public PR,
+  GitHub preview, media public config, and thread-list prewarm public-config
+  wiring after the core API route extraction;
+- focused app-maintenance service tests covering safe git refs, remote
+  credential masking, app-update git status reads, GitHub preview caching, and
+  public-release commit comparison after the maintenance-state extraction;
+- focused auto-turn-recovery service tests covering turn-id extraction, live
+  steer recovery, cooldown dedupe, and stale-steer resume/start fallback;
+- `git diff --check` before commit.
 
 ### Phase 4: Browser And Visual Coverage
 
@@ -2413,14 +2735,24 @@ many visible operation/reasoning/assistant progress rows.
 
 Deployable scope:
 
-- `adapters/thread-detail-response-budget-service.js` treats a known
+- `services/thread-detail/thread-detail-response-budget-service.js` treats a known
   `activeTurnId` as the only current active response-budget owner. Older
   `inProgress` rows are counted as `staleActiveTurnCount` and shaped by
   completed-turn budgets.
 - The same service applies pressure-triggered progressive active limits when
   the detail window crosses the item-count threshold or active/thread byte
-  thresholds, lowering active operation/reasoning/assistant tails. Under that
-  progressive active pressure only, oversized retained active
+  thresholds, lowering active operation/reasoning tails while protecting
+  current active and latest-replay assistant/plan progress rows. The replay
+  protection is bounded under progressive active pressure: active turns keep a
+  trailing assistant/plan tail controlled by
+  `CODEX_MOBILE_THREAD_DETAIL_PROGRESSIVE_REPLAY_ASSISTANT_ITEMS` (default
+  `8`), while protected completed replay turns keep a separate tail controlled
+  by `CODEX_MOBILE_THREAD_DETAIL_PROGRESSIVE_COMPLETED_REPLAY_ASSISTANT_ITEMS`
+  (default `12`). The response records `progressiveReplayAssistantItems`,
+  `progressiveCompletedReplayAssistantItems`, `limitedReplayAssistantItems`,
+  and `limitedCompletedReplayAssistantItems`. This prevents a large active
+  overlay from retaining every older completed assistant fragment while
+  preserving the newest active progress. Under that progressive active pressure only, oversized retained active
   assistant/reasoning text fields are reduced to a bounded first-paint preview
   and marked with `mobileActiveTextBudget` / `mobileTextTruncated`. The text
   preview budget can be disabled for diagnostics with
@@ -2465,10 +2797,66 @@ Deployable scope:
   `160KB`), non-current/historical completed assistant/reasoning receipts are
   reduced to bounded previews using
   `CODEX_MOBILE_THREAD_DETAIL_PROGRESSIVE_COMPLETED_TEXT_CHARS` (default `8KB`
-  per item). Resting responses protect the latest completed turn. Items carry
-  `mobileFirstPaintTextBudget`; the response records before/after first-paint
-  byte counts, scope, skipped-latest count, and completed-text counters in
-  `mobileDetailResponseBudget`.
+  per item). Under active first-paint pressure this preview rule can include the
+  protected latest completed replay turn because the live active turn is the
+  current reading target; resting responses still protect the latest completed
+  turn. Items carry `mobileFirstPaintTextBudget`; the response records
+  before/after first-paint byte counts, scope, skipped-latest count, and
+  completed-text counters in `mobileDetailResponseBudget`.
+- The protected-byte attribution follow-up does not change budget policy. It
+  records bounded retained visible item counts/bytes by kind plus the largest
+  retained item kind/size in `mobileDetailResponseBudget`, Phase-B readback,
+  and decision evidence. This closes the evidence gap when
+  `progressiveActiveFirstPaintItemBudgetReason` is
+  `protected-visible-items` or `no-removable-visible-items`: the next slice can
+  target the dominant protected shape instead of weakening user/assistant/Usage
+  protection generically.
+- When that protected attribution identifies assistant rows, the next evidence
+  slice records retained assistant counts/bytes by turn state (`active`,
+  `completed`, `staleActive`, `other`). Completed/replay assistant pressure can
+  then be tightened through the completed replay assistant first-paint budget
+  without weakening the current active assistant progress budget.
+- Production readback after that attribution slice showed the protected active
+  first-paint over-ceiling payload was dominated by completed `userMessage`
+  items, not the current active input. The follow-up budget previews only
+  historical/completed user input under active first-paint byte pressure using
+  `mobileFirstPaintUserInputBudget` and
+  `CODEX_MOBILE_THREAD_DETAIL_PROGRESSIVE_COMPLETED_USER_TEXT_CHARS` (default
+  1024 chars). Later tightening makes that completed-user-input limit a shared
+  newest-first first-paint budget across retained historical inputs instead of
+  a per-row budget. Older completed inputs that exceed the shared budget retain
+  a short placeholder so API-visible user-message counts still line up with
+  browser-visible DOM rows; the placeholder includes a short stable token so
+  multiple exhausted historical inputs in one turn stay distinct under client
+  user-message shadowing/dedupe rules. It preserves active/current user input
+  and does not mutate the stored rollout/session data.
+- The next protected-payload slice handles completed `turnUsageSummary` rows
+  under the same active first-paint byte pressure. It preserves the Usage row
+  and the fields consumed by the UI, but drops repeated internal summary
+  metadata from the HTTP response with `mobileFirstPaintUsageBudget` and
+  `progressiveCompletedUsageBudgetApplied`. This keeps Usage visible while
+  avoiding a generic budget that would hide user input, active assistant
+  progress, images, or diagnostics. Production readback of the first version
+  showed the per-row evidence marker could offset the summary savings for small
+  Usage rows, so the follow-up makes that marker lightweight and skips Usage
+  compaction unless the row remains smaller after the marker is attached.
+  When task-card and user-input budgets leave only a small active first-paint
+  residual, the follow-up Usage pass can compact already-budgeted completed
+  Usage rows to summary-only fields: context percent, risk level, rollout size
+  and threshold state, plus `totalTokenUsage.totalTokens`. That pass is still
+  HTTP response shaping only, keeps the Usage row visible, and reports
+  `progressiveCompletedUsageSummaryOnly*` plus
+  `progressiveActiveFirstPaintBytesAfterUsageSummaryOnlyBudget` so Phase-B can
+  attribute the remaining byte pressure without touching user/assistant text or
+  `mobileVisibleItemKeys`.
+- A later HTTP evidence slice keeps the budget policy and v4 visible-key
+  contract unchanged but reduces ordinary first-paint detail bytes by emitting
+  compact `mobileDetailResponseBudget` evidence on normal `/api/threads/:id`
+  reads. The compact shape keeps the version, applied/progressive flags, key
+  omitted/truncated counters, first-paint byte counters, and bounded retained
+  item maps, while dropping zero/empty long-tail diagnostics. Phase-B,
+  browser-runtime, and API thread self-checks request `budget=full` so deploy
+  gates still validate the full response-budget contract.
 - A later summary-phase slice targets warm projection hits whose `summaryMs`
   dominates `totalMs` even though `threadReadMs=0`. Detail summary resolution
   now merges the existing display-summary cache for local summaries and skips
@@ -2515,7 +2903,7 @@ compatible warm list baseline.
 
 Deployable scope:
 
-- `adapters/thread-list-app-server-fetch-policy-service.js` now owns
+- `services/thread-list/thread-list-app-server-fetch-policy-service.js` now owns
   `planThreadListInitialFallbackAttempt()`, separating explicit
   `initial=warm-fallback`, ordinary default warm-cache early return, and
   ineligible filtered/cursor/archived paths.
@@ -2564,7 +2952,7 @@ Deployable scope:
   first-paint diagnostics can show `mobileInitialSource=fallback-baseline`,
   `mobileDeferredAppServer=true`, and
   `appServerDeferredReason=cold-fallback-initial`.
-- `adapters/thread-list-app-server-fetch-policy-service.js` owns the bounded
+- `services/thread-list/thread-list-app-server-fetch-policy-service.js` owns the bounded
   metadata that separates warm-cache and cold-baseline initial first paint.
 - Existing deferred client refresh behavior in `public/app.js` remains the
   authority follow-up; search, workspace-filtered, archived, cursor, and
@@ -2929,7 +3317,12 @@ Scope:
   and turn start/completion timestamps, plus thread-list repeat lost rows and
   updated-at downgrades.
 - Combined summaries deduplicate identical issue metadata so repeated samples
-  do not inflate the blocking/warning counts.
+  do not inflate the blocking/warning counts. They now retain bounded
+  occurrence counts and produce metadata-only `diagnosticCandidates` for H1/H2
+  findings and repeated H3 warnings, so Home AI can create an Owner-gated
+  remediation case without private thread text or screenshots. This remains
+  diagnostic evidence only; self-check ingestion must not directly dispatch a
+  repair card.
 
 Required validation:
 
@@ -2937,6 +3330,1846 @@ Required validation:
 - Live self-check with `--sample-threads 5 --repeat 5` should return no H1/H2
   blockers before using the result as a deployment gate.
 - Full local checks and central deploy/readback when this module is released.
+
+### 2026-06-29 Runtime Self-Check Gate v2
+
+This module turns the production self-check loop into an explicit deployment
+and periodic-health gate instead of leaving callers to infer policy from raw
+child-check `ok` flags.
+
+Root cause addressed: after slow-path diagnostics were added, repeated
+`thread_session_slow_path` samples could look like H2 failures even when the
+thread eventually loaded correctly. At the same time, user-visible projection,
+image, duplicate-message, timestamp, submit, and list/detail failures must
+still block deploys and remain reportable.
+
+Scope:
+
+- `services/runtime/runtime-self-check-gate-service.js` owns the deterministic policy:
+  H1/H2 user-visible runtime regressions and self-check execution failures are
+  deploy-blocking/reportable; slow-success thread-session timing findings are
+  observe-only; lower severity nonblocking findings are advisory.
+- `scripts/codex-mobile-runtime-self-check-loop.js` emits the service result as
+  `gate` with `deployPass`, reportable/observe-only/advisory counts, and
+  bounded issue-code groups. `--gate-mode deploy` labels deploy-time runs while
+  periodic loop output stays metadata-only JSONL.
+- The gate does not dispatch repair cards and does not alter thread projection
+  or browser rendering. Home AI diagnostic intake and Owner approval still own
+  remediation-card creation.
+
+Required validation:
+
+- Focused tests for the gate service and runtime loop policy.
+- Full local checks and `git diff --check`.
+- Private deployment through the Home AI Deploy lane, followed by production
+  runtime self-check with `--gate-mode deploy`.
+
+### 2026-06-29 Runtime Self-Check Scheduler Readback v2
+
+This module makes the existing macOS 10-minute runtime self-check LaunchAgent
+auditable from source-controlled tooling. It does not create a new renderer
+fallback, change projection authority, or dispatch repair cards.
+
+Root cause addressed: the periodic checker existed as a local LaunchAgent, but
+operators still had to inspect `launchctl` and raw JSONL tails manually to know
+whether the checker was loaded, fresh, gate-bearing, and healthy. That made
+post-deploy closure depend on ad hoc shell evidence instead of a repeatable
+bounded readback.
+
+Scope:
+
+- `services/runtime/runtime-self-check-launchagent-service.js` owns pure readback
+  policy for plist shape, launchctl state, latest JSONL gate event, freshness,
+  and health classification.
+- `scripts/codex-mobile-runtime-self-check-launchagent-readback.js` reads the
+  user LaunchAgent, current launchctl state, and latest runtime self-check JSONL
+  without mutating launchd. It reports only metadata-safe state, counts, path
+  hashes, and issue codes.
+- Missing/unloaded/stale/no-gate/unhealthy periodic self-check state is
+  blocking. A checker that is actively running after a previous nonzero exit is
+  advisory, so natural recovery is not marked failed before the current run can
+  write a fresh result.
+
+### 2026-07-01 Runtime Job Scheduler Boundary
+
+This module starts the production-stability stage of the large server split by
+moving runtime self-check scheduling policy out of `adapters/` and into
+`services/runtime/`. It is intentionally behavior-preserving for the existing
+self-check loop: periodic checks still default to API/client-event jobs only,
+deploy checks still default to the real-browser job, and the adapter import
+path remains a compatibility wrapper.
+
+Root cause addressed: runtime diagnostics, browser checks, and foreground user
+requests previously shared resident CPU without a single source-controlled job
+declaration that exposed whether a job is periodic-safe, browser-backed,
+preemptible, and bounded. That made CPU incidents harder to reason about and
+kept the first stability boundary too close to the script/adapter layer.
+
+Scope:
+
+- `services/runtime/runtime-job-scheduler-service.js` owns the unified job
+  registry for self-check jobs (`api-thread`, `browser-runtime`,
+  `client-events`) and prewarm jobs (`thread-list-fallback-prewarm`,
+  `thread-detail-active-window-prewarm`), plus manual diagnostic jobs such as
+  Phase-B readback and visual smoke checks, and backfill jobs such as detail
+  history, full detail, Usage refresh, active overlay window, and rollout
+  completion backfills.
+- Each plan entry declares periodic allowance, max concurrency, time budget,
+  CPU budget class, real-browser allowance, and user-request preemption,
+  while preserving legacy aliases such as `timeoutMs`, `usesBrowser`, and
+  `preemptibleByForeground` for existing scripts.
+- Manual diagnostic declarations are non-periodic and not deploy-default jobs;
+  visual smoke declarations are the only manual diagnostics that allow real
+  browser work.
+- Backfill declarations are also non-periodic and not deploy-default jobs, and
+  do not allow real browser work.
+- `adapters/runtime-job-scheduler-service.js` is a compatibility export only.
+
+Required validation:
+
+- Focused runtime scheduler tests proving the declaration fields and legacy
+  aliases remain stable.
+- Runtime self-check loop tests because production readback consumes
+  `runtimeJobs` metadata.
+- Full local checks before central private deploy.
+
+### 2026-07-01 Runtime Self-Check Service Boundary
+
+This module completes the next production-stability boundary after scheduler
+declarations by moving runtime self-check analysis and gate ownership into
+`services/runtime/`. It is behavior-preserving: scripts keep the same CLI
+contract, output shape, privacy boundary, and compatibility adapter paths.
+
+Root cause addressed: diagnostic analyzers, deployment gates, LaunchAgent
+readback, and live client-event stall classification still looked like adapter
+owned behavior even after runtime job budgeting moved into `services/runtime/`.
+That kept the production-stability boundary split across two ownership layers
+and made it easier for future work to add diagnostic policy back into adapter
+glue.
+
+Scope:
+
+- `services/runtime/browser-runtime-self-check-service.js` owns browser DOM /
+  route / console / interaction sample classification for browser self-checks.
+- `services/runtime/client-event-stall-self-check-service.js` owns bounded
+  live client-event stall log parsing and issue classification.
+- `services/runtime/runtime-self-check-gate-service.js` owns deploy/periodic
+  gate classification from child-check results.
+- `services/runtime/runtime-self-check-launchagent-service.js` owns macOS
+  periodic LaunchAgent readback policy.
+- Matching `adapters/*self-check*` paths are compatibility exports only.
+- Runtime self-check scripts import the canonical service paths directly while
+  tests prove adapter exports still point at the same functions.
+
+Required validation:
+
+- Focused runtime self-check service, loop, LaunchAgent, browser-runtime, and
+  client-event tests.
+- Full local checks before central private deploy.
+- Private deployment and production readback proving script imports, adapter
+  compatibility exports, public config, status/thread probes, and deploy-mode
+  self-check still pass.
+
+### 2026-07-01 Thread-List Prewarm Scheduler Boundary
+
+This module applies the production-stability budget contract to the first
+non-self-check background task: startup thread-list fallback prewarm. The
+prewarm still runs through the existing thread-list adapter and does not change
+fallback authority, cache keys, app-server fetch policy, or frontend refresh
+behavior.
+
+Scope:
+
+- `services/thread-list/thread-list-prewarm-scheduler-service.js` exposes the
+  runtime-registry budget declaration for the `thread-list-fallback-prewarm`
+  job.
+- Public prewarm status and schedule results expose the same scheduler fields
+  used by runtime self-checks: periodic allowance, max concurrency, time
+  budget, CPU budget class, real-browser allowance, and user-request
+  preemption.
+- The job is startup-only and non-periodic, allows no real browser work, and
+  is marked user-request-preemptible because the existing run gate defers while
+  active detail requests are in flight.
+
+Required validation:
+
+- Focused thread-list prewarm tests proving schedule/status outputs carry only
+  metadata-safe job policy.
+- Phase-B readback tests because production readback consumes
+  `threadListFallbackPrewarm`.
+- Full local checks before central private deploy.
+
+### 2026-07-01 Thread-Detail Active-Window Prewarm Scheduler Boundary
+
+This module applies the same production-stability budget contract to the
+active detail history-window prewarm job. The prewarm still runs through the
+existing active-window adapter and does not change projection lookup,
+partial-seed semantics, active-overlay proof gates, app-server
+`thread/turns/list` behavior, or foreground detail-read authority.
+
+Scope:
+
+- `services/thread-detail/thread-detail-active-window-prewarm-scheduler-service.js`
+  exposes the runtime-registry budget declaration for the
+  `thread-detail-active-window-prewarm` job.
+- Active-window `prewarmNow`, `schedule`, and `status` outputs expose the same
+  scheduler fields used by runtime self-checks and thread-list prewarm:
+  periodic allowance, max concurrency, time budget, CPU budget class,
+  real-browser allowance, and user-request preemption.
+- The job is event-triggered and non-periodic, allows no real browser work, and
+  is marked user-request-preemptible because it is background cache seeding
+  that must not compete with foreground detail requests.
+
+Required validation:
+
+- Focused active-window prewarm tests proving prewarm/schedule/status outputs
+  carry only metadata-safe job policy.
+- Thread-detail route/read orchestration tests because production detail reads
+  consume the same active-window cache and proof gate.
+- Full local checks and central private deploy/readback when this module is
+  released.
+
+### 2026-06-28 Initial Active Window Overlay Module
+
+Production readback after the recent rich-replay repair showed a remaining
+slow-success active-detail path:
+
+- `turns-list-initial` discovered an active turn that the summary had missed;
+- correctness protection promoted the request to active full read;
+- the detail response was correct, but one sample still spent several seconds
+  in `thread/read`.
+
+This module keeps the same fail-closed projection authority but removes that
+unnecessary full-read step when evidence is already sufficient. If the initial
+recent `turns/list` response contains an active turn, read orchestration upgrades
+that window into a `turns-list-active-overlay-window` proof input and asks the
+server-owned active-overlay provider for live overlay evidence. Only a complete
+`services/thread-detail/thread-detail-active-window-overlay-policy-service.js` proof may return
+`projection-active-overlay`; missing, stale, mismatched, non-authoritative, or
+incomplete evidence still falls through to full `thread/read`.
+
+The module does not add a client fallback, does not relax the active-overlay
+proof gate, and does not persist raw live turn payloads. It moves an already
+available bounded initial window into the existing server-side overlay proof
+path.
+
+Required validation:
+
+- focused `thread-detail-read-orchestration-service` coverage proving a
+  summary-missed active initial window can return `projection-active-overlay`
+  without full `thread/read`;
+- focused projection/active-overlay related suite;
+- full local checks and central deploy/readback when released;
+- Phase-B readback should no longer classify the same sample as
+  `activeFullReadReason=initial-window-active-turn` with
+  `activeOverlayGate=needs_repair` when overlay evidence is complete.
+
+### 2026-06-28 Active Overlay Completeness Gate Module
+
+User reports after the initial active-window overlay repair showed a separate
+correctness risk: an in-progress turn could display only the latest few
+assistant items when the process had only a notification-tail live snapshot.
+That snapshot was useful evidence that a turn was active, but it was not proof
+that the active turn body was complete.
+
+Deployable scope:
+
+- `services/thread-detail/thread-detail-active-overlay-provider-service.js` now labels live projection
+  snapshots with bounded completeness metadata. Notification-shell snapshots,
+  explicit partial snapshots, and snapshots without signature evidence are
+  treated as partial.
+- `services/thread-detail/thread-detail-active-window-overlay-policy-service.js` requires complete active
+  overlay evidence. A `projection-live` overlay must be `full`, `backfilled`, or
+  `preserved`; partial live evidence fails closed with
+  `active-overlay-turn-incomplete`.
+- `thread-detail-read-orchestration-service` may still use the pre-initial
+  active-overlay hot path, but a live overlay must first be backfilled from an
+  active-window projection and re-proven as `backfilled` before this preprobe is
+  allowed to return a detail response. If backfill is unavailable, the route
+  continues to the initial active-window/full-read path rather than returning a
+  stale or truncated live snapshot.
+- Current ownership: `services/thread-detail/thread-detail-read-orchestration-service.js`
+  owns this read-ordering and active-overlay proof gate; the adapter path is
+  only a compatibility export.
+- `thread-detail-projection-service` allows stale full active-window history to
+  be used only when the live overlay already proves active status, preserving
+  the server-side proof boundary without promoting notification shells.
+
+Required validation:
+
+- focused active-overlay provider, policy, projection, and read-orchestration
+  tests proving notification-shell snapshots are rejected, full snapshots can
+  use the fast path, and partial snapshots are backfilled before return;
+- broader detail/projection/self-check suite;
+- `npm test`, `npm run check`, `npm run check:macos`, and `git diff --check`;
+- central plugin deployment and production self-check/readback proving active
+  raw/detail assistant counts match and `projection-active-overlay` responses
+  report `activeOverlayCompleteness=full` or `backfilled`, not `partial`.
+
+### 2026-06-29 Public Config Hot-Path Module
+
+After the active-overlay fresh-window rule reduced large active-thread detail
+reads to low hundreds or tens of milliseconds, repeated production probes still
+showed `/api/public-config` taking hundreds of milliseconds and occasionally
+close to one second. This request is part of startup, refresh, embedded recovery,
+and self-check entry, so it can make thread entry feel unstable even when
+thread-detail itself is warm.
+
+Root cause boundary:
+
+- `public-config` was assembling profile/quota state and then calling MCP
+  registration with another profile enumeration in the same request;
+- `codex-profile-service.profiles()` scans account-scoped rollout quota tails for
+  each known profile, which is correct profile evidence but unnecessary to repeat
+  for every immediate startup/refresh probe when active quota evidence has not
+  changed;
+- build identity fields (`buildId`, `clientBuildId`, `shellCacheName`) must still
+  be read live on every request and cannot be cached at Node startup.
+
+Deployable scope:
+
+- add `adapters/public-config-runtime-cache-service.js` as the owner of the
+  short process-local profile/quota snapshot cache;
+- key the cache by bounded active quota evidence and expire it quickly;
+- invalidate it when profile switching writes a new active profile;
+- reuse the single profile state for both public response assembly and
+  `syncKnownCodexMobileMcpToolsets()` so one request does not scan profiles
+  twice;
+- keep profile-list and profile-switch routes strongly current.
+
+Required validation:
+
+- focused service tests for cache hit, active-quota signature miss, TTL expiry,
+  and explicit invalidation;
+- existing profile/restart/new-thread route assertions proving quota refresh and
+  MCP toolset registration remain wired;
+- production readback comparing repeated `/api/public-config` wall time before
+  and after deploy, plus Phase-B/runtime self-check gate for regression.
+
+### 2026-06-30 Active Thread Frontend Consistency Hotfix
+
+User-reported regressions exposed three browser-owned consistency failures while
+the server/API projection remained authoritative:
+
+- visible items could remain in an older DOM order after a local patch reused
+  existing nodes, even when `/api/threads/:id?mode=recent&budget=full` returned
+  the correct order;
+- entering an active thread could first paint a previously cached in-progress
+  receipt for several seconds before the fresh detail response arrived;
+- a sent user message could be durable and visible while the local failed
+  optimistic Composer echo still showed a retry state.
+
+Scope:
+
+- `public/thread-detail-dom-patch.js` now moves reused/patched visible-item DOM
+  nodes into the next projection order and validates post-apply item order.
+- `public/thread-detail-state.js` rejects active/running loaded detail as
+  reusable `cached-current` first-paint state, returning
+  `active-detail-cache-not-reusable` so active threads use a loading/fresh detail
+  path instead of stale exit-state detail.
+- `public/app.js` hides failed optimistic user-message echoes once a durable
+  matching user message is visible and clears `mobileSendError` when the durable
+  row wins a same-message merge.
+- Static shell/cache identity advances to `codex-mobile-shell-v599`.
+
+Required validation:
+
+- focused DOM patch, thread-detail state, conversation render, and static build
+  guard tests;
+- broader render/self-check tests covering browser runtime expectations;
+- full local checks, `git diff --check`, CodeGraph sync/status, then central
+  private deploy/readback before considering the user-visible regressions
+  closed.
+
+### 2026-06-30 Active Thread Loading Preview Follow-Up
+
+The v599 production deploy proved the ordering and failed-retry markers were
+present, but the deploy-mode browser gate still failed on
+`browser_dom_sparse_after_nonempty` and `browser_pending_user_message_disappeared`.
+The API child remained clean and client-event stalls were zero, so the residual
+was a browser first-paint state transition rather than server projection order
+or a main-thread stall.
+
+Root cause: v599 correctly stopped treating active cached detail as reusable
+completed-state detail, but the fallback path first painted an empty loading
+shell while waiting for `/api/threads/:id?mode=recent`. On slow active-thread
+detail reads or repeated browser self-check switches, that empty shell looked
+like a real content disappearance and made thread entry feel slow.
+
+Scope:
+
+- `public/thread-detail-state.js` builds an active loading preview from cached
+  active detail. Completed history and current user input remain visible, while
+  stale active assistant/plan/Usage/operation progress is stripped before fresh
+  detail replaces the preview.
+- `public/app.js` uses that preview for thread-open first paint when
+  `planThreadOpenCacheReuse()` returns `shouldUseActivePreview`.
+- `services/runtime/browser-runtime-self-check-service.js` treats nonempty loading
+  previews as transitional for latest-turn downgrade and pending-message
+  disappearance checks, while still blocking empty/sparse settled samples and
+  real completed/resting downgrades.
+- Static shell/cache identity advances to `codex-mobile-shell-v600`.
+
+Required validation:
+
+- focused active-preview and browser-runtime self-check tests;
+- runtime deploy gate after private deploy must be clean of H1/H2
+  `browser_dom_sparse_after_nonempty`,
+  `browser_pending_user_message_disappeared`, and latest-turn downgrade codes;
+- loading-speed readback should record thread-list/detail timings and browser
+  sample duration, because the user reported all threads feeling slow after the
+  update.
+
+### 2026-06-30 Default List App-Server Window Regression
+
+The v600 deploy closed the v599 browser H2 regressions, but loading-speed
+readback and follow-up production sampling showed default thread-list first
+paint could still start a 500-row deferred app-server refresh even for small
+visible list requests. Detail responses measured tens to hundreds of
+milliseconds internally, while the caller waited much longer after list
+refresh, which points to resource contention around the deferred authoritative
+list refresh rather than a thread-detail projection miss.
+
+Root cause: `thread-list-app-server-fetch-policy-service` had drifted from the
+documented v535 contract. Search lists used bounded overfetch
+`max(limit * 2, 80)` capped at 500, but ordinary default lists still used a
+500-row floor. For default mobile list entries such as `limit=8`, this produced
+an overfetch factor above 60 and could compete with the immediate thread-detail
+open that follows a user tap.
+
+Scope:
+
+- default no-search/no-workspace/non-archived app-server follow-up windows use
+  bounded overfetch `max(limit * 2, 80)` capped at 500;
+- cursor pages remain exact;
+- workspace-filtered and archived paths keep the legacy 500-row preservation
+  window because filtering is not app-server-authoritative there.
+
+Required validation:
+
+- focused thread-list app-server fetch-policy tests;
+- production readback should show small default list requests reporting
+  `appServerRequestLimit=80` for `limit<=40` instead of 500;
+- repeated list-then-detail timing samples should show reduced caller elapsed
+  waits and no new runtime gate H1/H2 blockers.
+
+### 2026-07-01 All Workspaces Duplicate Workspace Read Model
+
+After creating the new Music plugin workspace, All Workspaces still showed the
+old `/Users/example/Documents/Music` row even though the active workspace was now
+`/Users/hermes-dev/HermesMobileDev/plugins/music`. The old row was still in the
+mobile workspace registry and had no recent threads, so the visible workspace
+root merge surfaced a stale empty duplicate without a product reason to keep it
+prominent.
+
+Root cause: `/api/workspaces` built rows inline in `server.js` from visible
+roots, registry entries, active roots, and recent thread counts. The merge had
+no read-model policy for inactive same-label empty duplicates after a workspace
+was recreated or moved.
+
+Scope:
+
+- `services/thread-list/thread-list-workspace-merge-service.js` owns All
+  Workspaces row assembly and duplicate suppression;
+- `server.js` injects visible roots, registry entries, active roots, recent
+  threads, and path normalization into that service;
+- inactive same-label workspaces with `recentThreadCount=0` are hidden only when
+  an active same-label workspace exists;
+- inactive duplicates with recent thread history remain visible, and registry
+  state is not deleted or rewritten.
+
+Required validation:
+
+- focused workspace merge, workspace registry, visibility, and thread-list route
+  tests;
+- local read-model probe against the current registry/global-state should return
+  only the active Music workspace;
+- production `/api/workspaces` readback after private deploy should show the new
+  Music path and omit the inactive empty old Music row.
+
+### 2026-07-01 Runtime Workspace Bootstrap Boundary
+
+The next Server split slice moves workspace bootstrap/runtime profile sync out
+of `server.js` into `services/runtime/runtime-workspace-bootstrap-service.js`.
+This is a cohesive runtime boundary rather than a line-count-only extraction:
+
+- registered workspace trust sync is service-owned;
+- continuation workspace registration now calls the service before visible-root
+  validation;
+- per-Codex-Home `codex_mobile` MCP registration and known-profile fan-out are
+  service-owned;
+- active-profile restart option shaping for shared-chain restart is
+  service-owned;
+- `server.js` keeps only service construction and dependency injection into
+  core/API routes and continuation startup.
+
+This keeps the ongoing Server target moving toward a thin entrypoint while
+preserving existing route order and runtime behavior. Validation should stay
+focused on the new service, core/profile switch route assertions, continuation
+workspace registration, and compatibility adapter coverage unless this slice is
+batched with a larger deploy.
+
+### 2026-07-01 Runtime Thread Event Notification Boundary
+
+The next Server split slice moves thread event notification runtime behavior
+from the compatibility adapter path into
+`services/runtime/thread-event-notification-service.js`.
+
+Scope:
+
+- SSE client filtering, heartbeat cleanup, and compact notification broadcast
+  are service-owned;
+- local active-thread status updates and `thread/status/changed` payload
+  synthesis are service-owned;
+- projection notification fan-out and active-window prewarm scheduling from
+  notifications/thread-list results are service-owned;
+- `server.js` imports the canonical runtime service and keeps only dependency
+  injection and route/event wiring;
+- `adapters/thread-event-notification-service.js` remains a compatibility
+  export only.
+- A follow-up server event facade moved the remaining lazy compatibility
+  wrappers for thread notifications and turn-event pipeline calls into
+  `services/runtime/server-event-runtime-boundary-service.js`, preserving
+  late-bound initialization while shrinking `server.js` composition glue.
+
+Validation should cover canonical/adapter syntax, runtime compatibility
+adapter parity, thread-list/message/task-card route source guards, and existing
+visibility/event route behavior. This is a behavior-preserving ownership move,
+so full `npm test` and deployment should wait until it is batched with enough
+additional Server progress unless a production symptom appears.
+
+### 2026-07-01 Server HTTP Runtime Body Parser Boundary
+
+The next thin-entrypoint cleanup moves request body parsing out of `server.js`
+and into `services/runtime/server-http-runtime-service.js`, which already owns
+HTTP helper policy.
+
+Scope:
+
+- bounded raw-body reads are service-owned;
+- bounded JSON body reads, empty-body normalization, invalid JSON errors, and
+  oversized body errors are service-owned;
+- `server.js` injects the JSON body byte limit through a getter and passes the
+  service functions into existing route modules unchanged;
+- route modules keep their existing `readBody`/`readRawBody` injection shape.
+
+Validation should cover the HTTP runtime service unit tests, runtime
+compatibility adapter parity, route tests that exercise body injection, and
+package syntax checks. This is behavior-preserving and should stay batched with
+the surrounding runtime-boundary work before full deployment.
+
+### 2026-07-01 Thread Runtime Settings Boundary
+
+The next Server runtime split moves inherited thread runtime settings out of
+`server.js` into `services/runtime/thread-runtime-settings-service.js`.
+
+Scope:
+
+- latest rollout `turn_context` scanning and process cache ownership are
+  service-owned;
+- state DB, app-server summary, and config-default fallback order is
+  service-owned;
+- model, reasoning effort, summary, verbosity, sandbox policy, permission
+  profile, and approval policy normalization is service-owned;
+- `runtimeContextCacheKey()` remains exposed by the service for rollout
+  backfill/enrichment callers that need stable cache-key compatibility;
+- `server.js` injects state readers, app-server summary lookup, runtime policy
+  helpers, model option lists, and cache budgets.
+
+Validation should cover the service unit test, source guards for inherited
+model/effort behavior, runtime compatibility adapter parity, thread-detail
+orchestration/prewarm callers, and task-card/message route callers that inherit
+thread runtime settings.
+
+### 2026-07-01 Thread Rollout Runtime Boundary
+
+The next Server runtime split moves rollout stat helpers and stale active-turn
+message preflight out of `server.js` into
+`services/runtime/thread-rollout-runtime-service.js`.
+
+Scope:
+
+- rollout path aliases, file stat metadata, warning-threshold classification,
+  and summary annotation are service-owned;
+- workspace `.agent-context` / `AGENTS.md` byte-size snapshots are service-owned;
+- existing route/service injections keep the same function names, so
+  thread-list, thread-detail, continuation, media, and message routes do not
+  change behavior;
+- stale active-turn preflight remains the message-submission guard, but the
+  app-server turns-list probe and stale-turn detector input shaping are now
+  covered by a focused runtime service test.
+
+Validation should cover the rollout runtime service unit test, compatibility
+adapter parity, active-turn message route source guard, thread-detail
+compaction/response-preparation callers, and package syntax checks. This slice
+is behavior-preserving and should remain batched with the surrounding
+runtime/server boundary work before full deployment.
+
+### 2026-07-01 Thread Detail State Bridge Boundary
+
+The next Server split moves the remaining thread-detail projection/read-model
+bridge helpers out of `server.js` into
+`services/thread-detail/thread-detail-state-bridge-service.js`.
+
+Scope:
+
+- local-active summary/result overlay access remains backed by
+  `services/thread-list/thread-summary-state-service.js`, but `server.js` no
+  longer owns the late-bound proxy functions;
+- detail response task-card, goal, and pending app-server request decoration is
+  service-owned;
+- stable hash helpers used by task-card/detail wiring are service-owned;
+- `server.js` keeps only construction and dependency injection for the bridge.
+
+Validation should cover the new state bridge unit test, thread-task-card route
+source guards, thread-detail runtime preparation callers, package syntax
+checks, and `git diff --check`. This is a server-thinning boundary slice and
+should be batched with adjacent Server progress before production deploy unless
+a production symptom requires faster release.
+
+### 2026-07-01 API Dispatch Route Group Boundary
+
+The next Server route split moves the remaining inline authenticated API route
+groups out of `server-routes/api-dispatch-route-service.js` into dedicated
+route modules.
+
+Scope:
+
+- workspace list/create/register routes are owned by
+  `server-routes/workspace-route-service.js`;
+- continuation job create/read routes are owned by
+  `server-routes/thread-continuation-route-service.js`;
+- ChatGPT Pro bridge/planner routes are owned by
+  `server-routes/chatgpt-pro-route-service.js`;
+- thread archive, goal, rename, and turns-list routes are owned by
+  `server-routes/thread-management-route-service.js`;
+- SSE `/api/events` setup and heartbeat cleanup is owned by
+  `server-routes/event-stream-route-service.js`;
+- `server-routes/api-dispatch-route-service.js` now keeps route ordering and
+  final 404 behavior only.
+
+Validation should cover direct route-service unit tests, adapter parity checks,
+the API dispatch thread-detail lifecycle test, package syntax checks, and
+`git diff --check`. This slice should remain batched with the preceding thread
+detail state bridge boundary before production deploy unless a production
+symptom requires faster release.
+
+### 2026-07-01 Server Route Composition Boundary
+
+The next thin-entrypoint slice moves top-level HTTP route composition out of
+`server.js` into `server-routes/server-route-composition-service.js`.
+
+Scope:
+
+- constructs `server-routes/core-api-route-service.js`;
+- constructs `server-routes/api-dispatch-route-service.js` and injects the core
+  route service into it;
+- owns top-level request dispatch for `/api/events`, other `/api/*` routes, and
+  static asset serving;
+- owns bounded fallback JSON responses for route exceptions and client-error
+  socket handling.
+
+`server.js` now keeps dependency construction plus HTTP server
+startup/shutdown/process wiring. The service has an adapter compatibility export
+at `adapters/server-route-composition-service.js`. Validation should cover
+factory wiring, top-level dispatch behavior, error/client-error handling, source
+guard movement from `server.js` to the composition service, package syntax
+checks, and `git diff --check`.
+
+### 2026-07-01 Task-Card Runtime Composition Boundary
+
+The next task-card server split moves task-card runtime composition out of
+`server.js` into `services/task-cards/thread-task-card-runtime-service.js`.
+
+Scope:
+
+- constructs `services/task-cards/home-ai-autonomous-delivery-return-service.js`;
+- constructs `services/task-cards/task-card-runtime-policy-service.js`;
+- constructs `services/task-cards/thread-task-card-service.js`;
+- constructs `server-routes/thread-task-card-route-service.js`;
+- owns approved-card runtime injection wiring and terminal return-card event
+  forwarding into the Home AI delivery-loop client.
+
+The canonical store, runtime-policy, route, routing, and deploy-lane services
+remain the behavioral authorities. The new runtime composition service only
+owns their server-side wiring and delayed cross-service references. Validation
+should cover adapter parity, Home AI return-event wiring, approved-card runtime
+inheritance/deploy-lane no-approval behavior, existing route/service focused
+tests, package syntax checks, and `git diff --check`.
+
+### 2026-07-01 ChatGPT Pro Runtime Composition Boundary
+
+The next server-thinning slice moves ChatGPT Pro bridge/planner/MCP composition
+and bounded source-summary generation out of `server.js` into
+`services/runtime/chatgpt-pro-runtime-service.js`.
+
+Scope:
+
+- constructs `adapters/chatgpt-pro-bridge-service.js`;
+- constructs `adapters/chatgpt-pro-planner-service.js`;
+- constructs `adapters/chatgpt-pro-mcp-service.js`;
+- owns dedicated ChatGPT Pro bridge thread start/resume/turn-start runtime
+  wiring and the explicit full-access runtime override for that isolated
+  bridge path;
+- owns bounded source-thread summary text supplied to ChatGPT Pro generate
+  requests.
+
+The canonical bridge, planner, MCP, and route services remain the behavioral
+authorities. The new runtime composition service only owns their server-side
+wiring and late-bound server dependencies. Validation should cover adapter
+parity, source-summary generation, full-access bridge runtime application,
+MCP direct-task-card delegation wiring, existing ChatGPT Pro focused tests,
+package syntax checks, and `git diff --check`.
+
+### 2026-07-01 Media/Support Runtime Composition Boundary
+
+The next server-thinning slice moves media/static runtime composition and
+server support/app-maintenance wiring out of `server.js`.
+
+Scope:
+
+- `services/runtime/media-static-runtime-service.js` constructs the media-file,
+  generated-image-content, and static-file services, owns generated-image root
+  and file-preview media constants, and exposes the route-facing media/static
+  helpers as one bundle;
+- `services/runtime/server-support-runtime-service.js` owns shared bounded
+  runtime helpers and constructs `adapters/app-maintenance-service.js`;
+- `server.js` remains responsible for dependency injection and HTTP startup,
+  but no longer owns upload/static/generated-image composition, app-maintenance
+  construction, or local helper implementations.
+
+This completes the first-stage `server.js` target by bringing the entrypoint
+to `1999` lines while preserving behavior. Validation should cover adapter
+parity, media/static composition, upload/file-preview source guards,
+app-update/public PR/GitHub preview route guards, package syntax checks, and
+`git diff --check`.
+
+### 2026-07-01 Notification Runtime Composition Boundary
+
+The next server-thinning slice moves Web Push and completed-turn notification
+pipeline composition out of `server.js` into
+`services/runtime/notification-runtime-service.js`.
+
+Scope:
+
+- constructs `adapters/web-push-runtime-service.js`;
+- constructs `services/runtime/runtime-turn-event-pipeline-service.js`;
+- owns VAPID/subscription path injection, Web Push subagent classification
+  wiring, Hermes completed-turn notification delegation wiring, and the
+  turn-event pipeline's completed-turn notification dependency;
+- exposes route-facing `pushSubscriptionPublicStatus` and
+  `classifyWebPushThreadId` without requiring `server.js` to know the Web Push
+  service internals.
+
+The Web Push runtime service and turn-event pipeline remain the behavioral
+authorities. The new notification runtime service only owns their composition
+and late-bound dependency wiring. Validation should cover adapter parity,
+factory wiring, Web Push source guards, runtime-turn-event pipeline focused
+tests, package syntax checks, and `git diff --check`.
+
+### 2026-07-01 App JS Thread List And Tile Runtime Boundary
+
+The first large frontend-thinning slice moves two runtime-sized modules out of
+`public/app.js` while preserving the static shell contract as
+`codex-mobile-shell-v612`.
+
+Scope:
+
+- `public/thread-list-runtime.js` owns Workspace menu rendering, workspace token
+  usage/stats UI, selected-cwd filtering, `/api/threads` request/deferred
+  fallback execution, thread-list performance diagnostics, visible thread list
+  rendering, current-thread selection clearing/restoration, and Primary-shell
+  guard decisions.
+- `public/thread-tile-runtime.js` owns thread-tile layout application,
+  display-settings load/save orchestration, candidate pane id sync, pane slot
+  mutation effects, tile detail load queue/abort/drain execution, pane rendering
+  and local patching, operation dock/bubble rendering, pane scroll/bottom-button
+  behavior, shared Composer target runtime, and tile board render scheduling.
+- `public/app.js` keeps shared state, dependency injection, event wiring, real
+  network/DOM callbacks, and compatibility wrappers for existing callers.
+- `public/index.html`, `public/sw.js`, `public/app.js` page-shell preload
+  assets, and `services/runtime/server-runtime-utils.js` include both new
+  runtime files so shell hash/cache behavior stays explicit.
+
+Local line-count readback before deployment: `public/app.js` is `23754` lines,
+`public/thread-list-runtime.js` is `902` lines, and
+`public/thread-tile-runtime.js` is `1853` lines. Validation should cover syntax
+checks for the new runtimes and shell files, focused Thread List/Thread Tile UI
+tests, static shell/cache guards, `npm run --silent check`,
+`npm run --silent check:macos`, and `git diff --check`.
+
+### 2026-07-01 App JS Composer Runtime Boundary
+
+The next frontend-thinning slice moves the Composer/input runtime out of
+`public/app.js` while preserving the static shell contract as
+`codex-mobile-shell-v615`.
+
+Scope:
+
+- `public/composer-runtime.js` owns Composer height/IME behavior, message text
+  accessors, pending attachment add/remove/draft preparation, local optimistic
+  user-message construction, runtime model/effort/permission pickers, account
+  quota popup, unified `@` intent dialog, `/g` goal dialog submit/actions, `#`
+  task-card commands, existing-thread and new-thread send flows, attachment
+  picker button state, submit-button state, and active-turn interruption.
+- `public/app.js` keeps shared state, global event wiring, DOM/network callback
+  implementations, cross-runtime dependency injection, and compatibility
+  wrappers for existing callers.
+- `public/index.html`, `public/sw.js`, `public/app.js` page-shell preload
+  assets, and `services/runtime/server-runtime-utils.js` include the new
+  Composer runtime file so shell hash/cache behavior stays explicit.
+
+Local line-count readback before deployment: `public/app.js` is `22446` lines,
+`public/composer-runtime.js` is `2027` lines, `public/thread-list-runtime.js`
+is `902` lines, and `public/thread-tile-runtime.js` is `1853` lines. Validation
+should cover syntax checks for Composer runtime/static files, focused Composer
+and affected UI tests, static shell/cache guards, `npm run --silent check`,
+`npm run --silent check:macos`, and `git diff --check`.
+
+### 2026-07-01 App JS Thread Detail Runtime Boundary
+
+The next frontend-thinning slice moves the thread-detail visible-item and merge
+runtime out of `public/app.js` while preserving the static shell contract as
+`codex-mobile-shell-v616`.
+
+Scope:
+
+- `public/thread-detail-runtime.js` owns visible-item derivation, live-operation
+  dock item selection, visible-item signatures and budget helpers, input/image
+  signature normalization, item weight/order policy, assistant-receipt checks,
+  submitted-user optimistic echo cleanup, pending local user-message dedupe,
+  thread summary/detail cache-reuse helpers, and thread-detail merge wrapper
+  composition across `public/thread-detail-state.js`,
+  `public/thread-detail-v4-merge-state.js`, and
+  `public/thread-detail-merge-state.js`.
+- `public/app.js` keeps shared state, DOM/network callback implementations,
+  render dependencies, active-turn state accessors, diagnostics, and
+  compatibility wrappers for existing callers.
+- `public/index.html`, `public/sw.js`, `public/app.js` page-shell preload
+  assets, and `services/runtime/server-runtime-utils.js` include the new
+  thread-detail runtime file so shell hash/cache behavior stays explicit.
+
+Local line-count readback before deployment: `public/app.js` is `21802` lines,
+`public/thread-detail-runtime.js` is `1274` lines,
+`public/composer-runtime.js` is `2027` lines,
+`public/thread-list-runtime.js` is `902` lines, and
+`public/thread-tile-runtime.js` is `1853` lines. Validation should cover syntax
+checks for thread-detail runtime/static files, focused conversation/render/UI
+tests, static shell/cache guards, `npm run --silent check`,
+`npm run --silent check:macos`, `git diff --check`, and the deploy-time
+startup-only listener/browser gate.
+
+### 2026-07-01 App JS App Update Runtime Boundary
+
+The next frontend-thinning slice moves the app update, Public PR, restart, and
+PWA shell-refresh runtime out of `public/app.js` while preserving the static
+shell contract as `codex-mobile-shell-v617`.
+
+Scope:
+
+- `public/app-update-runtime.js` owns version/update panel rendering,
+  app-update status checks, Public release/PR status checks, Public PR
+  review-thread reuse prompts, shared restart confirmation, running-session
+  risk display, boot-ready and shell-loaded reporting, server build/config
+  comparison, PWA shell asset fetch/validation, cache and service-worker reset,
+  hard-refresh handling, reconnect refresh prompts, and periodic page-refresh
+  polling.
+- `public/app.js` keeps shared state, dependency injection, event wiring,
+  feature callbacks, and compatibility wrappers for existing callers.
+- `public/index.html`, `public/sw.js`, `public/app.js` page-shell preload
+  assets, and `services/runtime/server-runtime-utils.js` include the new
+  runtime file so shell hash/cache behavior stays explicit.
+
+Local line-count readback before deployment: `public/app.js` is `21011` lines,
+`public/app-update-runtime.js` is `1204` lines,
+`public/thread-detail-runtime.js` is `1274` lines,
+`public/composer-runtime.js` is `2027` lines,
+`public/thread-list-runtime.js` is `902` lines, and
+`public/thread-tile-runtime.js` is `1853` lines. Validation should cover syntax
+checks for the app-update runtime/static files, focused update/Public PR/restart
+and affected UI tests, static shell/cache guards, `npm run --silent check`,
+`npm run --silent check:macos`, `git diff --check`, and the deploy-time
+startup-only listener/browser gate.
+
+### 2026-07-01 App JS Side Chat Runtime Boundary
+
+The next frontend-thinning slice moves the Subagent panel, side-chat transcript,
+server-backed draft/candidate actions, and Subagent edge-swipe gesture runtime
+out of `public/app.js` while preserving the static shell contract as
+`codex-mobile-shell-v618`.
+
+Scope:
+
+- `public/side-chat-runtime.js` owns Subagent item/status classification,
+  side-panel HTML rendering, side-chat state normalization, side-chat
+  send/clear/draft/candidate queue/apply/cancel orchestration through injected
+  server-route callbacks, hidden-sidecar busy/error presentation, visual-harness
+  side-chat fixtures, and Subagent edge-swipe gesture policy.
+- `public/app.js` keeps shared state, dependency injection, thread lifecycle
+  integration, compatibility wrappers for existing callers, and DOM event
+  wiring.
+- `public/index.html`, `public/sw.js`, `public/app.js` page-shell preload
+  assets, and `services/runtime/server-runtime-utils.js` include the new
+  runtime file so shell hash/cache behavior stays explicit.
+
+Local line-count readback before deployment: `public/app.js` is `20233` lines,
+`public/side-chat-runtime.js` is `1278` lines,
+`public/app-update-runtime.js` is `1204` lines,
+`public/thread-detail-runtime.js` is `1274` lines,
+`public/composer-runtime.js` is `2027` lines,
+`public/thread-list-runtime.js` is `902` lines, and
+`public/thread-tile-runtime.js` is `1853` lines. Validation should cover syntax
+checks for the side-chat runtime/static files, focused side-chat/Subagent/mobile
+UI tests, static shell/cache guards, `npm run --silent check`,
+`npm run --silent check:macos`, `git diff --check`, and the deploy-time
+startup-only listener/browser gate.
+
+### 2026-07-01 App JS Media Preview Runtime Boundary
+
+The next frontend-thinning slice moves media rendering, rich-preview hydration,
+and file/image preview behavior out of `public/app.js` while preserving the
+static shell contract as `codex-mobile-shell-v620`.
+
+Scope:
+
+- `public/media-preview-runtime.js` owns input image and upload-summary
+  rendering, injected task-card user-message collapse, markdown-with-attachment
+  rendering, command-output markdown table previews, GitHub link preview
+  hydration, Mermaid rendering and preview controls, file-preview and
+  image-preview gestures, imageView/generated-image/protected-image rendering,
+  protected image auth recovery, and visible failed-image scanning.
+- `public/app.js` keeps shared state, render-context facts, dependency
+  injection, DOM event wiring, and compatibility wrappers for existing callers.
+- `public/index.html`, `public/sw.js`, `public/app.js` page-shell preload
+  assets, and `services/runtime/server-runtime-utils.js` include the new
+  runtime file so shell hash/cache behavior stays explicit.
+
+Local line-count readback before deployment: `public/app.js` is `18826` lines,
+`public/media-preview-runtime.js` is `2416` lines,
+`public/side-chat-runtime.js` is `1278` lines,
+`public/app-update-runtime.js` is `1204` lines,
+`public/thread-detail-runtime.js` is `1274` lines,
+`public/composer-runtime.js` is `2027` lines,
+`public/thread-list-runtime.js` is `902` lines, and
+`public/thread-tile-runtime.js` is `1853` lines. Validation should cover syntax
+checks for the media-preview runtime/static files, focused media/render/GitHub/
+Mermaid/mobile shell tests, static shell/cache guards, `npm run --silent check`,
+`npm run --silent check:macos`, `git diff --check`, and the deploy-time
+startup-only listener/browser gate.
+
+### 2026-07-01 App JS Complete Runtime Shell Boundary
+
+The complete frontend-thinning pass moves the remaining business/render/state
+domains out of `public/app.js` and makes it a pure shell entrypoint while
+preserving the static shell contract as `codex-mobile-shell-v621`.
+
+Scope:
+
+- `public/app.js` is now an 11-line entrypoint that validates runtime wiring,
+  initializes all frontend runtime factories, and starts the app shell with
+  startup recovery.
+- `public/app-bootstrap.js` owns startup-critical globals, persistent state
+  initialization, shell constants, storage bootstrap helpers, `PAGE_SHELL_ASSETS`,
+  and lazy app-update runtime construction.
+- New runtime modules own the former large app domains:
+  `settings-runtime.js`, `modal-runtime.js`, `navigation-runtime.js`,
+  `api-client-runtime.js`, `notification-ui-runtime.js`,
+  `pane-layout-runtime.js`, `task-card-runtime.js`,
+  `conversation-render-runtime.js`, `event-stream-runtime.js`,
+  `composer-bridge-runtime.js`, `runtime-wiring-runtime.js`, and
+  `app-shell-runtime.js`.
+- `public/index.html`, `public/sw.js`, `public/app-bootstrap.js`, and
+  `services/runtime/server-runtime-utils.js` include the full v621 shell asset
+  list so cache/readback/build-id behavior remains explicit.
+- `scripts/codex-mobile-browser-runtime-self-check.js` now reads
+  `/app-bootstrap.js` for the client build marker because `/app.js` is no longer
+  the asset that owns `CLIENT_BUILD_ID`.
+
+Local line-count readback before deployment:
+
+- `public/app.js`: `11`
+- `public/app-bootstrap.js`: `971`
+- `public/app-shell-runtime.js`: `811`
+- `public/settings-runtime.js`: `2234`
+- `public/modal-runtime.js`: `298`
+- `public/navigation-runtime.js`: `1895`
+- `public/api-client-runtime.js`: `1126`
+- `public/notification-ui-runtime.js`: `1247`
+- `public/pane-layout-runtime.js`: `4971`
+- `public/task-card-runtime.js`: `1371`
+- `public/conversation-render-runtime.js`: `1599`
+- `public/event-stream-runtime.js`: `1495`
+- `public/composer-bridge-runtime.js`: `789`
+- `public/runtime-wiring-runtime.js`: `336`
+
+Validation completed locally:
+
+- `node --check public/app.js public/*runtime.js
+  scripts/codex-mobile-browser-runtime-self-check.js
+  test/frontend-source-helper.js`
+- `npm test -- --test-reporter=spec`: `1889` pass
+- `npm run --silent check`
+- `npm run --silent check:macos`
+- `git diff --check -- ':!.agent-context'`
+- Local source listener startup-only browser gate on `127.0.0.1:8897`:
+  `ok=true`, `deployPass=true`, `issueCount=0`, `blockingIssueCount=0`
+- Local full browser-runtime UX sample against the active Codex Mobile thread:
+  `ok=true`, `issueCount=0`, `blockingIssueCount=0`
+
+### 2026-07-02 Vite Frontend Asset-Graph Stage 1
+
+The first Vite migration step adds a build-time asset graph without changing
+the production runtime loading contract. Production still loads the existing
+ordered `<script>` files and `window.Codex...Runtime.create...Runtime`
+factories directly; Vite now provides a verifiable manifest and emitted shell
+asset set for the next migration step.
+
+Scope:
+
+- Added `vite.config.mjs` with `dist/frontend-shell` output and the
+  `codex-mobile-shell-asset-graph` plugin.
+- Added `frontend/vite-shell-entry.js` as the minimal Vite entry marker.
+- Added `scripts/frontend-shell-asset-graph.mjs` to read and compare
+  `public/index.html`, `public/sw.js`, `public/app-bootstrap.js`, and
+  `services/runtime/server-runtime-utils.js`.
+- Added `scripts/verify-vite-shell-manifest.mjs` so `npm run build:frontend`
+  runs Vite and then verifies the generated shell manifest against current
+  source.
+- Added focused tests proving the current ordered shell graph is valid and
+  that a missing service-worker script fails closed.
+- Fixed a real hash-coverage drift found by the new graph:
+  `thread-status-hints.js` was loaded by `index.html` and cached by `sw.js`,
+  but was not included in `server-runtime-utils.js` build-id hashing.
+
+This is intentionally not the full ESM migration. The next Vite step should
+make service-worker and server build-id ownership read from the generated
+manifest instead of maintaining parallel hand-written lists.
+
+### 2026-07-02 Vite Shell Manifest Ownership
+
+The second Vite migration step makes the frontend shell asset manifest the
+single source for shell cache ownership while preserving the current ordered
+script loading contract.
+
+Scope:
+
+- Added `scripts/generate-frontend-shell-manifest.mjs` to derive
+  `public/shell-asset-manifest.json` and `public/shell-asset-manifest.js` from
+  `public/index.html`, package version, manifest links, and PWA icons.
+- Advanced the static shell contract to `codex-mobile-shell-v622` /
+  `0.1.11|codex-mobile-shell-v622`.
+- `public/index.html` loads `/shell-asset-manifest.js` before other runtime
+  scripts, exposing `CODEX_MOBILE_SHELL_MANIFEST`.
+- `public/sw.js` now reads its cache name and pre-cache asset list from the
+  generated manifest instead of keeping a hand-maintained `STATIC_ASSETS`
+  array.
+- `public/app-bootstrap.js` now reads `CLIENT_BUILD_ID` and
+  `PAGE_SHELL_ASSETS` from the generated manifest instead of keeping a
+  hand-maintained page-shell list.
+- `services/runtime/server-runtime-utils.js` now reads
+  `public/shell-asset-manifest.json` for `shellCacheName` and `hashAssets`
+  before computing `/api/public-config` build metadata.
+- `scripts/frontend-shell-asset-graph.mjs` now validates manifest freshness,
+  script order, and manifest consumer markers rather than parsing three
+  independent asset lists.
+
+This step removes the highest-risk Vite migration drift point: adding a new
+frontend runtime asset no longer requires manually syncing index, service
+worker cache, page refresh preparation, and server build-hash ownership.
+
+### 2026-07-02 Vite Entry Topology Stage 3
+
+The third Vite migration step keeps production on the ordered classic-script
+shell, but makes the next startup/deferred bundle boundaries explicit build
+metadata.
+
+Scope:
+
+- Advanced the static shell contract to `codex-mobile-shell-v623` /
+  `0.1.11|codex-mobile-shell-v623`.
+- `scripts/generate-frontend-shell-manifest.mjs` now emits `entryGroups`
+  covering every ordered shell script exactly once.
+- The entry groups separate manifest bootstrap, startup prerequisites, feature
+  runtimes, bootstrap state, shell services, and the app-entry shell
+  (`runtime-wiring-runtime.js`, `app-shell-runtime.js`, `app.js`).
+- Startup-critical groups explicitly include `app-bootstrap.js`,
+  `runtime-wiring-runtime.js`, `app-shell-runtime.js`, and `app.js`.
+- `frontend/vite-shell-entry.mjs` now exposes the entry topology and dynamically
+  imports `frontend/vite-deferred-entry-topology.mjs`, giving Vite a real
+  deferred topology chunk to validate before production switches to bundled
+  runtime chunks.
+- `scripts/frontend-shell-asset-graph.mjs` and
+  `scripts/verify-vite-shell-manifest.mjs` fail closed if the generated entry
+  groups drift from the ordered shell scripts or if the Vite deferred topology
+  chunk disappears.
+
+This stage intentionally does not execute bundled business runtime code in
+production. It turns the future critical/deferred bundle split into a tested
+build contract first, so the later ESM/chunk switch can be made against a
+stable startup boundary.
+
+### 2026-07-02 Vite Shell Artifact Contract Stage 4
+
+The fourth Vite migration step still leaves production on the ordered
+classic-script shell, but makes the Vite build output itself a first-class
+release candidate contract.
+
+Scope:
+
+- `scripts/frontend-shell-asset-graph.mjs` now writes a `viteBuild` section
+  into `dist/frontend-shell/codex-mobile-shell-manifest.json`.
+- The `viteBuild` contract records `productionExecution:
+  "classic-script-fallback"` so build-chain work cannot silently switch runtime
+  semantics.
+- The contract records the Vite shell entry chunk, the deferred topology chunk,
+  copied classic shell assets, output files, and validation issues.
+- `scripts/verify-vite-shell-manifest.mjs` now verifies the Vite build contract
+  against Vite's `.vite/manifest.json`, including the shell entry file,
+  deferred entry file, output files, and manifest output.
+- `test/vite-shell-asset-graph.test.js` covers the contract shape with a fake
+  Rollup bundle so the artifact boundary remains testable without requiring a
+  full build inside unit tests.
+
+This stage gives deploy/readback a stable artifact-level marker
+(`vite-shell-artifact-contract-v1`) before any production request path serves
+or executes Vite-built runtime chunks.
+
+### 2026-07-02 Vite Shell Public Artifact Stage 5
+
+The fifth Vite migration step publishes a minimal, guarded Vite preview
+artifact into the production static tree while keeping the default runtime on
+the ordered classic-script shell.
+
+Scope:
+
+- `scripts/publish-vite-shell-artifact.mjs` copies only the Vite shell manifest,
+  shell entry chunk, and deferred topology chunk from `dist/frontend-shell/` to
+  `public/vite-shell/`, then generates an explicit `preview.html` module host.
+- `public/vite-shell/vite-shell-readback.json` records bounded hashes, sizes,
+  `stage: "vite-shell-preview-html-v1"`,
+  `sourceBuildStage: "vite-shell-artifact-contract-v1"`, and
+  `productionExecution: "classic-script-fallback"`.
+- `services/runtime/vite-shell-artifact-service.js` owns authorized production
+  readback through `/api/vite-shell-artifact`. It compares the preview artifact
+  with the current public shell manifest, verifies that `preview.html` loads the
+  published Vite entry as a module, and fails closed with bounded issue codes
+  when files, hashes, sizes, HTML markers, or build-stage markers drift.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  opens `/vite-shell/preview.html` in the same isolated-Chrome harness used by
+  the normal browser runtime checks. It proves the preview module entry ran,
+  the entry topology global is present, and the deferred topology chunk loaded.
+- The production `/` path, service-worker precache, and classic script order do
+  not change in this stage. The Vite chunks are serveable static artifacts for
+  readback and future cutover testing only.
+
+The next generated-shell slice moves the production `index.html` script list
+under the same build-chain owner without changing runtime semantics.
+
+Scope:
+
+- `scripts/generate-frontend-shell-manifest.mjs` owns the canonical classic
+  runtime script order through the entry-group definitions.
+- `public/index.html` contains a bounded `CODEX_MOBILE_SHELL_SCRIPTS` generated
+  block. `generate:frontend-manifest` rewrites only that block and leaves the
+  rest of the page shell intact.
+- `generate:frontend-manifest --check` now fails when the generated index
+  script block, shell manifest JSON, or shell manifest JS drift from the
+  canonical graph.
+- The default production shell remains classic `<script src=...>` execution.
+  This slice removes another hand-maintained asset list before any ESM/default
+  shell cutover.
+
+This stage gives deploy validation a real production artifact path without
+making Vite-built chunks startup-critical.
+
+The follow-up artifact-readback guard keeps the preview artifact and default
+classic shell in the same build-chain contract:
+
+- `/api/vite-shell-artifact` now reads the published
+  `public/vite-shell/codex-mobile-shell-manifest.json` and compares its
+  `indexScriptAssets`, service-worker assets, page-shell assets, hash assets,
+  and entry groups with the current `public/shell-asset-manifest.json`.
+- The readback also requires `vite-shell-readback.json` to list exactly the
+  bounded published files required by the preview artifact: built shell
+  manifest, Vite entry chunk, deferred topology chunk, and `preview.html`.
+- Drift fails closed with bounded issue codes such as
+  `vite_shell_artifact_manifest_topology_mismatch` and
+  `vite_shell_artifact_file_list_mismatch`; the production `/` path remains
+  classic-script fallback.
+- `scripts/codex-mobile-runtime-self-check-loop.js` now includes a scheduler-owned
+  `browser-vite-preview` deploy job. The existing startup gate can stay
+  startup-only for the classic shell while the same gate also runs the Vite
+  preview browser smoke as a separate child check, so artifact execution drift
+  blocks deployment through the normal runtime gate rather than relying on a
+  manual post-deploy probe.
+
+The next compatibility-manifest slice advances the static shell contract to
+`codex-mobile-shell-v624` / `0.1.11|codex-mobile-shell-v624` and adds a
+generated classic global-export contract:
+
+- `scripts/generate-frontend-shell-manifest.mjs` derives
+  `classicGlobalExports` from the actual ordered classic script sources by
+  finding `Codex*` globals assigned to `root`, `window`, or `globalThis`.
+- `scripts/frontend-shell-asset-graph.mjs` and
+  `scripts/verify-vite-shell-manifest.mjs` fail closed when the generated
+  global-export contract drifts from the current shell graph.
+- `frontend/vite-shell-entry.mjs` exposes
+  `__CODEX_MOBILE_VITE_CLASSIC_COMPATIBILITY__` in the preview module path so
+  the Vite artifact proves it still knows the classic runtime surface it must
+  preserve before any future ESM cutover.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  now treats missing compatibility metadata or missing startup globals
+  (`CodexRuntimeWiringRuntime`, `CodexAppShellRuntime`) as H2 deploy-gate
+  failures.
+- `/api/vite-shell-artifact` compares `classicGlobalExports` in addition to
+  script, service-worker, page-shell, hash, and entry-group topology.
+
+This still does not switch production `/` to Vite execution. It makes the
+classic-script compatibility surface explicit and testable first.
+
+The follow-up startup-asset preview slice keeps the same classic production
+default, but makes the Vite preview exercise the startup-critical asset graph:
+
+- `scripts/publish-vite-shell-artifact.mjs` now derives
+  `startupCriticalAssets` from startup-critical `entryGroups` and emits
+  explicit `<link rel="preload" as="script">` tags in
+  `public/vite-shell/preview.html`.
+- `public/vite-shell/vite-shell-readback.json` records
+  `startupCriticalAssets` and their count so production readback can prove the
+  preview host is tied to the current startup graph.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  now compares preview preload order with the module topology and fetches those
+  startup assets inside the browser probe. Missing preload coverage or failed
+  asset fetches are H2 deploy-gate failures.
+- `/api/vite-shell-artifact` exposes `startupCriticalAssetCount` as bounded
+  metadata alongside the existing entry-group and classic global-export counts.
+
+This advances the split-entry migration without running the app through Vite
+yet: startup-critical assets are now build-owned, published, preloaded, fetched,
+and deploy-gated before they become startup-critical Vite chunks.
+
+The next entry-group chunk slice keeps production `/` on the classic script
+shell while requiring Vite to emit one bounded module chunk per generated shell
+entry group:
+
+- `vite.config.mjs` now adds virtual entry inputs for every
+  `entryGroups[*].id`; the build fails if any generated group lacks a Vite
+  chunk.
+- `scripts/frontend-shell-asset-graph.mjs` owns the virtual entry-group module
+  source and records `viteEntryGroupChunks` in the artifact contract. Each
+  chunk preserves bounded group metadata in
+  `__CODEX_MOBILE_VITE_ENTRY_GROUP_CHUNKS__`, so the output is not a
+  tree-shaken empty file.
+- `scripts/publish-vite-shell-artifact.mjs` publishes those group chunks under
+  `public/vite-shell/`, lists them in `vite-shell-readback.json`, and adds
+  explicit `modulepreload` tags to `preview.html`.
+- `/api/vite-shell-artifact` checks that the published readback and preview
+  HTML include all current entry-group chunks and reports
+  `entryGroupChunkCount` as bounded metadata.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  fetches the entry-group modulepreload assets in the browser probe; missing
+  preload coverage or failed fetches are H2 deploy-gate failures.
+
+This is still a guarded asset contract, not an ESM runtime cutover. The
+business runtime still executes through the generated classic shell; Vite now
+has verifiable per-group chunk artifacts for the later module execution switch.
+
+The follow-up entry-group execution preview slice keeps the same production
+default but makes the guarded Vite preview execute those per-group chunks:
+
+- `scripts/publish-vite-shell-artifact.mjs` now emits a bounded inline module
+  script in `preview.html` that dynamically imports every published
+  entry-group chunk and records only count/status metadata in
+  `__CODEX_MOBILE_VITE_ENTRY_GROUP_IMPORT_STATUS__`.
+- The entry-group chunks populate
+  `__CODEX_MOBILE_VITE_ENTRY_GROUP_CHUNKS__` with bounded group metadata; the
+  preview browser probe compares those registry ids with the generated
+  `entryGroups` topology.
+- `services/runtime/vite-shell-artifact-service.js` fails closed when a preview
+  artifact lists entry-group chunks but omits the import script.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  now treats missing execution/registry coverage as an H2 deploy-gate issue
+  (`vite_preview_entry_group_chunk_not_executed`).
+
+This still does not execute the default app through Vite. It proves the Vite
+preview path can load and run every generated group chunk before any future
+cutover asks those chunks to own real startup behavior.
+
+The follow-up entry-group classic coverage slice keeps the default shell on
+classic execution while strengthening each generated group chunk contract:
+
+- `scripts/frontend-shell-asset-graph.mjs` annotates every Vite entry-group
+  chunk with its bounded classic assets, asset count, classic global-export
+  asset count, and classic global-export count.
+- `scripts/publish-vite-shell-artifact.mjs` preserves those counts in
+  `public/vite-shell/vite-shell-readback.json`.
+- `services/runtime/vite-shell-artifact-service.js` compares the readback
+  coverage counts with the current classic shell manifest and fails closed with
+  `vite_shell_artifact_entry_group_coverage_mismatch` when a chunk no longer
+  matches its group.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  compares the runtime `__CODEX_MOBILE_VITE_ENTRY_GROUP_CHUNKS__` registry
+  against the generated entry topology/classic compatibility map and reports
+  `vite_preview_entry_group_classic_coverage_mismatch` as a deploy-gate H2.
+
+This still avoids a full ESM business-runtime rewrite. It proves the Vite
+preview chunks carry the same bounded compatibility surface as the classic
+script graph before those chunks can become startup/runtime owners.
+
+The follow-up entry-group loader ownership slice removes the remaining preview
+HTML import ownership:
+
+- `scripts/frontend-shell-asset-graph.mjs` now exposes a generated virtual
+  entry-group loader module. It maps the generated entry-group ids to dynamic
+  imports for their Vite chunks and records bounded import status on
+  `__CODEX_MOBILE_VITE_ENTRY_GROUP_IMPORT_STATUS__`.
+- `frontend/vite-shell-entry.mjs` consumes that loader, starts the import
+  promise, and marks
+  `__CODEX_MOBILE_VITE_ENTRY_GROUP_IMPORT_OWNER__ = "vite-shell-entry"`.
+- `scripts/publish-vite-shell-artifact.mjs` no longer emits a second inline
+  module script to import entry-group chunks. The guarded preview host only
+  records the expected owner and modulepreload coverage.
+- `services/runtime/vite-shell-artifact-service.js` and
+  `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  fail closed when the readback/DOM/runtime owner is not `vite-shell-entry`.
+
+This keeps the default app on the classic script shell while shifting preview
+execution responsibility from generated HTML into the Vite entry module, which
+is the boundary needed before any later startup/runtime ownership cutover.
+
+The follow-up shell-entry dynamic import graph slice turns that ownership into
+an explicit build/readback/browser contract:
+
+- `scripts/frontend-shell-asset-graph.mjs` now separates the deferred topology
+  chunk from entry-group chunks instead of treating every dynamic entry as
+  deferred. It records `entryDynamicImportGraph` with actual files, expected
+  files, missing/extra files, one deferred chunk, and one chunk per generated
+  entry group.
+- `frontend/vite-shell-entry.mjs` exposes
+  `__CODEX_MOBILE_VITE_ENTRY_DYNAMIC_IMPORT_GRAPH__` so the preview runtime can
+  prove the shell entry owns both the deferred topology import and every
+  generated entry-group import.
+- `scripts/verify-vite-shell-manifest.mjs`,
+  `scripts/publish-vite-shell-artifact.mjs`, and
+  `services/runtime/vite-shell-artifact-service.js` carry the graph through
+  build output, public preview readback, and `/api/vite-shell-artifact`.
+  Missing/extra imports or count drift fail closed before deployment.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  reports `vite_preview_entry_dynamic_import_graph_mismatch` when the browser
+  preview cannot prove the same dynamic import graph.
+
+Production `/` still runs the generated classic script shell. The Vite preview
+now proves that `frontend/vite-shell-entry.mjs` is the sole owner of the
+dynamic import graph before any later cutover makes Vite chunks startup
+critical.
+
+The follow-up classic script-block contract slice makes the remaining default
+shell drift observable:
+
+- `scripts/frontend-shell-asset-graph.mjs` records a bounded
+  `classicFallback.scriptBlock` contract with the generated script-block
+  source marker, script count, first/last script, and SHA-256 hash.
+- `scripts/verify-vite-shell-manifest.mjs` fails closed if the built Vite
+  manifest's script-block contract no longer matches the generated classic
+  script list.
+- `scripts/publish-vite-shell-artifact.mjs` carries that contract into
+  `public/vite-shell/vite-shell-readback.json` and exposes bounded count/hash
+  markers on `public/vite-shell/preview.html`.
+- `services/runtime/vite-shell-artifact-service.js` reads the actual
+  `public/index.html` generated script block and fails closed on marker,
+  count, boundary, hash, or manifest-order drift.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  treats missing preview script-block count/hash markers as a deploy-gate H2.
+
+Production `/` is still the classic script shell. This step binds the Vite
+preview artifact to that default shell's exact generated script block, so a
+future Vite cutover cannot silently drift away from the currently executing
+classic runtime order.
+
+The follow-up entry-group classic asset hash contract slice strengthens the
+per-group preview chunks from count coverage to file-level parity:
+
+- `scripts/frontend-shell-asset-graph.mjs` now records bounded
+  `classicAssetRecords` for each generated entry-group chunk: public path,
+  source path, byte count, and SHA-256 hash for every classic script owned by
+  that group.
+- The virtual entry-group modules publish those same hash/byte records in
+  `__CODEX_MOBILE_VITE_ENTRY_GROUP_CHUNKS__`, so the browser preview can prove
+  it executed chunk metadata that matches the generated classic shell graph.
+- `scripts/publish-vite-shell-artifact.mjs` carries the records into
+  `public/vite-shell/vite-shell-readback.json` and reports the aggregate
+  `classicAssetHashes` count.
+- `services/runtime/vite-shell-artifact-service.js` compares readback records
+  against the published artifact manifest and the actual `public/` classic
+  script files, failing closed on hash, byte-size, or missing-file drift.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  requires each executed group chunk to report the expected classic asset hash
+  count and nonzero bytes before deploy gates pass.
+
+Production `/` remains classic-script fallback. This slice removes the last
+"same count, different file" ambiguity from the Vite preview contract before
+any later step promotes generated entry-group chunks toward real runtime
+ownership.
+
+The follow-up startup factory compatibility contract slice keeps production
+`/` on classic-script fallback while binding the Vite preview to the actual
+startup-time `window.Codex*` dependencies:
+
+- `scripts/generate-frontend-shell-manifest.mjs` advances the public shell to
+  `codex-mobile-shell-v625` and derives `startupGlobalContracts` from
+  `app-bootstrap.js`, `runtime-wiring-runtime.js`, and `app.js` startup guards
+  and factory calls. The generated contract currently records `30` required
+  startup globals and fails closed if any required global cannot be mapped back
+  to a classic exported asset and shell entry group.
+- Classic global export detection now recognizes `globalScope.Codex*` exports
+  as well as `root/window/globalThis`, so
+  `CodexClientRenderStabilityGuard` is part of the canonical compatibility
+  graph instead of being an untracked startup dependency.
+- `scripts/frontend-shell-asset-graph.mjs` carries the startup contract into the
+  Vite build manifest as `startupCompatibility`, including the owning asset,
+  group id, SHA-256 hash, and byte count for each startup global. The build
+  fails if the global-to-asset mapping, hash evidence, or count drifts.
+- `frontend/vite-shell-entry.mjs` exposes the generated startup-global contract
+  through `__CODEX_MOBILE_VITE_CLASSIC_COMPATIBILITY__`; it no longer has a
+  hand-written two-global startup list.
+- `scripts/publish-vite-shell-artifact.mjs` publishes startup-global contract
+  records and a preview marker count into `public/vite-shell/preview.html` and
+  `vite-shell-readback.json`.
+- `services/runtime/vite-shell-artifact-service.js` validates the readback
+  startup contract against the published artifact manifest and current
+  `public/` files, including classic export ownership, file hashes, and byte
+  sizes.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  now treats startup-global contract mismatch as an H2 preview failure. It
+  checks that preview runtime compatibility metadata, entry-group registry
+  payloads, and preview HTML marker counts agree.
+
+This still does not switch the app to Vite execution. It closes another
+cutover prerequisite: a Vite preview can no longer pass while missing a
+classic startup dependency that the current shell requires before first paint.
+
+The follow-up Vite app-preview startup path keeps production `/` on
+classic-script fallback while proving that the Vite shell entry can own an
+opt-in real app startup:
+
+- `scripts/publish-vite-shell-artifact.mjs` now publishes
+  `public/vite-shell/app-preview.html` from the current `public/index.html`
+  shell markup. It removes the generated classic script block from that host
+  and replaces it with one Vite module entry, while marking the page with
+  `data-codex-vite-app-preview="true"` and
+  `meta[name="codex-vite-app-preview"]`.
+- `frontend/vite-shell-entry.mjs` detects that app-preview marker and injects
+  the generated `indexScriptAssets` in canonical order. It records bounded
+  loader state on `__CODEX_MOBILE_VITE_APP_PREVIEW__` and exposes
+  `__CODEX_MOBILE_VITE_APP_PREVIEW_PROMISE__` for browser gates.
+- `services/runtime/vite-shell-artifact-service.js` validates that the
+  published readback includes the app-preview host, that the host uses the
+  expected Vite entry module, that the app-preview marker/meta/script block are
+  present, and that the original classic shell script block is absent.
+- `services/runtime/runtime-job-scheduler-service.js` adds
+  `browser-vite-app-preview` as a deploy-default real-browser job using the
+  same skip/browser-mode policy as the existing Vite preview gate.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-app-preview-only`
+  opens `/vite-shell/app-preview.html`, waits for the Vite-owned loader, checks
+  injected classic script count/order against the shell manifest, verifies
+  client build/cache markers, confirms app visibility, checks startup runtimes,
+  and fails closed with `vite_app_preview_*` issue codes on loader, marker,
+  runtime, boot-recovery, or browser-console/exception regressions.
+
+This still does not make Vite the default production shell. It adds the first
+deploy-gated path where a Vite module entry owns actual app startup, while the
+default `/` path remains the generated classic script shell.
+
+The follow-up Vite app-preview full UX gate extends that opt-in startup proof
+into a read-only runtime proof:
+
+- `scripts/codex-mobile-browser-runtime-self-check.js
+  --vite-app-preview-runtime` opens `/vite-shell/app-preview.html`, validates
+  the same Vite-owned app-preview loader/startup contract, then runs the
+  standard browser-runtime thread/list sampling against the real app DOM.
+- Composer submit exercise flags are intentionally ignored for this mode; the
+  app-preview gate is a pre-cutover read-only comparison path, not a mutation
+  path.
+- `scripts/codex-mobile-runtime-self-check-loop.js` keeps
+  `--browser-startup-only` lightweight for deploy listener startup gates, but
+  non-startup deploy/full runs now execute `browser-vite-app-preview` through
+  the full app-preview runtime mode with the same sampling controls as the
+  classic browser-runtime job.
+
+This still leaves production `/` on classic-script fallback. It raises the
+cutover bar by requiring the Vite-owned app-preview host to pass the same
+user-visible duplicate-message, thread-detail, and thread-list DOM checks as
+the default shell before default execution can move.
+
+The next app-preview prerequisite covers the Hermes embedded-plugin startup
+path, where the shell bootstrap must not accidentally inherit the standalone
+browser access key or miss the plugin embed markers:
+
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-app-preview-only
+  --vite-app-preview-embed` opens
+  `/vite-shell/app-preview.html?embed=hermes`, waits for the same Vite-owned
+  classic-script loader, then verifies the bounded embed contract:
+  `embed-hermes` class present, plugin embed API ready,
+  `INITIAL_PLUGIN_EMBED.embedded === true`, and local key suppression active.
+- `services/runtime/runtime-job-scheduler-service.js` declares
+  `browser-vite-app-preview-embed` as a deploy-default real-browser job with
+  the same skip/browser-mode policy as the existing browser/Vite preview jobs.
+- `scripts/codex-mobile-runtime-self-check-loop.js` runs that embed job as a
+  startup-contract gate in deploy mode, while the ordinary app-preview job
+  continues to own either lightweight startup proof or full read-only UX
+  sampling depending on `--browser-startup-only`.
+
+This still leaves production `/` on classic-script fallback. It prevents a
+future default-Vite cutover from passing while the Hermes embed entry path has
+lost its bootstrap ownership or leaked standalone local-key state into plugin
+mode.
+
+The next app-preview prerequisite extends the same boundary from static embed
+startup into the real Hermes launch/session contract:
+
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-app-preview-only
+  --vite-app-preview-launch-session` creates a short-lived Hermes plugin
+  launch through `/api/v1/hermes/plugin/launch`, rewrites only the host path to
+  `/vite-shell/app-preview.html`, then lets the browser exchange the one-time
+  token through the normal `/api/v1/hermes/plugin/session` frontend path.
+- The probe verifies bounded session invariants only: launch entry path was
+  returned, token/workspace parameters were present, the app-preview path was
+  preserved, launch token query params were scrubbed, `state.pluginLaunchSession`
+  cleared, `state.pluginSessionActive` became true, the active session key is
+  not the browser localStorage access key, plugin startup loading cleared, and
+  the app became visible.
+- `services/runtime/runtime-job-scheduler-service.js` declares
+  `browser-vite-app-preview-session` as a deploy-default real-browser job, and
+  `scripts/codex-mobile-runtime-self-check-loop.js` runs it separately from the
+  static embed startup job so deploy readback can distinguish an embed marker
+  regression from a launch/session exchange regression.
+
+This still leaves production `/` on classic-script fallback. It closes the
+cutover gap where the Vite app-preview host could boot in `?embed=hermes` mode
+but fail the actual one-time launch URL, session-cookie, and URL-scrub path
+that Hermes Mobile uses in production.
+
+The following shell-refresh guard keeps the Vite migration focused on build
+pipeline readiness instead of business-runtime rewrites:
+
+- The ordinary `--startup-only` browser gate now also proves the current shell
+  exposes the page-refresh recovery contract before any default Vite cutover:
+  hard-refresh control, page-refresh prompt node, `refreshPageForNewBuild`,
+  `clearAllShellCaches`, `resetPageShellServiceWorker`, service-worker
+  capability, and Cache API capability.
+- Missing shell-refresh capability is an H2
+  `browser_startup_shell_refresh_contract_missing` issue. This makes deploys
+  fail closed when the app could start but would not have a safe old-shell to
+  new-shell recovery path after a service-worker/cache mismatch.
+- The gate is intentionally attached to the existing startup browser job rather
+  than a separate Chrome job, so it increases coverage without adding another
+  deploy-time browser process.
+
+Production `/` still stays on classic-script fallback after this slice. The
+evidence target is narrower: prove the refresh/recovery path remains present
+while Vite owns more of the build and artifact graph.
+
+The next app-preview prerequisite binds the Vite-owned loader to an explicit
+classic script plan before any default shell cutover:
+
+- `scripts/frontend-shell-asset-graph.mjs` now records
+  `appPreviewClassicLoaderPlan` in the Vite build contract. The plan is the
+  ordered 51-script classic shell list with per-script index, group id,
+  startup-critical flag, source path, byte count, and SHA-256 hash.
+- `scripts/publish-vite-shell-artifact.mjs` publishes the same plan into
+  `vite-shell-readback.json` and embeds it as bounded JSON in
+  `/vite-shell/app-preview.html`. The app-preview host still contains only the
+  one Vite module entry; it does not restore the generated classic script
+  block.
+- `frontend/vite-shell-entry.mjs` requires that loader plan on app-preview
+  startup and injects classic scripts from the plan, not from an implicit
+  recomputation. The plan must be owned by `vite-shell-entry`, have complete
+  hashes, and match the shell manifest order before the real app is loaded.
+- `services/runtime/vite-shell-artifact-service.js` fails closed if the
+  readback plan drifts from the built Vite manifest, the generated classic
+  script block, or the actual current `public/` script hashes/byte sizes.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-app-preview-only`
+  now verifies the plan marker, owner, hash presence, script/hash counts,
+  shell-order match, injected-script match, and loaded-script match before
+  accepting app-preview startup.
+
+Production `/` remains the generated classic-script fallback. This slice
+removes an ambiguity in the cutover path: app-preview can no longer pass merely
+because 51 scripts eventually appeared; it must prove the scripts came from the
+same ordered, hashed loader plan that the Vite artifact readback validates.
+
+Current correction: the early dev-only zero-loader experiment was valid as a
+failure signal, but its conclusion has been superseded by the Vite-owned
+`/app-bootstrap.js` contract. The observed breakage was not the absence of
+classic script injection by itself; it was that Vite module scope isolated
+startup lexical state, leaving `window.loadThread()` unable to see the
+classic/runtime handles that `app-bootstrap.js` expected from the script-global
+environment. The current valid migration path is therefore stricter than
+"remove scripts from the loader": every excluded script must be owned either by
+the ESM compatibility contract or by an explicit Vite-owned startup contract.
+`/app-bootstrap.js` now has that contract: the asset graph marks it as
+Vite-owned, the Vite entry imports it before real app startup, the module
+exports the startup globals that the classic shell still expects, and the
+bootstrap code synchronizes classic runtime handles from `globalThis` before
+thread-detail or app-update startup calls run. With that boundary in place,
+dev app-preview can reach zero injected classic scripts while still preserving
+the production classic fallback. Default `/` remains classic until Owner
+approval for a production cutover, and real thread-detail browser gates remain
+the required closure evidence.
+
+The follow-up root-path rehearsal keeps the default shell unchanged while
+testing the exact URL surface that a later default Vite cutover would use:
+
+- `adapters/static-file-service.js` serves `public/vite-shell/app-preview.html`
+  for `/?codexViteShell=app-preview` only. A plain `/` request still serves
+  `public/index.html` and the generated classic script block.
+- `scripts/codex-mobile-browser-runtime-self-check.js
+  --vite-app-preview-only --vite-app-preview-root` opens that opt-in root URL,
+  verifies the same Vite-owned loader plan, and additionally requires the
+  browser path to remain `/` with the explicit opt-in query present.
+- `services/runtime/runtime-job-scheduler-service.js` declares
+  `browser-vite-app-preview-root` as a separate real-browser deploy job, and
+  `scripts/codex-mobile-runtime-self-check-loop.js` runs it independently of
+  the existing app-preview, embed, and launch/session jobs.
+
+This is still not the default cutover. It proves the Vite-owned startup path
+works under root-path routing, service-worker scope, and default navigation
+shape before `/` itself is changed.
+
+The next root-path full-UX gate keeps that same default-shell boundary but
+raises the evidence level from startup-only to real read-only runtime sampling:
+
+- `scripts/codex-mobile-runtime-self-check-loop.js` still keeps
+  `browser-vite-app-preview-root` lightweight during `--browser-startup-only`
+  deploy listener gates.
+- In non-startup deploy/full runs, the same root job now invokes
+  `scripts/codex-mobile-browser-runtime-self-check.js` with
+  `--vite-app-preview-runtime --vite-app-preview-root`, so it opens
+  `/?codexViteShell=app-preview`, validates the Vite-owned loader plan, and
+  runs the standard thread/list DOM sampling from the root-path Vite host.
+- Composer submit exercise options remain suppressed for this root Vite path;
+  the gate is a pre-cutover read-only comparison against the classic shell, not
+  a production mutation path.
+
+Production `/` still remains classic-script fallback after this slice. The
+cutover invariant is stronger: the exact future root URL surface must pass the
+same read-only browser-runtime UX checks as the opt-in app-preview host before
+default execution can move.
+
+The next cutover-control slice adds the explicit default-shell switch contract
+without changing production defaults:
+
+- `adapters/static-file-service.js` now normalizes a server-provided default
+  shell mode. Missing, classic, classic-script, classic-script-fallback, and
+  unknown values all serve `public/index.html`; only `app-preview` or
+  `vite-app-preview` route plain `/` to `public/vite-shell/app-preview.html`.
+- `services/runtime/media-static-runtime-service.js` wires
+  `CODEX_MOBILE_DEFAULT_SHELL` into that static-file boundary, so the eventual
+  cutover is controlled at server startup rather than by scattered route
+  checks.
+- The explicit `/?codexViteShell=app-preview` rehearsal route remains
+  available and takes precedence over the default mode. This preserves the
+  current root-path comparison path while making the future default `/`
+  behavior deterministic and fail-closed.
+
+Production `/` still remains classic until the server is intentionally started
+with the Vite app-preview default-shell mode and the same app-preview/root
+browser gates pass after deployment.
+
+The next default-root gate slice adds the browser proof needed for that future
+server-startup setting:
+
+- `scripts/codex-mobile-browser-runtime-self-check.js
+  --vite-app-preview-default-root` opens plain `/`, validates the Vite-owned
+  app-preview loader/startup contract, and fails closed if the root path still
+  depends on or carries the `codexViteShell=app-preview` opt-in query.
+- The same flag can be combined with `--vite-app-preview-runtime` to run the
+  full read-only thread/list UX sampling against default `/` after a server is
+  started with `CODEX_MOBILE_DEFAULT_SHELL=vite-app-preview`.
+- `scripts/codex-mobile-runtime-self-check-loop.js
+  --browser-vite-app-preview-default-root` wires that browser check as an
+  explicit extra job. It is intentionally not part of the ordinary deploy
+  default set while production launchd still starts in classic mode.
+- `/api/public-config` now reports bounded `defaultShellMode`, and the runtime
+  loop auto-adds the same default-root check when the normal browser-runtime
+  child observes `defaultShellMode=vite-app-preview`. Classic production stays
+  unchanged, but a future restart that intentionally moves plain `/` to Vite
+  will fail the deploy gate if the default-root app-preview contract is not
+  clean.
+
+This keeps current production health gates stable while providing a precise
+cutover verification command for an isolated default-shell server and,
+eventually, for the production restart that intentionally enables Vite on `/`.
+
+The next ESM compatibility slice keeps production `/` on classic-script
+fallback while proving the Vite shell entry can directly import a real pure
+runtime policy module:
+
+- `frontend/vite-shell-entry.mjs` now imports `public/build-refresh-policy.js`
+  through the Vite module graph and publishes
+  `__CODEX_MOBILE_VITE_ESM_COMPATIBILITY__` with bounded owner, module-count,
+  ready-count, and sample classification metadata.
+- The imported module remains the same classic/global-compatible
+  build-refresh policy used by the current shell. This is not a business
+  runtime rewrite; it is a controlled proof that a pure runtime policy can be
+  consumed from the Vite entry without breaking classic fallback semantics.
+- `scripts/codex-mobile-browser-runtime-self-check.js --vite-preview-only`
+  and the Vite app-preview checks now require the ESM compatibility proof and
+  report `vite_preview_esm_compatibility_missing` or
+  `vite_app_preview_esm_compatibility_missing` when the Vite entry no longer
+  exposes that imported-module readiness.
+
+Production `/` still remains classic-script fallback after this slice. The
+cutover invariant moves forward one step: Vite preview/app-preview must prove
+at least one real runtime policy import before default shell ownership can
+move from the generated classic script block to the module entry.
+
+The follow-up ESM compatibility slice moves that proof into the Vite asset
+graph instead of hard-coding a single import in the shell entry:
+
+- `scripts/frontend-shell-asset-graph.mjs` owns
+  `virtual:codex-mobile-esm-compatibility` and the bounded list of pure runtime
+  policy modules that the Vite entry must be able to import.
+- `frontend/vite-shell-entry.mjs` imports only that virtual compatibility
+  module, keeping ESM readiness tied to the build graph boundary rather than
+  to ad hoc entrypoint source checks.
+- The current compatibility set covers `public/build-refresh-policy.js` and
+  `public/thread-list-load-policy.js`. Browser Vite preview/app-preview gates
+  require both module ids to report ready before default shell ownership can
+  move forward.
+
+After the private default-shell cutover, the next ESM compatibility slice keeps
+plain `/` on the Vite app-preview shell and broadens the build-owned proof
+from two pure policies to six:
+
+- The Vite asset graph now also imports
+  `public/thread-list-stable-order.js`,
+  `public/thread-status-hints.js`,
+  `public/thread-detail-patch-plan.js`, and
+  `public/live-operation-dock-state.js`.
+- Each module has a behavior sample in the virtual compatibility module, so
+  readiness requires real deterministic output from list ordering, status
+  hinting, thread-detail patch planning, and live-operation dock state
+  planning rather than only export presence.
+- Browser Vite preview/app-preview/default-root gates now expect all six module
+  ids to report ready through `__CODEX_MOBILE_VITE_ESM_COMPATIBILITY__`.
+- The app-preview classic loader remains in place for the rest of the runtime
+  graph. This step reduces the remaining `window.Codex*` migration surface by
+  converting more side-effect-free policy modules into Vite-imported contracts
+  without changing business runtime ownership.
+
+The follow-up ESM artifact-contract slice moves that same six-module proof
+into server-side readback instead of relying only on browser runtime probes:
+
+- `scripts/frontend-shell-asset-graph.mjs` now records
+  `esmCompatibility` in the Vite build contract, including module id, source,
+  classic global name, expected functions, bytes, and SHA-256 hash for each
+  build-owned ESM compatibility module.
+- `scripts/publish-vite-shell-artifact.mjs` carries the contract into
+  `public/vite-shell/vite-shell-readback.json` and exposes the bounded module
+  count marker on `public/vite-shell/preview.html`.
+- `services/runtime/vite-shell-artifact-service.js` fails closed when the
+  readback contract drifts from the published artifact manifest or when any
+  referenced `public/` source file hash/size no longer matches the contract.
+
+The browser gates still own runtime `ready` and behavior-sample proof. The
+artifact gate now owns static provenance, so `/api/vite-shell-artifact` can
+detect ESM compatibility drift before a browser probe runs.
+
+The follow-up ESM-owned loader exclusion slice makes the default Vite
+app-preview shell stop reloading the six policy modules that are already owned
+by the Vite entry:
+
+- `virtual:codex-mobile-esm-compatibility` now publishes each imported
+  policy API back onto its existing `window.Codex*` global before app-preview
+  startup continues. Runtime `ready` requires both deterministic behavior
+  samples and successful classic-global publication.
+- The app-preview classic loader plan now records the full source script count
+  (`51`), the remaining loader script count (`45`), and six
+  `excludedEsmScripts` with module id, global name, source path, byte count,
+  and SHA-256. The loader validates that loader scripts plus exclusions cover
+  the exact shell script order before injecting any classic script.
+- `scripts/verify-vite-shell-manifest.mjs`,
+  `scripts/publish-vite-shell-artifact.mjs`, and
+  `services/runtime/vite-shell-artifact-service.js` all fail closed when the
+  exclusion records drift from the Vite build manifest, the current public
+  files, or the generated classic shell script block.
+- Browser Vite preview and app-preview probes now require ESM compatibility
+  globals to be published. App-preview probes accept the reduced injected
+  classic script count only when the excluded ESM globals are present and the
+  loader plan still covers the complete source shell graph.
+
+This is the first default-root Vite slice that removes scripts from the
+app-preview classic loader path. It does not change the canonical classic
+fallback script block; it narrows the remaining classic loader surface while
+keeping the same public API globals for downstream runtime modules.
+
+The next ESM compatibility slice extends the same asset-graph-owned proof to
+thread-detail merge ownership without changing the production default shell:
+
+- The Vite asset graph now imports `public/thread-detail-merge-state.js`,
+  samples `createThreadDetailMergePolicy()`, and verifies deterministic
+  turn-order plus local-visible-item preservation behavior.
+- The Vite entry publishes the imported API back to the existing
+  `window.CodexThreadDetailMergeState` global before app-preview startup, so
+  downstream classic runtimes keep the same public boundary.
+- The app-preview classic loader excludes seven ESM-owned scripts and injects
+  the remaining `44` classic scripts only after the Vite entry proves those
+  globals are ready.
+- Browser Vite preview and app-preview probes now require all seven ESM
+  compatibility modules to report ready and published.
+
+This still avoids a full thread-detail runtime rewrite. It moves one more pure
+policy boundary into the Vite build graph while preserving classic-script
+fallback on `/`.
+
+The next default-root rehearsal gate closes the remaining pre-cutover evidence
+gap without changing production launchd defaults:
+
+- `scripts/codex-mobile-vite-default-root-rehearsal.js` starts a temporary
+  local static/API rehearsal server that serves plain `/` as
+  `public/vite-shell/app-preview.html` with
+  `defaultShellMode=vite-app-preview`, `authRequired=false`, bounded
+  `/api/public-config`, `/api/status`, `/api/threads`, `/api/client-events`,
+  and `/api/events` support, then reuses
+  `scripts/codex-mobile-browser-runtime-self-check.js
+  --vite-app-preview-only --vite-app-preview-default-root`.
+- `services/runtime/runtime-job-scheduler-service.js` now declares
+  `browser-vite-app-preview-default-root-rehearsal` as a deploy-default
+  real-browser job, and `scripts/codex-mobile-runtime-self-check-loop.js` runs
+  that job whenever the currently tested production server still reports
+  `defaultShellMode=classic`.
+- When a future production restart intentionally reports
+  `defaultShellMode=vite-app-preview`, the loop skips the rehearsal and relies
+  on the existing actual `browser-vite-app-preview-default-root` production
+  check against the real plain `/` route.
+
+This makes the default-shell switch evidence repeatable in deploy gates instead
+of depending on ad hoc temporary-server readbacks. Production `/` still remains
+classic until the default-shell environment is intentionally changed.
+
+The follow-up default-root ownership slice makes the future production
+plain-`/` gate a first-class scheduler job instead of borrowing the root
+opt-in job's budget:
+
+- `services/runtime/runtime-job-scheduler-service.js` declares
+  `browser-vite-app-preview-default-root` separately from
+  `browser-vite-app-preview-root` and from the temporary rehearsal job. It is
+  disabled by default while production remains classic and becomes enabled only
+  for an explicit default-root run or after the browser runtime observes
+  `/api/public-config.defaultShellMode=vite-app-preview`.
+- `scripts/codex-mobile-runtime-self-check-loop.js` re-resolves the runtime job
+  plan after the normal browser-runtime child reports a Vite default shell, so
+  the real default-root production check gets its own timeout, skip reason, and
+  browser-budget metadata. In that Vite-default state, the temporary rehearsal
+  job is skipped because the actual server now owns the plain `/` proof.
+- Explicit `--browser-vite-app-preview-default-root` also disables the
+  rehearsal path, keeping cutover verification focused on the real target
+  server rather than a temporary local server.
+
+This does not change production defaults. It removes an ownership ambiguity in
+the deploy gate before any production restart intentionally moves plain `/` to
+the Vite app-preview shell.
 
 ## Release Rule
 

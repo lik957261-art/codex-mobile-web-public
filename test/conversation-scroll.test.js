@@ -436,3 +436,106 @@ test("full render scroll planning protects user scroll before bottom follow", ()
     reason: "not-following-bottom",
   });
 });
+
+test("reading viewport preservation follows explicit user reading signals", () => {
+  assert.deepEqual(conversationScroll.planReadingViewportPreservation({
+    nearBottom: true,
+    userReadingCurrentTurn: true,
+    recentScrollIntent: true,
+  }), {
+    preserve: false,
+    reason: "near-bottom",
+  });
+
+  assert.deepEqual(conversationScroll.planReadingViewportPreservation({
+    nearBottom: false,
+    userReadingCurrentTurn: true,
+  }), {
+    preserve: true,
+    reason: "user-reading-current-turn",
+  });
+
+  assert.deepEqual(conversationScroll.planReadingViewportPreservation({
+    nearBottom: false,
+    autoScrollHold: true,
+  }), {
+    preserve: true,
+    reason: "auto-scroll-hold",
+  });
+
+  assert.deepEqual(conversationScroll.planReadingViewportPreservation({
+    nearBottom: false,
+    userReadingAwayFromBottom: true,
+  }), {
+    preserve: true,
+    reason: "user-reading-away-from-bottom",
+  });
+
+  assert.deepEqual(conversationScroll.planReadingViewportPreservation({
+    nearBottom: false,
+    recentScrollIntent: true,
+  }), {
+    preserve: true,
+    reason: "recent-scroll-intent",
+  });
+
+  assert.deepEqual(conversationScroll.planReadingViewportPreservation({
+    nearBottom: false,
+  }), {
+    preserve: false,
+    reason: "no-user-scroll-protection",
+  });
+});
+
+test("automatic conversation refresh stops while the user is reading", () => {
+  assert.deepEqual(conversationScroll.planAutomaticConversationRefresh({
+    hasThread: true,
+    nearBottom: false,
+    recentScrollIntent: true,
+  }), {
+    allowRefresh: false,
+    cancelScheduled: true,
+    reason: "recent-scroll-intent",
+  });
+
+  assert.deepEqual(conversationScroll.planAutomaticConversationRefresh({
+    hasThread: true,
+    nearBottom: false,
+    userReadingCurrentTurn: true,
+  }), {
+    allowRefresh: false,
+    cancelScheduled: true,
+    reason: "user-reading-current-turn",
+  });
+
+  assert.deepEqual(conversationScroll.planAutomaticConversationRefresh({
+    hasThread: true,
+    nearBottom: false,
+    userReadingAwayFromBottom: true,
+  }), {
+    allowRefresh: false,
+    cancelScheduled: true,
+    reason: "user-reading-away-from-bottom",
+  });
+
+  assert.deepEqual(conversationScroll.planAutomaticConversationRefresh({
+    hasThread: true,
+    nearBottom: false,
+    recentScrollIntent: true,
+    userInitiated: true,
+  }), {
+    allowRefresh: true,
+    cancelScheduled: false,
+    reason: "user-initiated",
+  });
+
+  assert.deepEqual(conversationScroll.planAutomaticConversationRefresh({
+    hasThread: true,
+    nearBottom: true,
+    recentScrollIntent: true,
+  }), {
+    allowRefresh: true,
+    cancelScheduled: false,
+    reason: "near-bottom",
+  });
+});

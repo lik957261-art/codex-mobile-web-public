@@ -79,6 +79,8 @@
   function textLooksLikeWorkflowCard(value) {
     const body = String(value || "");
     return /^\s*\[Cross-thread task card/im.test(body)
+      || /^\s*\[Codex Mobile task-card continuation\]/im.test(body)
+      || /^\s*#\s*Continuation Bootstrap Index\b/im.test(body)
       || /^\s*Task card id:/im.test(body)
       || /^\s*Source workspace:/im.test(body)
       || /^\s*Source thread:/im.test(body)
@@ -503,11 +505,11 @@
     if (tileSurfaceRefresh) {
       return {
         tryTilePanePatch: true,
-        tryLocalPatch: false,
+        tryLocalPatch: true,
         updateMetadataOnTileMiss: false,
         fallbackAction: "full-render",
-        localPatchBlockedReason: "tile-surface-refresh",
-        reason: "tile-surface-refresh",
+        localPatchBlockedReason: "",
+        reason: "tile-surface-patch-chain",
       };
     }
     return {
@@ -526,11 +528,15 @@
     const threadTileConversationSurface = Boolean(input.threadTileConversationSurface);
     const tilePatchSurface = compactReason(input.tilePatchSurface || input.surface, "");
     const tilePatchSurfaceMatch = tilePatchSurface === "thread-tile-pane";
-    const tileSurfaceRefresh = Boolean(threadTileMode || threadTileConversationSurface || tilePatchSurfaceMatch);
+    const tilePatchSurfaceKnown = Boolean(tilePatchSurface);
+    const tileSurfaceRefresh = tilePatchSurfaceKnown
+      ? tilePatchSurfaceMatch
+      : Boolean(threadTileMode || threadTileConversationSurface);
     let reason = "single-thread-surface";
-    if (threadTileMode) reason = "tile-mode";
+    if (tilePatchSurfaceMatch) reason = "tile-patch-surface";
+    else if (tilePatchSurface === "single-thread") reason = "single-thread-surface";
+    else if (threadTileMode) reason = "tile-mode";
     else if (threadTileConversationSurface) reason = "tile-conversation-surface";
-    else if (tilePatchSurfaceMatch) reason = "tile-patch-surface";
     else if (!shouldRenderDetail) reason = "metadata-only-single-thread-surface";
     return {
       shouldProbeTilePatchSurface: shouldRenderDetail,
@@ -853,6 +859,10 @@
         ? compactReason(input.patchRejectReason, "unknown")
         : "",
       reportLocalPatchRejected,
+      localPatchAttempted,
+      tilePanePatchAttempted,
+      patchResult,
+      patchTimingSource,
       finalizeResult: {
         locallyPatchedDetail,
         tilePanePatchedDetail,
@@ -1166,6 +1176,8 @@
     const renderPlan = objectOrEmpty(input.renderPlan);
     const renderOutcome = objectOrEmpty(input.renderOutcome);
     const patchAttemptResult = objectOrEmpty(input.patchAttemptResult);
+    const patchSurfacePlan = objectOrEmpty(input.patchSurfacePlan);
+    const patchExecutionPlan = objectOrEmpty(input.patchExecutionPlan);
     const timings = objectOrEmpty(input.timings);
     return {
       source: compactReason(input.source, ""),
@@ -1184,9 +1196,16 @@
       refreshRenderAction: compactReason(renderOutcome.renderAction, ""),
       renderPlanReason: compactReason(renderPlan.reason, ""),
       patchRejectReason: compactReason(patchAttemptResult.patchRejectReason, ""),
+      patchResult: compactReason(patchAttemptResult.patchResult, ""),
+      patchTimingSource: compactReason(patchAttemptResult.patchTimingSource, ""),
+      patchSurfaceReason: compactReason(patchSurfacePlan.reason, ""),
+      patchSurface: compactReason(patchSurfacePlan.tilePatchSurface || patchSurfacePlan.surface, ""),
+      patchExecutionReason: compactReason(patchExecutionPlan.reason, ""),
       skippedDetailRender: input.shouldRenderDetail === false,
       locallyPatchedDetail: Boolean(renderOutcome.locallyPatchedDetail),
       tilePanePatchedDetail: Boolean(renderOutcome.tilePanePatchedDetail),
+      localPatchAttempted: Boolean(patchAttemptResult.localPatchAttempted),
+      tilePanePatchAttempted: Boolean(patchAttemptResult.tilePanePatchAttempted),
     };
   }
 
@@ -1786,9 +1805,10 @@
     const escape = htmlEscaper(input);
     const threadId = text(input.threadId || input.currentThreadId).trim();
     if (input.loadingWithoutVisibleTurns) {
+      const loadingKey = `loading-visible|${escape(threadId)}`;
       return {
         mode: "loading",
-        html: `<div class="empty-state entry-animate">Loading thread...</div>`,
+        html: `<div class="history-note entry-animate thread-loading-note" data-render-key="${loadingKey}">正在加载最新线程状态...</div>`,
         clearLiveOperationDock: true,
         bindRetry: false,
         retryThreadId: "",

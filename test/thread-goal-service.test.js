@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
+const { readFrontendSources } = require("./frontend-source-helper");
 
 const {
   continuationGoalMigrationPlan,
@@ -14,8 +15,26 @@ const {
 } = require("../adapters/thread-goal-service");
 
 const serverJs = fs.readFileSync(path.resolve(__dirname, "..", "server.js"), "utf8");
+const serverRuntimeConfigServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "services", "runtime", "server-runtime-config-service.js"),
+  "utf8",
+);
+const apiDispatchRouteServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "server-routes", "api-dispatch-route-service.js"), "utf8");
+const threadManagementRouteServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "server-routes", "thread-management-route-service.js"), "utf8");
+const continuationThreadServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "continuation-thread-service.js"), "utf8");
+const threadGoalActionServiceJs = fs.readFileSync(path.resolve(__dirname, "..", "adapters", "thread-goal-action-service.js"), "utf8");
+const threadListStateServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "services", "thread-list", "thread-list-state-service.js"),
+  "utf8",
+);
+const threadDetailStateBridgeServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "services", "thread-detail", "thread-detail-state-bridge-service.js"),
+  "utf8",
+);
 const indexHtml = fs.readFileSync(path.resolve(__dirname, "..", "public", "index.html"), "utf8");
-const appJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "app.js"), "utf8");
+const appJs = readFrontendSources(path.resolve(__dirname, ".."));
+const composerRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "composer-runtime.js"), "utf8");
+const threadListRuntimeJs = fs.readFileSync(path.resolve(__dirname, "..", "public", "thread-list-runtime.js"), "utf8");
 const stylesCss = fs.readFileSync(path.resolve(__dirname, "..", "public", "styles.css"), "utf8");
 
 function functionBody(source, name) {
@@ -176,49 +195,56 @@ test("thread goal service degrades to empty results when the goals db is absent"
 
 test("server enriches thread list and detail responses with thread goals", () => {
   assert.match(serverJs, /createThreadGoalService/);
+  assert.match(serverJs, /createThreadGoalActionService/);
   assert.match(serverJs, /normalizeThreadGoalStatus/);
-  assert.match(serverJs, /const GOALS_DB = path\.join\(CODEX_HOME, "goals_1\.sqlite"\)/);
+  assert.match(serverJs, /GOALS_DB/);
+  assert.match(serverRuntimeConfigServiceJs, /GOALS_DB: path\.join\(CODEX_HOME, "goals_1\.sqlite"\)/);
   assert.match(serverJs, /const threadGoalService = createThreadGoalService/);
-  assert.match(serverJs, /const THREAD_GOAL_OBJECTIVE_MAX_CHARS = 4000/);
-  assert.match(serverJs, /async function setThreadGoal\(/);
-  assert.match(functionBody(serverJs, "normalizeThreadGoalObjectiveInput"), /THREAD_GOAL_OBJECTIVE_MAX_CHARS/);
-  assert.match(serverJs, /codex\.request\("thread\/goal\/set"/);
-  assert.match(serverJs, /codex\.request\("thread\/goal\/clear"/);
-  assert.match(serverJs, /codex\.request\("thread\/goal\/get"/);
-  assert.match(serverJs, /async function runThreadGoalAction\(/);
-  assert.match(functionBody(serverJs, "runThreadGoalAction"), /action === "pause"/);
-  assert.match(functionBody(serverJs, "runThreadGoalAction"), /status: "blocked"/);
-  assert.match(functionBody(serverJs, "runThreadGoalAction"), /action === "continue"/);
-  assert.match(functionBody(serverJs, "runThreadGoalAction"), /await clearThreadGoalForSet\(id\)/);
-  assert.match(serverJs, /function isCompletedThreadGoal\(/);
-  assert.match(functionBody(serverJs, "isCompletedThreadGoal"), /normalizeThreadGoalStatus\(goal\.status\) === "complete"/);
-  assert.match(serverJs, /function currentThreadGoalForSet\(/);
-  assert.match(functionBody(serverJs, "currentThreadGoalForSet"), /threadGoalService\.goalForThread\(threadId\)/);
-  assert.match(functionBody(serverJs, "setThreadGoal"), /isCompletedThreadGoal\(currentThreadGoalForSet\(id\)\)/);
-  assert.match(functionBody(serverJs, "setThreadGoal"), /await clearThreadGoalForSet\(id\)/);
-  assert.match(functionBody(serverJs, "setThreadGoal"), /setThreadGoalRpc\(params\)/);
-  assert.match(functionBody(serverJs, "setThreadGoal"), /isCompletedThreadGoal\(goal\)/);
-  assert.match(functionBody(serverJs, "setThreadGoal"), /clearedCompletedGoal/);
+  assert.match(serverJs, /threadGoalActionService = createThreadGoalActionService/);
+  assert.match(serverJs, /goalForThread: \(threadId\) => threadGoalService\.goalForThread\(threadId\)/);
+  assert.match(serverJs, /codexRequest: \(\.\.\.args\) => codex\.request\(\.\.\.args\)/);
+  assert.match(threadGoalActionServiceJs, /const THREAD_GOAL_OBJECTIVE_MAX_CHARS = 4000/);
+  assert.match(threadGoalActionServiceJs, /async function setThreadGoal\(/);
+  assert.match(functionBody(threadGoalActionServiceJs, "normalizeThreadGoalObjectiveInput"), /THREAD_GOAL_OBJECTIVE_MAX_CHARS/);
+  assert.match(threadGoalActionServiceJs, /codexRequest\("thread\/goal\/set"/);
+  assert.match(threadGoalActionServiceJs, /codexRequest\("thread\/goal\/clear"/);
+  assert.match(threadGoalActionServiceJs, /codexRequest\("thread\/goal\/get"/);
+  assert.match(threadGoalActionServiceJs, /async function runThreadGoalAction\(/);
+  assert.match(functionBody(threadGoalActionServiceJs, "runThreadGoalAction"), /action === "pause"/);
+  assert.match(functionBody(threadGoalActionServiceJs, "runThreadGoalAction"), /status: "blocked"/);
+  assert.match(functionBody(threadGoalActionServiceJs, "runThreadGoalAction"), /action === "continue"/);
+  assert.match(functionBody(threadGoalActionServiceJs, "runThreadGoalAction"), /await clearThreadGoalForSet\(id\)/);
+  assert.match(threadGoalActionServiceJs, /function isCompletedThreadGoal\(/);
+  assert.match(functionBody(threadGoalActionServiceJs, "isCompletedThreadGoal"), /normalizeThreadGoalStatus\(goal\.status\) === "complete"/);
+  assert.match(threadGoalActionServiceJs, /function currentThreadGoalForSet\(/);
+  assert.match(functionBody(threadGoalActionServiceJs, "currentThreadGoalForSet"), /goalForThread\(threadId\)/);
+  assert.match(functionBody(threadGoalActionServiceJs, "setThreadGoal"), /isCompletedThreadGoal\(currentThreadGoalForSet\(id\)\)/);
+  assert.match(functionBody(threadGoalActionServiceJs, "setThreadGoal"), /await clearThreadGoalForSet\(id\)/);
+  assert.match(functionBody(threadGoalActionServiceJs, "setThreadGoal"), /setThreadGoalRpc\(params\)/);
+  assert.match(functionBody(threadGoalActionServiceJs, "setThreadGoal"), /isCompletedThreadGoal\(goal\)/);
+  assert.match(functionBody(threadGoalActionServiceJs, "setThreadGoal"), /clearedCompletedGoal/);
   assert.match(serverJs, /continuationGoalMigrationPlan/);
-  assert.match(serverJs, /async function migrateContinuationThreadGoal\(/);
-  assert.match(functionBody(serverJs, "migrateContinuationThreadGoal"), /currentThreadGoalForAction\(sourceId\)/);
-  assert.match(functionBody(serverJs, "migrateContinuationThreadGoal"), /setThreadGoalRpc\(threadGoalSetParams\(targetId, plan\.objective, plan\.tokenBudget, targetExtra\)\)/);
-  assert.match(functionBody(serverJs, "migrateContinuationThreadGoal"), /plan\.sourceStatus === "active"/);
-  assert.match(functionBody(serverJs, "migrateContinuationThreadGoal"), /status: "blocked"/);
-  assert.ok(serverJs.includes("url.pathname.match(/^\\/api\\/threads\\/([^/]+)\\/goal$/)"));
-  assert.ok(serverJs.includes("url.pathname.match(/^\\/api\\/threads\\/([^/]+)\\/goal\\/actions$/)"));
-  assert.match(serverJs, /function attachThreadGoalToThread\(/);
-  assert.match(serverJs, /threadGoalService\.attachGoalToThread\(thread\)/);
-  assert.match(serverJs, /function attachThreadGoalsToThreadListResult\(/);
-  assert.match(serverJs, /threadGoalService\.attachGoalsToThreadListResult\(result\)/);
-  assert.match(serverJs, /function attachThreadListStateToResult\(/);
-  assert.match(serverJs, /attachThreadTaskCardCountsToThreadListResult\(attachThreadGoalsToThreadListResult\(result\)\)/);
-  assert.match(serverJs, /attachThreadListStateToResult\(result\)/);
-  assert.match(serverJs, /attachThreadGoalToThread\(result\.thread\)/);
+  assert.match(continuationThreadServiceJs, /async function migrateContinuationThreadGoal\(/);
+  assert.match(functionBody(continuationThreadServiceJs, "migrateContinuationThreadGoal"), /currentThreadGoalForAction\(sourceId\)/);
+  assert.match(functionBody(continuationThreadServiceJs, "migrateContinuationThreadGoal"), /setThreadGoalRpc\(threadGoalSetParams\(targetId, plan\.objective, plan\.tokenBudget, targetExtra\)\)/);
+  assert.match(functionBody(continuationThreadServiceJs, "migrateContinuationThreadGoal"), /plan\.sourceStatus === "active"/);
+  assert.match(functionBody(continuationThreadServiceJs, "migrateContinuationThreadGoal"), /status: "blocked"/);
+  assert.ok(apiDispatchRouteServiceJs.includes("threadManagementRouteService.handleRoute"));
+  assert.ok(threadManagementRouteServiceJs.includes("pathname.match(/^\\/api\\/threads\\/([^/]+)\\/goal$/)"));
+  assert.ok(threadManagementRouteServiceJs.includes("pathname.match(/^\\/api\\/threads\\/([^/]+)\\/goal\\/actions$/)"));
+  assert.match(threadDetailStateBridgeServiceJs, /function attachThreadGoalToThread\(/);
+  assert.match(threadDetailStateBridgeServiceJs, /threadGoalService\.attachGoalToThread\(thread\)/);
+  assert.match(threadListStateServiceJs, /function attachThreadGoalsToThreadListResult\(/);
+  assert.match(threadListStateServiceJs, /attachGoalsToThreadListResult\(result\)/);
+  assert.match(threadListStateServiceJs, /function attachThreadListStateToResult\(/);
+  assert.match(threadListStateServiceJs, /attachThreadTaskCardCountsToThreadListResult\(attachThreadGoalsToThreadListResult\(result\)\)/);
+  assert.match(serverJs, /const threadListStateService = createThreadListStateService\(\{/);
+  assert.match(serverJs, /attachThreadListStateToResult,/);
+  assert.match(threadDetailStateBridgeServiceJs, /attachThreadGoalToThread\(result\.thread\)/);
 });
 
 test("mobile client renders and updates thread goals from app-server notifications", () => {
-  assert.match(appJs, /CLIENT_BUILD_ID = "0\.1\.11\|codex-mobile-shell-v\d+"/);
+  assert.match(appJs, /clientBuildId": "0\.1\.12\|codex-mobile-shell-v\d+(?:-[a-f0-9]{12})?"/);
   assert.match(appJs, /function normalizeThreadGoal\(/);
   assert.match(appJs, /function submittedThreadGoal\(/);
   assert.match(appJs, /function renderThreadGoal\(/);
@@ -226,8 +252,8 @@ test("mobile client renders and updates thread goals from app-server notificatio
   assert.match(appJs, /thread\/goal\/updated/);
   assert.match(appJs, /thread\/goal\/cleared/);
   assert.match(functionBody(appJs, "conversationRenderSignature"), /goal: threadGoalSignature\(thread\)/);
-  assert.match(functionBody(appJs, "renderThreads"), /const goal = threadGoalForThread\(thread\)/);
-  assert.match(functionBody(appJs, "renderThreads"), /threadGoalSignature\(thread\)/);
+  assert.match(functionBody(threadListRuntimeJs, "renderThreads"), /const goal = threadGoalForThread\(thread\)/);
+  assert.match(functionBody(threadListRuntimeJs, "renderThreads"), /threadGoalSignature\(thread\)/);
   assert.match(functionBody(appJs, "renderCurrentThread"), /const goalCard = renderThreadGoal\(thread, previousKeys\)/);
   assert.match(appJs, /function dialogPrefillThreadGoal\(/);
   assert.match(functionBody(appJs, "threadGoalBudgetText"), /budget tokens/);
@@ -236,8 +262,8 @@ test("mobile client renders and updates thread goals from app-server notificatio
   assert.match(functionBody(appJs, "applyThreadGoalToThread"), /delete thread\.goal/);
   assert.match(appJs, /function applyThreadGoalToThread\(/);
   assert.match(appJs, /function scheduleThreadGoalDetailRender\(/);
-  assert.match(functionBody(appJs, "updateThreadGoalState"), /state\.threadTileDetails[\s\S]*\.get\(String\(id\)\)/);
-  assert.match(functionBody(appJs, "updateThreadGoalState"), /scheduleThreadGoalDetailRender\(id\)/);
+  assert.match(functionBody(threadListRuntimeJs, "updateThreadGoalState"), /state\.threadTileDetails[\s\S]*\.get\(String\(id\)\)/);
+  assert.match(functionBody(threadListRuntimeJs, "updateThreadGoalState"), /scheduleThreadGoalDetailRender\(id\)/);
   assert.match(functionBody(appJs, "applyNotification"), /method === "thread\/goal\/updated"[\s\S]*updateThreadGoalState\(params\.threadId, params\.goal\)/);
   assert.match(functionBody(appJs, "applyNotification"), /method === "thread\/goal\/cleared"[\s\S]*updateThreadGoalState\(params\.threadId, null\)/);
   assert.match(stylesCss, /\.thread-goal-card/);
@@ -245,13 +271,14 @@ test("mobile client renders and updates thread goals from app-server notificatio
 });
 
 test("mobile client applies thread goal updates to visible tile panes", () => {
+  const threadListRuntimeSourceNames = new Set(["updateThreadGoalState"]);
   const sources = [
     "normalizeThreadGoalStatus",
     "normalizeThreadGoal",
     "applyThreadGoalToThread",
     "scheduleThreadGoalDetailRender",
     "updateThreadGoalState",
-  ].map((name) => functionSource(appJs, name));
+  ].map((name) => functionSource(threadListRuntimeSourceNames.has(name) ? threadListRuntimeJs : appJs, name));
   const harness = Function(`
 const paneListThread = { id: "thread-pane" };
 const paneDetailThread = { id: "thread-pane" };
@@ -317,41 +344,41 @@ test("mobile client opens goal dialog from /g and sets goal through app-server r
   assert.match(indexHtml, /id="goalContinueButton"/);
   assert.match(indexHtml, /id="goalPauseButton"/);
   assert.match(indexHtml, /id="goalClearButton"/);
-  assert.match(appJs, /const THREAD_GOAL_COMMAND_PREFIX = "\/g"/);
+  assert.match(appJs, /(?:const|var) THREAD_GOAL_COMMAND_PREFIX = "\/g"/);
   assert.match(appJs, /function isThreadGoalCommandText\(/);
   assert.match(appJs, /function openThreadGoalDialog\(/);
   assert.doesNotMatch(appJs, /function buildThreadGoalRequestMessage\(/);
   assert.doesNotMatch(appJs, /Please set the current goal for this Codex thread/);
   assert.doesNotMatch(appJs, /Use the CLI goal feature if it is available/);
-  assert.match(functionBody(appJs, "updateComposerControls"), /isThreadGoalCommandText\(composerText\(\)\)/);
-  assert.match(functionBody(appJs, "updateComposerControls"), /goalCommandMode,/);
-  assert.match(appJs, /composerActionControlPlan/);
-  assert.match(functionBody(appJs, "sendMessage"), /const threadGoalCommand = isThreadGoalCommandText\(text\)/);
-  assert.match(functionBody(appJs, "sendMessage"), /openThreadGoalDialog\(targetThreadId\)/);
-  assert.match(functionBody(appJs, "sendMessage"), /setComposerText\(""\)/);
-  assert.match(functionBody(appJs, "submitThreadGoalMessage"), /api\(`\/api\/threads\/\$\{encodeURIComponent\(threadId\)\}\/goal`/);
-  assert.match(functionBody(appJs, "submitThreadGoalMessage"), /JSON\.stringify\(\{/);
-  assert.match(functionBody(appJs, "submitThreadGoalMessage"), /const responseGoal = normalizeThreadGoal\(result && result\.goal, threadId\)/);
-  assert.match(functionBody(appJs, "submitThreadGoalMessage"), /const visibleGoal = responseGoal \|\| submittedThreadGoal\(threadId, objective, tokenBudget\)/);
-  assert.match(functionBody(appJs, "submitThreadGoalMessage"), /if \(visibleGoal\) updateThreadGoalState\(threadId, visibleGoal\)/);
+  assert.match(functionBody(composerRuntimeJs, "updateComposerControls"), /isThreadGoalCommandText\(composerText\(\)\)/);
+  assert.match(functionBody(composerRuntimeJs, "updateComposerControls"), /goalCommandMode,/);
+  assert.match(composerRuntimeJs, /composerActionControlPlan/);
+  assert.match(functionBody(composerRuntimeJs, "sendMessage"), /const threadGoalCommand = isThreadGoalCommandText\(text\)/);
+  assert.match(functionBody(composerRuntimeJs, "sendMessage"), /openThreadGoalDialog\(targetThreadId\)/);
+  assert.match(functionBody(composerRuntimeJs, "sendMessage"), /setComposerText\(""\)/);
+  assert.match(functionBody(composerRuntimeJs, "submitThreadGoalMessage"), /api\(`\/api\/threads\/\$\{encodeURIComponent\(threadId\)\}\/goal`/);
+  assert.match(functionBody(composerRuntimeJs, "submitThreadGoalMessage"), /JSON\.stringify\(\{/);
+  assert.match(functionBody(composerRuntimeJs, "submitThreadGoalMessage"), /const responseGoal = normalizeThreadGoal\(result && result\.goal, threadId\)/);
+  assert.match(functionBody(composerRuntimeJs, "submitThreadGoalMessage"), /const visibleGoal = responseGoal \|\| submittedThreadGoal\(threadId, objective, tokenBudget\)/);
+  assert.match(functionBody(composerRuntimeJs, "submitThreadGoalMessage"), /if \(visibleGoal\) updateThreadGoalState\(threadId, visibleGoal\)/);
   assert.match(appJs, /function runThreadGoalDialogAction\(/);
-  assert.match(functionBody(appJs, "runThreadGoalDialogAction"), /\/api\/threads\/\$\{encodeURIComponent\(threadId\)\}\/goal\/actions/);
-  assert.match(functionBody(appJs, "runThreadGoalDialogAction"), /action: normalizedAction/);
-  assert.match(functionBody(appJs, "runThreadGoalDialogAction"), /normalizedAction === "cancel"[\s\S]*updateThreadGoalState\(threadId, null\)/);
+  assert.match(functionBody(composerRuntimeJs, "runThreadGoalDialogAction"), /\/api\/threads\/\$\{encodeURIComponent\(threadId\)\}\/goal\/actions/);
+  assert.match(functionBody(composerRuntimeJs, "runThreadGoalDialogAction"), /action: normalizedAction/);
+  assert.match(functionBody(composerRuntimeJs, "runThreadGoalDialogAction"), /normalizedAction === "cancel"[\s\S]*updateThreadGoalState\(threadId, null\)/);
   assert.match(functionBody(appJs, "updateThreadGoalDialogState"), /goalStateActions/);
   assert.match(functionBody(appJs, "updateThreadGoalDialogState"), /normalizedGoal \? "Save" : "Send"/);
   assert.match(appJs, /function requestGoalDialogSubmitFromEnter\(/);
-  assert.match(functionBody(appJs, "requestGoalDialogSubmitFromEnter"), /event\.key !== "Enter"/);
-  assert.match(functionBody(appJs, "requestGoalDialogSubmitFromEnter"), /event\.shiftKey/);
-  assert.match(functionBody(appJs, "requestGoalDialogSubmitFromEnter"), /event\.isComposing/);
-  assert.match(functionBody(appJs, "requestGoalDialogSubmitFromEnter"), /requestGoalDialogSubmit\(\)/);
+  assert.match(functionBody(composerRuntimeJs, "requestGoalDialogSubmitFromEnter"), /event\.key !== "Enter"/);
+  assert.match(functionBody(composerRuntimeJs, "requestGoalDialogSubmitFromEnter"), /event\.shiftKey/);
+  assert.match(functionBody(composerRuntimeJs, "requestGoalDialogSubmitFromEnter"), /event\.isComposing/);
+  assert.match(functionBody(composerRuntimeJs, "requestGoalDialogSubmitFromEnter"), /requestGoalDialogSubmit\(\)/);
   assert.match(appJs, /function requestGoalDialogSubmitFromButton\(/);
-  assert.match(functionBody(appJs, "requestGoalDialogSubmitFromButton"), /event\.preventDefault\(\)/);
-  assert.match(functionBody(appJs, "requestGoalDialogSubmitFromButton"), /state\.lastGoalButtonSubmitAt/);
-  assert.match(functionBody(appJs, "requestGoalDialogSubmitFromButton"), /postClientEvent\("goal_button_pressed"/);
-  assert.match(functionBody(appJs, "requestGoalDialogSubmitFromButton"), /requestGoalDialogSubmit\(\)/);
+  assert.match(functionBody(composerRuntimeJs, "requestGoalDialogSubmitFromButton"), /event\.preventDefault\(\)/);
+  assert.match(functionBody(composerRuntimeJs, "requestGoalDialogSubmitFromButton"), /state\.lastGoalButtonSubmitAt/);
+  assert.match(functionBody(composerRuntimeJs, "requestGoalDialogSubmitFromButton"), /postClientEvent\("goal_button_pressed"/);
+  assert.match(functionBody(composerRuntimeJs, "requestGoalDialogSubmitFromButton"), /requestGoalDialogSubmit\(\)/);
   assert.match(appJs, /function requestGoalDialogSubmit\(/);
-  assert.match(functionBody(appJs, "requestGoalDialogSubmit"), /form\.requestSubmit\(\)/);
+  assert.match(functionBody(composerRuntimeJs, "requestGoalDialogSubmit"), /form\.requestSubmit\(\)/);
   assert.match(appJs, /goalObjectiveInput"\)\.addEventListener\("keydown", requestGoalDialogSubmitFromEnter\)/);
   assert.match(appJs, /goalTokenBudgetInput"\)\.addEventListener\("keydown", requestGoalDialogSubmitFromEnter\)/);
   assert.match(appJs, /goalSubmitButton"\)\.addEventListener\("pointerdown", requestGoalDialogSubmitFromButton\)/);
@@ -361,19 +388,19 @@ test("mobile client opens goal dialog from /g and sets goal through app-server r
   assert.match(appJs, /goalContinueButton"\)\.addEventListener\("click", \(event\) => runThreadGoalDialogAction\("continue", event\)/);
   assert.match(appJs, /goalPauseButton"\)\.addEventListener\("click", \(event\) => runThreadGoalDialogAction\("pause", event\)/);
   assert.match(appJs, /goalClearButton"\)\.addEventListener\("click", \(event\) => runThreadGoalDialogAction\("cancel", event\)/);
-  assert.match(functionBody(appJs, "submitThreadGoalMessage"), /postClientEvent\("goal_request_start"/);
-  assert.match(functionBody(appJs, "submitThreadGoalMessage"), /postClientEvent\("goal_request_success"/);
-  assert.doesNotMatch(functionBody(appJs, "submitThreadGoalMessage"), /\/messages`/);
-  assert.doesNotMatch(functionBody(appJs, "submitThreadGoalMessage"), /body\.append\("model"/);
-  assert.doesNotMatch(functionBody(appJs, "submitThreadGoalMessage"), /selectedComposerEffort\(\)/);
+  assert.match(functionBody(composerRuntimeJs, "submitThreadGoalMessage"), /postClientEvent\("goal_request_start"/);
+  assert.match(functionBody(composerRuntimeJs, "submitThreadGoalMessage"), /postClientEvent\("goal_request_success"/);
+  assert.doesNotMatch(functionBody(composerRuntimeJs, "submitThreadGoalMessage"), /\/messages`/);
+  assert.doesNotMatch(functionBody(composerRuntimeJs, "submitThreadGoalMessage"), /body\.append\("model"/);
+  assert.doesNotMatch(functionBody(composerRuntimeJs, "submitThreadGoalMessage"), /selectedComposerEffort\(\)/);
   assert.doesNotMatch(appJs, /goals_1\.sqlite/);
   assert.doesNotMatch(appJs, /data-open-thread-goal-dialog/);
   assert.match(stylesCss, /\.goal-dialog/);
   assert.match(stylesCss, /\.goal-panel/);
   assert.match(stylesCss, /\.goal-state-actions/);
   assert.match(stylesCss, /\.goal-action-danger/);
-  assert.match(appJs, /const THREAD_GOAL_MENTION_PATTERN = \/\^@\(目标任务\|目标\|Goal\|Thread\\s\*Goal\|g\)\$/);
+  assert.match(appJs, /(?:const|var) THREAD_GOAL_MENTION_PATTERN = \/\^@\(目标任务\|目标\|Goal\|Thread\\s\*Goal\|g\)\$/);
   assert.match(functionBody(appJs, "isThreadGoalCommandText"), /THREAD_GOAL_MENTION_PATTERN\.test\(text\)/);
-  assert.match(appJs, /@目标任务/);
-  assert.match(functionBody(appJs, "sendMessage"), /composerIntentBareTagKind\(text\)/);
+  assert.match(composerRuntimeJs, /@目标任务/);
+  assert.match(functionBody(composerRuntimeJs, "sendMessage"), /composerIntentBareTagKind\(text\)/);
 });

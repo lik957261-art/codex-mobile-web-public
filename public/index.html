@@ -209,7 +209,14 @@
     (function () {
       var bootReady = false;
       var showTimer = 0;
+      var scriptErrorTimer = 0;
       var recoveryReason = "";
+      var bootWatchStartedAt = Date.now();
+      var STARTUP_RECOVERY_TIMEOUT_MS = 4500;
+      var APP_PREVIEW_STARTUP_RECOVERY_TIMEOUT_MS = 12000;
+      var APP_PREVIEW_STARTUP_RECOVERY_POLL_MS = 2500;
+      var APP_PREVIEW_STARTUP_RECOVERY_HARD_LIMIT_MS = 30000;
+      var SCRIPT_AUTO_RELOAD_STORAGE_KEY = "codexMobileBootScriptAutoReload";
       function $(id) { return document.getElementById(id); }
       function setStatus(text) {
         var el = $("bootRecoveryStatus");
@@ -226,8 +233,33 @@
           return el && !el.classList.contains("hidden") && !el.hidden;
         });
       }
+      function isViteAppPreviewPage() {
+        var html = document.documentElement;
+        if (html && html.dataset && html.dataset.codexViteAppPreview === "true") return true;
+        return Boolean(document.querySelector("meta[name='codex-vite-app-preview']"));
+      }
+      function appPreviewStartupStillPending() {
+        if (!isViteAppPreviewPage()) return false;
+        if (Date.now() - bootWatchStartedAt >= APP_PREVIEW_STARTUP_RECOVERY_HARD_LIMIT_MS) return false;
+        var status = window.__CODEX_MOBILE_VITE_APP_PREVIEW__ || null;
+        if (!status || typeof status !== "object") return true;
+        if (String(status.appStartErrorCode || "")) return false;
+        if (Array.isArray(status.failed) && status.failed.length) return false;
+        if (status.appStartPending === true) return true;
+        if (status.appStartAttempted === true && !Number(status.appStartCompletedAt || 0)) return true;
+        if (status.ok !== true && !Number(status.completedAt || 0)) return true;
+        return false;
+      }
+      function scheduleStartupRecovery(delayMs) {
+        if (showTimer) clearTimeout(showTimer);
+        showTimer = window.setTimeout(function () { showRecovery("startup-timeout"); }, delayMs);
+      }
       function showRecovery(reason) {
         if (bootReady || anyMainSurfaceVisible()) return;
+        if (reason !== "script-error" && appPreviewStartupStillPending()) {
+          scheduleStartupRecovery(APP_PREVIEW_STARTUP_RECOVERY_POLL_MS);
+          return;
+        }
         recoveryReason = reason || recoveryReason || "startup-timeout";
         var recovery = $("bootRecovery");
         if (!recovery) return;
@@ -240,6 +272,49 @@
       function hideRecovery() {
         var recovery = $("bootRecovery");
         if (recovery) recovery.hidden = true;
+      }
+      function isScriptStartupError(event) {
+        if (!event) return false;
+        if ((typeof ErrorEvent !== "undefined" && event instanceof ErrorEvent) || event.message || event.error) return true;
+        var target = event.target || event.srcElement;
+        var tagName = target && target.tagName ? String(target.tagName).toUpperCase() : "";
+        return tagName === "SCRIPT";
+      }
+      function scheduleScriptRecovery() {
+        if (bootReady || anyMainSurfaceVisible()) return;
+        if (scriptErrorTimer) clearTimeout(scriptErrorTimer);
+        scriptErrorTimer = window.setTimeout(function () {
+          scriptErrorTimer = 0;
+          if (autoReloadForScriptStartupError()) return;
+          showRecovery("script-error");
+        }, 1200);
+      }
+      function scriptAutoReloadKey() {
+        return SCRIPT_AUTO_RELOAD_STORAGE_KEY + ":" + window.location.pathname;
+      }
+      function hasScriptAutoReloadAttempted() {
+        try {
+          return window.sessionStorage && window.sessionStorage.getItem(scriptAutoReloadKey()) === "1";
+        } catch (_) {
+          return true;
+        }
+      }
+      function markScriptAutoReloadAttempted() {
+        try {
+          if (window.sessionStorage) window.sessionStorage.setItem(scriptAutoReloadKey(), "1");
+        } catch (_) {}
+      }
+      function clearScriptAutoReloadAttempt() {
+        try {
+          if (window.sessionStorage) window.sessionStorage.removeItem(scriptAutoReloadKey());
+        } catch (_) {}
+      }
+      function autoReloadForScriptStartupError() {
+        if (!isViteAppPreviewPage() || hasScriptAutoReloadAttempted()) return false;
+        markScriptAutoReloadAttempted();
+        setStatus("页面脚本启动失败，正在自动重新加载最新入口...");
+        window.location.replace(cacheBustUrl());
+        return true;
       }
       async function clearShellState() {
         if ("caches" in window) {
@@ -285,6 +360,8 @@
         ready: function () {
           bootReady = true;
           if (showTimer) clearTimeout(showTimer);
+          if (scriptErrorTimer) clearTimeout(scriptErrorTimer);
+          clearScriptAutoReloadAttempt();
           hideRecovery();
         },
         fail: function (reason) {
@@ -293,15 +370,18 @@
         recover: recover,
         reloadOnly: reloadOnly
       };
-      window.addEventListener("error", function () {
-        window.setTimeout(function () { showRecovery("script-error"); }, 0);
+      window.addEventListener("error", function (event) {
+        if (!isScriptStartupError(event)) return;
+        scheduleScriptRecovery();
       }, true);
       window.addEventListener("unhandledrejection", function () {
-        window.setTimeout(function () { showRecovery("script-error"); }, 0);
+        scheduleScriptRecovery();
       });
       document.addEventListener("DOMContentLoaded", function () {
         installRecoveryButtons();
-        showTimer = window.setTimeout(function () { showRecovery("startup-timeout"); }, 4500);
+        scheduleStartupRecovery(isViteAppPreviewPage()
+          ? APP_PREVIEW_STARTUP_RECOVERY_TIMEOUT_MS
+          : STARTUP_RECOVERY_TIMEOUT_MS);
       });
     }());
   </script>
@@ -523,6 +603,7 @@
     <div class="continuation-panel">
       <div id="continuationTitle" class="continuation-title">压缩续接</div>
       <div id="continuationSummary" class="continuation-summary">会创建一个同工作区的新线程。</div>
+      <div id="continuationStatus" class="continuation-status hidden" aria-live="polite"></div>
       <div class="continuation-actions">
         <button id="continuationCancel" class="continuation-cancel" type="button">取消</button>
         <button id="continuationConfirm" class="continuation-confirm" type="button">继续</button>
@@ -734,10 +815,12 @@
       </details>
     </div>
   </div>
-
+<!-- CODEX_MOBILE_SHELL_SCRIPTS:BEGIN -->
+  <script src="/shell-asset-manifest.js"></script>
   <script src="/api-client.js"></script>
   <script src="/runtime-settings.js"></script>
   <script src="/draft-store.js"></script>
+  <script src="/composer-runtime.js"></script>
   <script src="/markdown-renderer.js"></script>
   <script src="/viewport-metrics.js"></script>
   <script src="/conversation-scroll.js"></script>
@@ -746,24 +829,47 @@
   <script src="/plugin-voice-input.js"></script>
   <script src="/home-ai-diagnostic-reporting.js"></script>
   <script src="/thread-diagnostic-events.js"></script>
+  <script src="/frontend-runtime-health.js"></script>
   <script src="/thread-status-hints.js"></script>
   <script src="/thread-performance-metrics.js"></script>
   <script src="/thread-list-load-policy.js"></script>
   <script src="/thread-list-stable-order.js"></script>
+  <script src="/thread-list-runtime.js"></script>
+  <script src="/client-render-stability-guard.js"></script>
   <script src="/live-operation-dock-state.js"></script>
   <script src="/thread-detail-state.js"></script>
   <script src="/thread-detail-render-plan.js"></script>
   <script src="/thread-detail-merge-state.js"></script>
   <script src="/thread-detail-v4-merge-state.js"></script>
+  <script src="/thread-detail-runtime.js"></script>
   <script src="/thread-detail-patch-plan.js"></script>
   <script src="/thread-detail-dom-patch.js"></script>
   <script src="/thread-detail-actions.js"></script>
   <script src="/thread-tile-actions.js"></script>
   <script src="/thread-tile-state.js"></script>
   <script src="/thread-tile-layout.js"></script>
+  <script src="/thread-tile-runtime.js"></script>
   <script src="/build-refresh-policy.js"></script>
+  <script src="/app-update-runtime.js"></script>
+  <script src="/side-chat-runtime.js"></script>
+  <script src="/media-preview-runtime.js"></script>
+  <script src="/app-bootstrap.js"></script>
+  <script src="/settings-runtime.js"></script>
+  <script src="/modal-runtime.js"></script>
+  <script src="/navigation-runtime.js"></script>
+  <script src="/api-client-runtime.js"></script>
+  <script src="/notification-ui-runtime.js"></script>
+  <script src="/pane-layout-runtime.js"></script>
+  <script src="/task-card-runtime.js"></script>
+  <script src="/conversation-render-runtime.js"></script>
+  <script src="/event-stream-runtime.js"></script>
+  <script src="/composer-bridge-runtime.js"></script>
+  <script src="/runtime-wiring-runtime.js"></script>
+  <script src="/app-shell-runtime.js"></script>
   <script src="/app.js"></script>
-  <script>
+<!-- CODEX_MOBILE_SHELL_SCRIPTS:END -->
+
+<script>
     (function () {
       function ready(fn) {
         if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fn);

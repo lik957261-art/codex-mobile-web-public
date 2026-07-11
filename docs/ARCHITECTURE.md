@@ -67,7 +67,7 @@ Keep `.codex` read-only except through app-server RPCs. Do not patch rollout fil
 
 ### Public Config And Login
 
-`GET /api/public-config` exposes auth requirement, version/build ids, runtime option lists, upload limits, rollout warning threshold, quota snapshots, Push support, self-update availability, public PR check availability, and the Hermes plugin endpoint paths. The browser uses this before showing the app shell and also reuses the same quota snapshot when a page-refresh prompt is clicked, so a PWA reload that does not fully recreate the iOS app scene still updates the visible quota chips.
+`GET /api/public-config` exposes auth requirement, version/build ids, the bounded default shell mode, runtime option lists, upload limits, rollout warning threshold, quota snapshots, Push support, self-update availability, public PR check availability, and the Hermes plugin endpoint paths. The browser uses this before showing the app shell and also reuses the same quota snapshot when a page-refresh prompt is clicked, so a PWA reload that does not fully recreate the iOS app scene still updates the visible quota chips. Build metadata and default shell mode are read on every request, while the profile/quota snapshot assembly may use a short process-local TTL through `adapters/public-config-runtime-cache-service.js` so repeated startup/refresh probes do not rescan profile rollout quota tails for the same active quota evidence. Public config and status responses must not wait for an external quota refresh; they return the current bounded snapshot immediately and schedule the refresh in the background.
 
 Authentication uses `x-codex-mobile-key`, `Authorization: Bearer`, the existing cookie, or the existing `key` query parameter against the runtime access key file. Do not print the key in logs or chat output.
 
@@ -366,7 +366,7 @@ responses, private manifest dumps, or long logs.
 
 ### Thread List And Detail
 
-Thread list reads app-server `thread/list`, then filters archived/deleted/sub-agent/out-of-workspace rows using local visibility rules and SQLite fallback data. The browser's default thread-list refresh requests a 40-row page; raising this casually can make startup, foreground resume, and thread switching noticeably slower because the server may do more app-server and fallback work before returning even when only a small number of rows are visible. The default first unfiltered list paint uses `/api/threads?initial=warm-fallback`: when the process fallback cache is warm, the server returns that cache with `mobileInitialSource=warm-fallback-cache`; when the cache is cold, the server builds the local fallback baseline and returns it with `mobileInitialSource=fallback-baseline`, `mobileDeferredAppServer=true`, and `appServerDeferredReason=cold-fallback-initial`. In both cases the authoritative app-server `thread/list` refresh is a deferred follow-up rather than part of the first-paint request. On cold startup, the browser may also request `/api/threads?fallback=defer`; the server then returns the app-server list immediately with `mobileDeferredFallback=true`, skips the expensive state DB / rollout fallback scan for that first paint, but still applies the lightweight `session_index.jsonl` display-title hydration so renamed or continuation threads do not flash their initial app-server titles. The browser follows deferred first-paint responses with a delayed and cancellable silent full list refresh, so historical/fallback rows are still merged after the initial usable list is visible; this refresh must wait until no thread detail request is in flight and no list request is already running, because cold rollout fallback may synchronously scan large rollout files. The client treats thread switching, live polling, Usage backfill, and full-detail backfill as detail requests for this gate. The server also tracks active `/api/threads/:id` detail responses; if an ordinary unfiltered list refresh reaches the server while detail is active, it returns a deferred app-server-only list with `mobileDeferredFallback=true` and `fallbackDeferredReason=active-thread-detail` instead of starting the expensive fallback scan. After the first complete fallback pass in a server process, the fallback cache is a process-lifetime baseline by default: it does not expire on a timer and its key does not include `state_5.sqlite`, `session_index.jsonl`, archived-index, or `sessions/` directory fingerprints. New-thread, status, title, and archive events update or remove the matching cached summary incrementally; app-server `thread/list` remains the authoritative live source merged on non-initial full requests and deferred refreshes. On cold startup with a saved current thread, the browser sets `startupThreadOpenPending` before the first app-shell reveal and starts the saved-thread detail read in parallel with status/workspace/list refresh; the startup path should not wait for the list response before beginning the known thread detail read. Startup emits bounded `startup_stage` client events so the runtime log can separate public-config, status, workspace, list, detail, and render delays. Codex worktree cwd values under `%USERPROFILE%\.codex\worktrees\<id>\<repo>` are treated as visible when `<repo>` matches a known workspace basename, so temporary Codex worktree sessions do not disappear merely because their cwd differs from the primary workspace path. When app-server omits visible rows, the list merges state DB, live rollout-session, and session-index fallback threads before applying the same cwd/search filters. If a migrated macOS production instance has visible Mac workspace roots but all recovered thread cwd values are Windows paths, the All-workspaces fallback keeps non-archived non-sub-agent history visible instead of filtering the list to zero rows. Duplicate fallback rows are not discarded blindly: display fields can fill missing/stale app-server titles, and the newest `updatedAt` wins so active shared-state threads move in the sidebar after turns; route-level duplicate dropping also preserves fallback rows whose rollout mtime is newer than the app-server row, because that newer fallback evidence may be the only proof that a background thread is currently active. The rollout-session fallback reads the head of `sessions/rollout-*.jsonl` files to recover thread id, cwd, timestamp, sub-agent metadata, and safe display names from `session_index.jsonl`, then reads a bounded tail to infer fallback `active` / `completed` status from safe event types such as `task_started` and `task_complete`. Final list merge re-applies archived/sub-agent filtering and drops non-live Mobile fallback summaries that still have no real display text after session-index hydration; this keeps completed child-agent or orphan rollout rows from appearing as unopenable UUID-only threads. Its fallback `updatedAt` uses the newest of session-index time, rollout head timestamps, and rollout file mtime, so shared-state turns that keep writing rollout data do not stay pinned to an old index timestamp. It exists so a malformed `state_5.sqlite` does not make all old threads disappear after an account/profile switch. The session-index fallback must also skip ids present in `archived_sessions`, profile-specific `archived_sessions`, and `%USERPROFILE%\.codex-mobile-web\archived-thread-ids.json`; the Mobile local index stores only thread ids and archived timestamps so re-archiving a recovered/old-profile row hides it even when app-server cannot mutate the original SQLite row. After an existing-thread message send succeeds, the browser schedules both current-detail refresh and a silent thread-list refresh; otherwise a usable thread can keep an old sidebar timestamp until a manual list reload or foreground resume. Running-thread sidebar/home indicators are driven by both row status and browser-local `runningThreadIds` hints. A list refresh that returns `notLoaded` must not immediately clear a known running hint, but the hint carries a browser-local timestamp and expires after a bounded stale window when the row still has no running or terminal status and the current thread has no active turn. Terminal statuses such as completed, failed, cancelled, error, or interrupted clear it immediately. Current-thread `turn/started` and `turn/completed` notifications also update the matching thread-list row and schedule a list repaint so the running indicator does not depend on a separate `thread/status/changed` notification.
+Thread list reads app-server `thread/list`, then filters archived/deleted/sub-agent/out-of-workspace rows using local visibility rules and SQLite fallback data. The browser's default thread-list refresh requests a 40-row page; raising this casually can make startup, foreground resume, and thread switching noticeably slower because the server may do more app-server and fallback work before returning even when only a small number of rows are visible. The default first unfiltered list paint uses `/api/threads?initial=warm-fallback`: when the process fallback cache is warm, the server returns that cache with `mobileInitialSource=warm-fallback-cache`; when the cache is cold, the server builds the local fallback baseline and returns it with `mobileInitialSource=fallback-baseline`, `mobileDeferredAppServer=true`, and `appServerDeferredReason=cold-fallback-initial`. In both cases the authoritative app-server `thread/list` refresh is a deferred follow-up rather than part of the first-paint request. On cold startup, the browser may also request `/api/threads?fallback=defer`; the server then returns the app-server list immediately with `mobileDeferredFallback=true`, skips the expensive state DB / rollout fallback scan for that first paint, but still applies the lightweight `session_index.jsonl` display-title hydration so renamed or continuation threads do not flash their initial app-server titles. The browser follows deferred first-paint responses with a delayed and cancellable silent full list refresh, so historical/fallback rows are still merged after the initial usable list is visible; this refresh must wait until no thread detail request is in flight and no list request is already running, because cold rollout fallback may synchronously scan large rollout files. The client treats thread switching, live polling, Usage backfill, and full-detail backfill as detail requests for this gate. The server also tracks active `/api/threads/:id` detail responses; if an ordinary unfiltered list refresh reaches the server while detail is active, it returns a deferred app-server-only list with `mobileDeferredFallback=true` and `fallbackDeferredReason=active-thread-detail` instead of starting the expensive fallback scan. After the first complete fallback pass in a server process, the fallback cache is a process-lifetime baseline by default: it does not expire on a timer and its key does not include `state_5.sqlite`, `session_index.jsonl`, archived-index, or `sessions/` directory fingerprints. New-thread, status, title, and archive events update or remove the matching cached summary incrementally; app-server `thread/list` remains the authoritative live source merged on non-initial full requests and deferred refreshes. Standalone mobile startup does not automatically open the last saved thread; it first renders the bounded recent list so a large historical rollout cannot block app launch. Explicit thread links and Hermes plugin route hints still open their requested thread, while desktop and embedded flows may restore the saved thread and start its detail read in parallel with status/workspace/list refresh. Startup emits bounded `startup_stage` client events so the runtime log can separate public-config, status, workspace, list, detail, and render delays. Codex worktree cwd values under `%USERPROFILE%\.codex\worktrees\<id>\<repo>` are treated as visible when `<repo>` matches a known workspace basename, so temporary Codex worktree sessions do not disappear merely because their cwd differs from the primary workspace path. When app-server omits visible rows, the list merges state DB, live rollout-session, and session-index fallback threads before applying the same cwd/search filters. If a migrated macOS production instance has visible Mac workspace roots but all recovered thread cwd values are Windows paths, the All-workspaces fallback keeps non-archived non-sub-agent history visible instead of filtering the list to zero rows. Duplicate fallback rows are not discarded blindly: display fields can fill missing/stale app-server titles, and the newest `updatedAt` wins so active shared-state threads move in the sidebar after turns; route-level duplicate dropping also preserves fallback rows whose rollout mtime is newer than the app-server row, because that newer fallback evidence may be the only proof that a background thread is currently active. The rollout-session fallback reads the head of `sessions/rollout-*.jsonl` files to recover thread id, cwd, timestamp, sub-agent metadata, and safe display names from `session_index.jsonl`, then reads a bounded tail to infer fallback `active` / `completed` status from safe event types such as `task_started` and `task_complete`. Final list merge re-applies archived/sub-agent filtering and drops non-live Mobile fallback summaries that still have no real display text after session-index hydration; this keeps completed child-agent or orphan rollout rows from appearing as unopenable UUID-only threads. Its fallback `updatedAt` uses the newest of session-index time, rollout head timestamps, and rollout file mtime, so shared-state turns that keep writing rollout data do not stay pinned to an old index timestamp. It exists so a malformed `state_5.sqlite` does not make all old threads disappear after an account/profile switch. The session-index fallback must also skip ids present in `archived_sessions`, profile-specific `archived_sessions`, and `%USERPROFILE%\.codex-mobile-web\archived-thread-ids.json`; the Mobile local index stores only thread ids and archived timestamps so re-archiving a recovered/old-profile row hides it even when app-server cannot mutate the original SQLite row. After an existing-thread message send succeeds, the browser schedules both current-detail refresh and a silent thread-list refresh; otherwise a usable thread can keep an old sidebar timestamp until a manual list reload or foreground resume. Running-thread sidebar/home indicators are driven by both row status and browser-local `runningThreadIds` hints. A list refresh that returns `notLoaded` must not immediately clear a known running hint, but the hint carries a browser-local timestamp and expires after a bounded stale window when the row still has no running or terminal status and the current thread has no active turn. Terminal statuses such as completed, failed, cancelled, error, or interrupted clear it immediately. Current-thread `turn/started` and `turn/completed` notifications also update the matching thread-list row and schedule a list repaint so the running indicator does not depend on a separate `thread/status/changed` notification.
 
 The browser treats successful-but-slow thread-list loads as a diagnostic slow
 path, not as ordinary success. `public/thread-performance-metrics.js` plans
@@ -379,9 +379,9 @@ counters. Fast successful list loads clear the repeated-failure signature; slow
 loads must not trigger a client-side masking refresh or duplicate-render
 workaround.
 
-`adapters/thread-list-fallback-cache-service.js` owns the fallback cache policy: key construction from visible workspace roots/projectless thread ids, process-lifetime default retention, optional TTL expiry, cache-hit diagnostics, first-run fallback aggregation, and incremental status/title/archive mutation. Final fallback cache entries remain limit-scoped: a narrow cached final list is not treated as a wider final list. The service can, however, reuse a wider same-scope source snapshot for a later wider final-list cache miss, so a prewarmed source snapshot can rebuild `limit=137` first-paint windows without re-reading state DB, rollout tails, or `session_index.jsonl`. Ordinary Workspace first-paint reads can also derive a scoped warm row set from the default visible-thread warm cache and then remember that Workspace cache; this reports `workspace-derived-hit` and only applies when there is no search, cursor, or archived filter. `adapters/thread-list-fallback-prewarm-service.js` passes a bounded `sourceSnapshotLimit` for this purpose and reports it through `threadListFallbackPrewarm.sourceSnapshotLimit` / `lastSourceSnapshotLimit`; this is warm source data for the current process, not persistent authority. State-db, rollout-session, and session-index scanners remain separate providers injected by `server.js`.
+`services/thread-list/thread-list-fallback-cache-service.js` owns the fallback cache policy: key construction from visible workspace roots/projectless thread ids, process-lifetime default retention, optional TTL expiry, cache-hit diagnostics, first-run fallback aggregation, and incremental status/title/archive mutation. In-memory entries are summary-safe: the cache strips thread-detail-only fields such as `turns`, active-overlay details, diagnostics, payload/body/content fields, and unsafe credential-like keys before storing or restoring rows, and exposes bounded cache entry/thread/approx-byte counters in read diagnostics. Final fallback cache entries remain limit-scoped: a narrow cached final list is not treated as a wider final list. A warm default cache whose row count is below the requested limit is still complete when its source timings prove `baselineResultCount <= rows` and `baselineLimitDropCount=0`; the route reports `initialFallbackCompleteBelowLimit=true` and keeps the warm first-paint path instead of waiting on app-server. The service can, however, reuse a wider same-scope source snapshot for a later wider final-list cache miss, so a prewarmed source snapshot can rebuild `limit=137` first-paint windows without re-reading state DB, rollout tails, or `session_index.jsonl`. Ordinary Workspace first-paint reads can also derive a scoped warm row set from the default visible-thread warm cache and then remember that Workspace cache; this reports `workspace-derived-hit` and only applies when there is no search, cursor, or archived filter. `services/thread-list/thread-list-fallback-prewarm-service.js` passes a bounded `sourceSnapshotLimit` for this purpose and reports it through `threadListFallbackPrewarm.sourceSnapshotLimit` / `lastSourceSnapshotLimit`; this is warm source data for the current process, not persistent authority. State-db, rollout-session, and session-index scanners remain separate providers injected by `server.js`; the legacy `adapters/thread-list-fallback-*` paths are compatibility exports only.
 
-`adapters/thread-list-fallback-persistent-cache-store.js` persists only bounded
+`services/thread-list/thread-list-fallback-persistent-cache-store.js` persists only bounded
 thread-list summary cache entries under the Codex Mobile runtime root so a
 fresh server process can restore the previous warm fallback cache before the
 first request. This is a startup baseline, not a new authority: app-server
@@ -392,7 +392,7 @@ payloads, tokens, cookies, and other unsafe fields. Corrupt or unsupported
 cache files are treated as cache misses and must not be surfaced as an empty
 normal list.
 
-`adapters/thread-list-route-merge-service.js` owns the app-server plus fallback
+`services/thread-list/thread-list-route-merge-service.js` owns the app-server plus fallback
 route merge boundary. The normal `/api/threads` route drops fallback rows whose
 thread id is already present in the authoritative app-server result before
 calling the summary merge service. This keeps fallback rows useful for
@@ -403,18 +403,21 @@ remain attributable without private thread content. `server.js` also reuses
 rollout size/stat metadata that was already attached during the visible-thread
 filter pass when later display-summary merge stages run in the same request.
 
-`adapters/thread-list-summary-merge-service.js` owns duplicate summary merge
+`services/thread-list/thread-list-summary-merge-service.js` owns duplicate summary merge
 semantics. It only invokes duplicate display-summary merge when two rows with
 the same thread id are actually present; unique rows proceed directly to
 archive/sub-agent filtering, stripping, sorting, and limiting. This preserves
 duplicate resolution semantics while avoiding a non-duplicate display-merge
 stage that was measurable on warm large-session list reads.
 
-`adapters/thread-list-response-coalescer-service.js` owns in-flight response
+`services/thread-list/thread-list-response-coalescer-service.js` owns in-flight response
 coalescing for identical default full-list `/api/threads` requests. It shares
 one authoritative app-server `thread/list` plus merge/decorate result with
 concurrent follower requests so burst refreshes do not multiply app-server RPC
-waits or CPU post-processing. It is intentionally disabled for cursor,
+waits or CPU post-processing. Follower requests receive a shallow diagnostics
+patch around the shared result instead of a full JSON deep clone, so burst
+refreshes do not create avoidable RSS spikes by duplicating the whole thread
+list payload. It is intentionally disabled for cursor,
 workspace, search, archived, fallback-defer, and warm-initial requests.
 
 Browser thread-status freshness policy lives in `public/thread-status-hints.js`.
@@ -501,7 +504,7 @@ the current detail window and preserves the reading position after prepending
 those turns.
 
 Active-window history construction has a separate in-flight coalescing
-boundary. `adapters/thread-detail-active-window-prewarm-service.js` and the
+boundary. `services/thread-detail/thread-detail-active-window-prewarm-service.js` and the
 foreground thread-detail orchestrator can both build the same
 `turns-list-active-overlay-window` history window when a large active thread
 has live overlay evidence but no usable projection window yet. They share
@@ -517,7 +520,7 @@ read suppression does not create shared mutable response state. This is
 process-local duplicate suppression, not a persistent cache or an alternate
 projection authority.
 Startup fallback prewarm feeds the same path: after
-`adapters/thread-list-fallback-prewarm-service.js` builds the process fallback
+`services/thread-list/thread-list-fallback-prewarm-service.js` builds the process fallback
 baseline, server glue can schedule active-window prewarm for active rows from
 that already-read result. The public fallback-prewarm status still exposes only
 counts/timings, not thread titles, message text, or row payloads.
@@ -593,7 +596,14 @@ active-looking turns and receive completed-turn budgets for response shaping.
 When the returned detail window is under high item-count or byte pressure, the
 same response-budget service enables progressive active limits for the current
 active turn's operation, reasoning, and assistant/plan tails. Under that
-progressive active pressure only, oversized retained active assistant/reasoning
+progressive active pressure only, replay assistant/plan progress is no longer
+unbounded: active and protected latest-completed replay turns keep a trailing
+assistant/plan tail controlled by
+`CODEX_MOBILE_THREAD_DETAIL_PROGRESSIVE_REPLAY_ASSISTANT_ITEMS` (default `8`)
+before any lower-value process rows are considered. This keeps the latest
+user-visible progress readable without making a large active overlay ship every
+historical assistant fragment on first paint. Under the same pressure, oversized
+retained active assistant/reasoning
 text fields may be reduced to a bounded first-paint preview with
 `mobileActiveTextBudget` metadata and `mobileTextTruncated=true`; ordinary
 small active turns and completed-turn receipts keep their existing text
@@ -650,7 +660,7 @@ Workspace-level token accounting is a separate persistent ledger. On `turn/compl
 
 The sidebar version pill is the entry point for update checks. It opens an Updates panel rather than immediately applying an update. The current-checkout section uses the existing `/api/app-update/status` and `/api/app-update/apply` path, which only fast-forwards the configured `CODEX_MOBILE_UPDATE_REMOTE` / `CODEX_MOBILE_UPDATE_BRANCH` when the checkout is clean, on the expected branch, and not ahead or diverged. The Public release section calls `/api/public-release/status` to read the latest commit from the configured public repository. It is informational for private checkouts; a public-installed checkout can use the same current-checkout fast-forward path when its update remote already points at the public repository. After a successful Windows self-update, the Node listener exits and the hidden windowless supervisor restarts it from the updated files; this remains true for a LocalSystem startup task, provided the launcher keeps the target user profile environment described above instead of falling back to the system profile.
 
-The sidebar `Restart` action is separate from self-update. Before calling `/api/restart/shared-chain`, the browser opens an in-app confirmation dialog, reads a bounded recent `/api/threads?limit=200&archived=false` list, and lists running sessions that may be interrupted. This is advisory only: the user can still proceed, and the actual restart scope remains enforced by `adapters/shared-chain-restart-service.js` plus the platform restart scripts. On Windows system-task deployments, the API restart path starts a short hidden PowerShell bootstrap which registers and starts a separate `SYSTEM` helper task (`Codex Mobile Web Restart Helper`). That helper runs the real restart script outside the current scheduled-task process tree; otherwise a LocalSystem `AtStartup` task can kill its own helper when `Stop-ScheduledTask` runs. On macOS, LaunchAgent-managed listeners are restarted through `launchctl kickstart -k` against the existing GUI service label after same-prefix submitted jobs are cleaned. System LaunchDaemon deployments are not restarted with user-level `launchctl kickstart system/...`; the helper first best-effort repairs the LaunchDaemon stdout/stderr files reported by `launchctl print system/<label>`, then restarts the LaunchDaemon service. Before restarting the listener, the macOS helper reads the selected profile mux endpoint file and stops only the recorded `codex-app-server-mux` / `codex app-server` PIDs, then removes that selected endpoint file so a replacement process must publish fresh capabilities. It must not scan or stop unrelated profile muxes. The fallback non-service path uses a one-shot detached `nohup` server process and must not create persistent `launchctl submit` jobs.
+The sidebar `Restart` action is separate from self-update. Before calling `/api/restart/shared-chain`, the browser opens an in-app confirmation dialog, reads a bounded recent `/api/threads?limit=200&archived=false` list, and lists running sessions that may be interrupted. This is advisory only: the user can still proceed, and the actual restart scope remains enforced by `adapters/shared-chain-restart-service.js` plus the platform restart scripts. On Windows system-task deployments, the API restart path starts a short hidden PowerShell bootstrap which registers and starts a separate `SYSTEM` helper task (`Codex Mobile Web Restart Helper`). That helper runs the real restart script outside the current scheduled-task process tree; otherwise a LocalSystem `AtStartup` task can kill its own helper when `Stop-ScheduledTask` runs. On macOS, LaunchAgent-managed listeners are restarted through `launchctl kickstart -k` against the existing GUI service label after same-prefix submitted jobs are cleaned. System LaunchDaemon deployments are not restarted with user-level `launchctl kickstart system/...`; the helper first best-effort repairs the LaunchDaemon stdout/stderr files reported by `launchctl print system/<label>`, then restarts the LaunchDaemon service. Before restarting the listener, the macOS helper reads the selected profile mux endpoint file and stops only the recorded `codex-app-server-mux` / `codex app-server` PIDs, then removes that selected endpoint file so a replacement process must publish fresh capabilities. It must not scan or stop unrelated profile muxes. Production system LaunchDaemon default-shell cutovers, such as changing `CODEX_MOBILE_DEFAULT_SHELL` to `vite-app-preview`, use the external `restart-codex-mobile-host-macos.sh --default-shell-mode ...` path so the plist is changed and verified from outside the managed listener process. The fallback non-service path uses a one-shot detached `nohup` server process and must not create persistent `launchctl submit` jobs.
 
 Thread detail responses may also include `thread.threadTaskCards`. These are
 cross-thread collaboration cards that stay outside normal `thread.turns[*].items`
@@ -716,17 +726,31 @@ switch because it closes an already received card; it validates the original
 `Task card id`, the target actor thread, and the return body before calling
 `threadTaskCardService.reply()`. Return cards with `returnToSource:true` are
 source-direct approved into the original source thread and do not require a
-second source-thread approval. A target-thread final answer is not a
-source-thread return card.
+second source-thread approval. They are terminal receipts, not target-side
+approval requests: pending-count decoration, public card actions, and retry
+paths must exclude them even during the short source-direct approval window.
+Concurrent retries for the same terminal return event treat an existing
+`sending` audit status as in-flight and must not emit a second Home AI delivery
+event. When a visible card id is stale but the workflow id uniquely identifies
+the original active card, the service resolves the original card from stored
+workflow metadata only if the caller actor matches the stored
+`expectedActorThreadId` / `targetThreadId`. Wrong actors fail closed with
+`workflow_actor_mismatch` and bounded expected/requested actor metadata instead
+of being rewritten to another thread. Already closed or missing duplicate return
+attempts produce bounded no-op results instead of creating acknowledgement
+loops. A target-thread final answer is not a source-thread return card.
 Deep audit/task-card callers can pass `reasoningEffort` (`low`, `medium`,
 `high`, or `xhigh`) through the source-thread create route, dynamic tool, MCP
 tool, or create script. The service stores the bounded request on delivery
 metadata, the injected message exposes it, and the approval path overrides the
 target turn's inherited runtime effort before `thread/resume` / `turn/start`.
 Target parsing, visible-thread filtering, archived/hidden/subagent/sidecar
-rejection, same-cwd canonical selection, and public target metadata shaping are
-owned by `adapters/thread-task-card-routing-service.js`; `server.js` keeps only
-the HTTP/app-server composition wrappers for those rules.
+rejection, same-cwd canonical selection, public target metadata shaping, and
+routine plugin deploy-lane routing are owned by
+`services/task-cards/thread-task-card-routing-service.js` and
+`services/task-cards/thread-task-card-deploy-lane-policy-service.js`; the
+adapter paths are compatibility exports only, and `server.js` keeps only the
+HTTP/app-server composition wrappers for those rules.
 This app-server dynamic-tool path is only for Codex app-server turns. Codex
 Mobile also registers a standard `codex_mobile` MCP server into each active or
 target Codex Home during startup, workspace creation, and profile switching.
@@ -741,11 +765,12 @@ dynamic source-write decision layer. For ordinary non-exempt workspaces,
 `thread/start`, `thread/resume`, and `turn/start` use a real
 `workspace-write` / managed profile plus `approvalPolicy:"on-request"` so direct
 tool calls are still constrained by the app-server sandbox. The profile keeps
-root read-only, allows writes to the current cwd, temporary directories, and the
-current cwd's `.git` metadata, and keeps `.codex` / `.agents` under the cwd
-read-only. The workspace-write sandbox policy also lists the current `.git` as
-an explicit writable root because the app-server sandbox can otherwise keep git
-metadata read-only even when the managed permission profile allows it.
+root read-only, allows reads and writes to the current cwd, temporary directory
+writes, and reads/writes to the current cwd's `.git` metadata, and keeps
+`.codex` / `.agents` under the cwd read-only. The workspace-write sandbox
+policy also lists the current `.git` as an explicit writable root because the
+app-server sandbox can otherwise keep git metadata read-only even when the
+managed permission profile allows it.
 `adapters/workspace-source-write-guard-service.js` auto-allows reads,
 MCP calls, network, current-workspace writes, and current-workspace `.git`
 approval requests, while auto-denying explicit file changes, patches,
@@ -1020,6 +1045,12 @@ The mux keeps a replay buffer for recent app-server notifications and unresolved
 ### Web Push Completion Notifications
 
 Turn-ended Web Push notifications are driven by app-server `turn/completed` notifications after Mobile Web has observed the matching `turn/started` event. They must fail closed for unknown thread ids and sub-agent child threads.
+`adapters/web-push-runtime-service.js` owns the runtime part of this flow:
+VAPID key storage/subject repair, subscription persistence and `/api/push/*`
+route handling, started/completed observation, send de-duplication, subagent
+classification cache, direct Web Push sending, and Hermes notification
+delegation fallback. `server.js` injects filesystem/runtime JSON, state DB,
+thread-title/cache helpers, turn id/timestamp helpers, and route response glue.
 
 Standalone Web Push completion payloads must carry the stable Codex thread id
 both at the top level and in `notification.data.threadId`, along with a same
@@ -1027,6 +1058,9 @@ origin deep-link URL such as `/?thread=<thread-id>`. The service worker click
 handler focuses an existing app shell and posts the target id, or opens the
 deep-link URL directly for cold-start/PWA launch so startup thread selection can
 load the matching thread without relying on a late `postMessage`.
+The service worker uses the server-provided stable notification tag with
+`renotify:false`, so a replayed same-thread completion notification replaces
+the existing visible notification instead of creating another alert.
 
 If the completion payload explicitly says the turn has no final assistant message, Mobile Web must not send a normal "turn ended" Push notification. That shape means the runtime ended the turn without a final reply, so treating it as a normal completed turn is misleading. Thread detail projection should expose this as a bounded `turnDiagnostic` item with code `runtime_completed_without_response`; it must not fabricate an `agentMessage`, and receipt-only compaction must retain the diagnostic so the turn does not appear to silently vanish.
 
@@ -1042,9 +1076,10 @@ the actual Codex thread name as the payload title: explicit `threadTitle`,
 `turn.thread.title` win over stale started-turn labels, route/plugin names, or
 preview text. Persisted thread `name` is preferred over `preview`; preview is
 only a fallback when no real thread name is available.
-`adapters/push-notification-service.js` owns the bounded in-memory cache of
-app-server `thread/list` and `thread/read` display summaries, and `server.js`
-checks that display cache before the local SQLite fallback. This prevents old continuation threads whose
+`adapters/push-notification-service.js` owns the pure helper policy and bounded
+in-memory cache of app-server `thread/list` and `thread/read` display
+summaries. The Web Push runtime service checks that display cache before the
+local SQLite fallback. This prevents old continuation threads whose
 `state_5.sqlite` title still contains the bootstrap prompt from producing a
 wrong external notification title. If the cache is empty when a completed-turn
 event arrives, the notification path performs a bounded app-server summary
@@ -1090,6 +1125,9 @@ request. It must not freeze `buildId`, `clientBuildId`, or `shellCacheName` at
 Node startup, because a deploy can update static files while the old listener is
 still alive. The browser compares only real app-shell build fields
 (`clientBuildId`, `shellCacheName`, `buildId`), not the ordinary app `version`.
+Only the profile/quota portion of the response is cached briefly; profile switch
+invalidates that cache, and active quota changes produce a distinct cache
+signature.
 
 Refresh is manual in standalone mode. The browser may check for a new
 server-started build after startup, foreground/focus recovery, EventSource
@@ -1113,6 +1151,17 @@ bottom tabs does not flash through an old/default iframe page. Asset-only
 comparable app-shell identity (`clientBuildId` / `shellCacheName`) should ask
 the user or Hermes host to refresh. Server-only fixes do not need a shell bump,
 but open clients may need a normal detail refresh.
+
+After production deploys that move static-client or large architecture
+boundaries, `scripts/codex-mobile-browser-runtime-self-check.js --startup-only`
+is the lightweight listener startup gate. It verifies the launched listener
+through `/api/public-config`, reads `/app.js`, `/sw.js`, and split runtime
+assets, then opens the real shell in an isolated Chrome profile. The gate must
+fail on browser startup exceptions, invisible app shell, visible login panel
+after key injection, static shell build/cache mismatch, or missing split-runtime
+factories. This startup-only gate is read-only and does not sample thread detail
+or submit Composer messages; full browser sampling remains available for deeper
+DOM/projection checks.
 
 ### Public PR Prompt
 

@@ -1,44 +1,12 @@
 "use strict";
 
-const CACHE_NAME = "codex-mobile-shell-v570";
-const STATIC_ASSETS = [
-  "/",
-  "/index.html",
-  "/styles.css",
-  "/api-client.js",
-  "/runtime-settings.js",
-  "/draft-store.js",
-  "/markdown-renderer.js",
-  "/viewport-metrics.js",
-  "/conversation-scroll.js",
-  "/image-compressor.js",
-  "/plugin-embed.js",
-  "/plugin-voice-input.js",
-  "/home-ai-diagnostic-reporting.js",
-  "/thread-diagnostic-events.js",
-  "/thread-status-hints.js",
-  "/thread-performance-metrics.js",
-  "/thread-list-load-policy.js",
-  "/thread-list-stable-order.js",
-  "/live-operation-dock-state.js",
-  "/thread-detail-state.js",
-  "/thread-detail-render-plan.js",
-  "/thread-detail-merge-state.js",
-  "/thread-detail-v4-merge-state.js",
-  "/thread-detail-patch-plan.js",
-  "/thread-detail-dom-patch.js",
-  "/thread-detail-actions.js",
-  "/thread-tile-actions.js",
-  "/thread-tile-state.js",
-  "/thread-tile-layout.js",
-  "/build-refresh-policy.js",
-  "/app.js",
-  "/manifest.json",
-  "/icons/icon.svg",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png",
-  "/icons/apple-touch-icon.png",
-];
+importScripts("/shell-asset-manifest.js");
+
+const SHELL_MANIFEST = self.CODEX_MOBILE_SHELL_MANIFEST || {};
+const CACHE_NAME = String(SHELL_MANIFEST.shellCacheName || "codex-mobile-shell-v625");
+const STATIC_ASSETS = Object.freeze(Array.isArray(SHELL_MANIFEST.precacheAssets)
+  ? SHELL_MANIFEST.precacheAssets.slice()
+  : ["/", "/index.html", "/styles.css", "/shell-asset-manifest.js", "/app-bootstrap.js", "/app.js", "/manifest.json"]);
 
 function shouldBypassCache(url) {
   return url.origin !== self.location.origin
@@ -50,6 +18,58 @@ function resolveAfter(ms, value) {
   return new Promise((resolve) => {
     setTimeout(() => resolve(value), ms);
   });
+}
+
+function isShellReloadNavigation(url) {
+  return url.searchParams.has("shellReload")
+    || url.searchParams.has("codexMobileBuild")
+    || url.searchParams.has("codexViteShell");
+}
+
+function shouldNetworkFirstShellAsset(url) {
+  const path = url.pathname;
+  return path === "/sw.js"
+    || path === "/shell-asset-manifest.js"
+    || path === "/shell-asset-manifest.json"
+    || path === "/vite-shell/app-preview.html"
+    || path === "/vite-shell/preview.html"
+    || path === "/vite-shell/app-preview-entry.js"
+    || /^\/vite-shell\/assets\/vite-shell-entry-[^/]+\.js$/.test(path)
+    || path === "/app-update-runtime.js"
+    || path === "/event-stream-runtime.js";
+}
+
+function isImmutableViteShellAsset(url) {
+  const path = url.pathname;
+  return /^\/vite-shell\/assets\/[^/]+-[A-Za-z0-9_-]{6,}\.js$/.test(path)
+    && !/^\/vite-shell\/assets\/vite-shell-entry-[^/]+\.js$/.test(path);
+}
+
+async function putOkResponse(cacheKey, response) {
+  if (!response || !response.ok) return;
+  const copy = response.clone();
+  const cache = await caches.open(CACHE_NAME);
+  await cache.put(cacheKey, copy);
+}
+
+async function networkFirst(request, cacheKey = request) {
+  const cached = await caches.match(cacheKey);
+  try {
+    const response = await fetch(request, { cache: "reload" });
+    await putOkResponse(cacheKey, response);
+    return response;
+  } catch (_) {
+    if (cached) return cached;
+    throw _;
+  }
+}
+
+async function immutableCacheFirst(request) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
+  const response = await fetch(request);
+  await putOkResponse(request, response);
+  return response;
 }
 
 self.addEventListener("install", (event) => {
@@ -78,12 +98,14 @@ self.addEventListener("fetch", (event) => {
   if (request.mode === "navigate") {
     event.respondWith(
       (async () => {
+        if (isShellReloadNavigation(url)) {
+          return networkFirst(request, "/index.html");
+        }
         const cached = await caches.match("/index.html");
         const network = fetch(request)
           .then((response) => {
             if (response && response.ok) {
-              const copy = response.clone();
-              caches.open(CACHE_NAME).then((cache) => cache.put("/index.html", copy));
+              putOkResponse("/index.html", response).catch(() => {});
             }
             return response;
           });
@@ -96,12 +118,21 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  if (isImmutableViteShellAsset(url)) {
+    event.respondWith(immutableCacheFirst(request));
+    return;
+  }
+
+  if (shouldNetworkFirstShellAsset(url)) {
+    event.respondWith(networkFirst(request));
+    return;
+  }
+
   event.respondWith(
     caches.match(request).then((cached) => {
       const network = fetch(request).then((response) => {
         if (response && response.ok) {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          putOkResponse(request, response).catch(() => {});
         }
         return response;
       });
@@ -130,6 +161,7 @@ self.addEventListener("push", (event) => {
     icon: "/icons/icon-192.png",
     badge: "/icons/icon-192.png",
     tag: payload.tag || "codex-mobile-web",
+    renotify: false,
     data,
   };
   event.waitUntil(self.registration.showNotification(title, options));

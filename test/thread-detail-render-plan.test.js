@@ -187,6 +187,8 @@ test("thread detail history auto-backfill triggers for workflow dominated window
         turn("t3", [item("userMessage", "Task card id: ttc_2\nReturn required: yes")]),
         turn("t4", [item("agentMessage", "normal receipt")]),
         turn("t5", [item("userMessage", "Source thread: Home AI\nWorkflow mode: autonomous")]),
+        turn("t5b", [item("userMessage", "# Continuation Bootstrap Index\n\nThis thread is a same-workspace continuation created by Codex Mobile Web.")]),
+        turn("t5c", [item("userMessage", "[Codex Mobile task-card continuation]\n\nTask card id: ttc_3")]),
         turn("t6", [item("userMessage", "short normal user request")]),
       ],
     },
@@ -194,7 +196,7 @@ test("thread detail history auto-backfill triggers for workflow dominated window
 
   assert.equal(plan.shouldLoad, true);
   assert.equal(plan.reason, "workflow-dominated-window");
-  assert.equal(plan.counts.workflowItemCount, 3);
+  assert.equal(plan.counts.workflowItemCount, 5);
 });
 
 test("thread detail history auto-backfill leaves ordinary recent windows alone", () => {
@@ -581,18 +583,18 @@ test("thread detail refresh patch execution allows local patch only for non-tile
   });
 });
 
-test("thread detail refresh patch execution blocks single-thread patching on tile surfaces", () => {
+test("thread detail refresh patch execution chains tile pane then local patch on tile surfaces", () => {
   assert.deepEqual(renderPlan.planThreadDetailRefreshPatchExecution({
     shouldRenderDetail: true,
     canPatch: true,
     tileSurfaceRefresh: true,
   }), {
     tryTilePanePatch: true,
-    tryLocalPatch: false,
+    tryLocalPatch: true,
     updateMetadataOnTileMiss: false,
     fallbackAction: "full-render",
-    localPatchBlockedReason: "tile-surface-refresh",
-    reason: "tile-surface-refresh",
+    localPatchBlockedReason: "",
+    reason: "tile-surface-patch-chain",
   });
 });
 
@@ -664,6 +666,18 @@ test("thread detail refresh patch surface plan classifies tile and single-thread
   assert.deepEqual(renderPlan.planThreadDetailRefreshPatchSurface({
     shouldRenderDetail: true,
     threadTileMode: false,
+    threadTileConversationSurface: false,
+    tilePatchSurface: "single-thread",
+  }), {
+    shouldProbeTilePatchSurface: true,
+    tileSurfaceRefresh: false,
+    tilePatchSurface: "single-thread",
+    reason: "single-thread-surface",
+  });
+
+  assert.deepEqual(renderPlan.planThreadDetailRefreshPatchSurface({
+    shouldRenderDetail: true,
+    threadTileMode: true,
     threadTileConversationSurface: false,
     tilePatchSurface: "single-thread",
   }), {
@@ -828,11 +842,11 @@ test("thread detail refresh patch surface execution stage composes probe result 
     patchExecutionStage: {
       patchExecutionPlan: {
         tryTilePanePatch: true,
-        tryLocalPatch: false,
+        tryLocalPatch: true,
         updateMetadataOnTileMiss: false,
         fallbackAction: "full-render",
-        localPatchBlockedReason: "tile-surface-refresh",
-        reason: "tile-surface-refresh",
+        localPatchBlockedReason: "",
+        reason: "tile-surface-patch-chain",
       },
       patchAttemptEffectsPlan: {
         effects: [
@@ -841,18 +855,23 @@ test("thread detail refresh patch surface execution stage composes probe result 
             timingTarget: "tile-pane-patch",
             preserveScroll: true,
           },
+          {
+            type: "local-patch",
+            timingTarget: "local-patch",
+            skipWhenTilePanePatched: true,
+          },
         ],
         reason: "patch-attempt-effects",
       },
-      reason: "tile-surface-refresh",
+      reason: "tile-surface-patch-chain",
     },
     patchExecutionPlan: {
       tryTilePanePatch: true,
-      tryLocalPatch: false,
+      tryLocalPatch: true,
       updateMetadataOnTileMiss: false,
       fallbackAction: "full-render",
-      localPatchBlockedReason: "tile-surface-refresh",
-      reason: "tile-surface-refresh",
+      localPatchBlockedReason: "",
+      reason: "tile-surface-patch-chain",
     },
     patchAttemptEffectsPlan: {
       effects: [
@@ -861,10 +880,15 @@ test("thread detail refresh patch surface execution stage composes probe result 
           timingTarget: "tile-pane-patch",
           preserveScroll: true,
         },
+        {
+          type: "local-patch",
+          timingTarget: "local-patch",
+          skipWhenTilePanePatched: true,
+        },
       ],
       reason: "patch-attempt-effects",
     },
-    reason: "tile-surface-refresh",
+    reason: "tile-surface-patch-chain",
   });
 
   const metadataStage = renderPlan.planThreadDetailRefreshPatchSurfaceExecutionStage({
@@ -1074,6 +1098,11 @@ test("thread detail refresh patch execution stage owns execution and attempt eff
         timingTarget: "tile-pane-patch",
         preserveScroll: true,
       },
+      {
+        type: "local-patch",
+        timingTarget: "local-patch",
+        skipWhenTilePanePatched: true,
+      },
     ],
     reason: "patch-attempt-effects",
   });
@@ -1158,6 +1187,8 @@ test("thread detail refresh patch attempt result makes tile pane patch terminal"
     patchTimingSource: "tile-pane",
     patchRejectReason: "",
     reportLocalPatchRejected: false,
+    localPatchAttempted: true,
+    tilePanePatchAttempted: true,
     finalizeResult: {
       locallyPatchedDetail: false,
       tilePanePatchedDetail: true,
@@ -1182,6 +1213,8 @@ test("thread detail refresh patch attempt result reports local patch rejection",
     patchTimingSource: "local-patch-rejected",
     patchRejectReason: "rendered-dom-stale",
     reportLocalPatchRejected: true,
+    localPatchAttempted: true,
+    tilePanePatchAttempted: true,
     finalizeResult: {
       locallyPatchedDetail: false,
       tilePanePatchedDetail: false,
@@ -1207,6 +1240,8 @@ test("thread detail refresh patch attempt result records local patch timing", ()
     patchTimingSource: "local-patch",
     patchRejectReason: "",
     reportLocalPatchRejected: false,
+    localPatchAttempted: true,
+    tilePanePatchAttempted: true,
     finalizeResult: {
       locallyPatchedDetail: true,
       tilePanePatchedDetail: false,
@@ -1231,6 +1266,8 @@ test("thread detail refresh patch attempt result keeps metadata tile misses quie
     patchTimingSource: "",
     patchRejectReason: "",
     reportLocalPatchRejected: false,
+    localPatchAttempted: false,
+    tilePanePatchAttempted: true,
     finalizeResult: {
       locallyPatchedDetail: false,
       tilePanePatchedDetail: false,
@@ -1353,6 +1390,8 @@ test("thread detail refresh patch attempt result stage requests shapes only for 
       patchTimingSource: "local-patch-rejected",
       patchRejectReason: "rendered-dom-stale",
       reportLocalPatchRejected: true,
+      localPatchAttempted: true,
+      tilePanePatchAttempted: true,
       finalizeResult: {
         locallyPatchedDetail: false,
         tilePanePatchedDetail: false,
@@ -1393,6 +1432,8 @@ test("thread detail refresh patch attempt result stage requests shapes only for 
       patchTimingSource: "local-patch-rejected",
       patchRejectReason: "rendered-dom-stale",
       reportLocalPatchRejected: true,
+      localPatchAttempted: true,
+      tilePanePatchAttempted: true,
       finalizeResult: {
         locallyPatchedDetail: false,
         tilePanePatchedDetail: false,
@@ -1792,6 +1833,17 @@ test("thread detail refresh performance input combines render and patch plans", 
     patchAttemptResult: {
       detailPatchMs: 7.6,
       patchRejectReason: "shape-changed",
+      patchResult: "local-patch-rejected",
+      patchTimingSource: "local-patch-rejected",
+      localPatchAttempted: true,
+      tilePanePatchAttempted: true,
+    },
+    patchSurfacePlan: {
+      tilePatchSurface: "thread-tile-pane",
+      reason: "tile-patch-surface",
+    },
+    patchExecutionPlan: {
+      reason: "tile-surface-patch-chain",
     },
     timings: {
       elapsedMs: 25.4,
@@ -1820,9 +1872,16 @@ test("thread detail refresh performance input combines render and patch plans", 
     refreshRenderAction: "local-patch-metadata-update",
     renderPlanReason: "signature-changed",
     patchRejectReason: "shape-changed",
+    patchResult: "local-patch-rejected",
+    patchTimingSource: "local-patch-rejected",
+    patchSurfaceReason: "tile-patch-surface",
+    patchSurface: "thread-tile-pane",
+    patchExecutionReason: "tile-surface-patch-chain",
     skippedDetailRender: false,
     locallyPatchedDetail: true,
     tilePanePatchedDetail: false,
+    localPatchAttempted: true,
+    tilePanePatchAttempted: true,
   });
 });
 
@@ -1845,6 +1904,17 @@ test("thread detail refresh reporting stage composes performance, telemetry, and
     patchAttemptResult: {
       detailPatchMs: 7.6,
       patchRejectReason: "shape-changed",
+      patchResult: "local-patch-rejected",
+      patchTimingSource: "local-patch-rejected",
+      localPatchAttempted: true,
+      tilePanePatchAttempted: true,
+    },
+    patchSurfacePlan: {
+      tilePatchSurface: "thread-tile-pane",
+      reason: "tile-patch-surface",
+    },
+    patchExecutionPlan: {
+      reason: "tile-surface-patch-chain",
     },
     timings: {
       elapsedMs: 25.4,
@@ -1879,9 +1949,16 @@ test("thread detail refresh reporting stage composes performance, telemetry, and
       refreshRenderAction: "local-patch-metadata-update",
       renderPlanReason: "signature-changed",
       patchRejectReason: "shape-changed",
+      patchResult: "local-patch-rejected",
+      patchTimingSource: "local-patch-rejected",
+      patchSurfaceReason: "tile-patch-surface",
+      patchSurface: "thread-tile-pane",
+      patchExecutionReason: "tile-surface-patch-chain",
       skippedDetailRender: false,
       locallyPatchedDetail: true,
       tilePanePatchedDetail: false,
+      localPatchAttempted: true,
+      tilePanePatchAttempted: true,
     },
     telemetryConfig: {
       eventName: "thread_refresh_ms",
@@ -2762,7 +2839,7 @@ test("single-thread full render shell plans loading state", () => {
     loadingWithoutVisibleTurns: true,
   }), {
     mode: "loading",
-    html: `<div class="empty-state entry-animate">Loading thread...</div>`,
+    html: `<div class="history-note entry-animate thread-loading-note" data-render-key="loading-visible|thread-1">正在加载最新线程状态...</div>`,
     clearLiveOperationDock: true,
     bindRetry: false,
     retryThreadId: "",
@@ -2782,7 +2859,7 @@ test("single-thread early shell execution plans loading terminal render", () => 
     shouldRender: true,
     mode: "loading",
     reason: "loading",
-    html: `<div class="empty-state entry-animate">Loading thread...</div>`,
+    html: `<div class="history-note entry-animate thread-loading-note" data-render-key="loading-visible|thread-1">正在加载最新线程状态...</div>`,
     clearLiveOperationDock: true,
     bindRetry: false,
     retryThreadId: "",

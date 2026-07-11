@@ -80,15 +80,20 @@ test("dom patch surface routes tile panes and blocks tile transition mismatches"
     },
   );
 
-  assert.equal(
+  assert.deepEqual(
     patchPlan.planThreadDetailDomPatchSurface({
       threadId: "thread-1",
       threadTileMode: true,
       threadTileSurface: false,
       tilePaneVisible: true,
       conversationPresent: true,
-    }).reason,
-    "tile-mode-surface-mismatch",
+    }),
+    {
+      canPatch: true,
+      surface: "single-thread",
+      reason: "single-thread-surface",
+      threadId: "thread-1",
+    },
   );
 
   assert.equal(
@@ -256,6 +261,26 @@ test("thread detail refresh dom patch plan chooses item patch, insert, and repla
     "replace-turn",
   ]);
   assert.deepEqual(plan.operations.map((operation) => operation.key), ["turn-a", "turn-b", "turn-c"]);
+});
+
+test("thread detail refresh dom patch plan removes stale rendered turns outside next window", () => {
+  const plan = patchPlan.planThreadDetailRefreshDomPatch([
+    {
+      key: "turn-new",
+      hasPreviousTurn: true,
+      itemPatchable: true,
+      articlePresent: true,
+    },
+  ], {
+    previousTurnKeys: ["turn-old", "turn-new", "turn-stale-bottom"],
+  });
+
+  assert.equal(plan.canPatch, true);
+  assert.deepEqual(plan.operations.map((operation) => [operation.type, operation.key]), [
+    ["item-patch", "turn-new"],
+    ["remove-turn", "turn-old"],
+    ["remove-turn", "turn-stale-bottom"],
+  ]);
 });
 
 test("thread detail refresh dom patch plan rejects invalid turn entries", () => {

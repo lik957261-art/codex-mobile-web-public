@@ -1,0 +1,428 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const { test } = require("node:test");
+
+const serverJs = fs.readFileSync(path.resolve(__dirname, "..", "server.js"), "utf8");
+const threadListRouteServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "server-routes", "thread-list-route-service.js"),
+  "utf8",
+);
+const threadListRuntimeServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "services", "thread-list", "thread-list-runtime-service.js"),
+  "utf8",
+);
+const threadListServerBoundaryServiceJs = fs.readFileSync(
+  path.resolve(__dirname, "..", "services", "thread-list", "thread-list-server-boundary-service.js"),
+  "utf8",
+);
+const packageJson = fs.readFileSync(path.resolve(__dirname, "..", "package.json"), "utf8");
+
+const serviceBoundaries = [
+  {
+    canonical: require("../services/thread-list/thread-list-fallback-source-service"),
+    adapter: require("../adapters/thread-list-fallback-source-service"),
+    exports: ["createThreadListFallbackSourceService"],
+    servicePath: "services/thread-list/thread-list-fallback-source-service.js",
+    adapterPath: "adapters/thread-list-fallback-source-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-summary-state-service"),
+    adapter: require("../adapters/thread-summary-state-service"),
+    exports: ["createThreadSummaryStateService"],
+    servicePath: "services/thread-list/thread-summary-state-service.js",
+    adapterPath: "adapters/thread-summary-state-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-fallback-baseline-service"),
+    adapter: require("../adapters/thread-list-fallback-baseline-service"),
+    exports: ["createThreadListFallbackBaselineService"],
+    servicePath: "services/thread-list/thread-list-fallback-baseline-service.js",
+    adapterPath: "adapters/thread-list-fallback-baseline-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-fallback-cache-service"),
+    adapter: require("../adapters/thread-list-fallback-cache-service"),
+    exports: ["createThreadListFallbackCacheService"],
+    servicePath: "services/thread-list/thread-list-fallback-cache-service.js",
+    adapterPath: "adapters/thread-list-fallback-cache-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-fallback-persistent-cache-store"),
+    adapter: require("../adapters/thread-list-fallback-persistent-cache-store"),
+    exports: ["createThreadListFallbackPersistentCacheStore"],
+    servicePath: "services/thread-list/thread-list-fallback-persistent-cache-store.js",
+    adapterPath: "adapters/thread-list-fallback-persistent-cache-store.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-fallback-prewarm-service"),
+    adapter: require("../adapters/thread-list-fallback-prewarm-service"),
+    exports: [
+      "createThreadListFallbackPrewarmService",
+      "summarizePrewarmStatus",
+      "threadListFallbackPrewarmJobPolicy",
+      "withThreadListFallbackPrewarmJobPolicy",
+    ],
+    servicePath: "services/thread-list/thread-list-fallback-prewarm-service.js",
+    adapterPath: "adapters/thread-list-fallback-prewarm-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-app-server-fetch-policy-service"),
+    adapter: require("../adapters/thread-list-app-server-fetch-policy-service"),
+    exports: [
+      "planThreadListAppServerFetch",
+      "planThreadListInitialFallbackAttempt",
+      "threadListAppServerFetchTimingFields",
+      "threadListAppServerLatencyTimingFields",
+      "threadListInitialFallbackMetadata",
+    ],
+    servicePath: "services/thread-list/thread-list-app-server-fetch-policy-service.js",
+    adapterPath: "adapters/thread-list-app-server-fetch-policy-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-route-merge-service"),
+    adapter: require("../adapters/thread-list-route-merge-service"),
+    exports: ["mergeThreadListRouteResult"],
+    servicePath: "services/thread-list/thread-list-route-merge-service.js",
+    adapterPath: "adapters/thread-list-route-merge-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-summary-merge-service"),
+    adapter: require("../adapters/thread-list-summary-merge-service"),
+    exports: ["createThreadListSummaryMergeService"],
+    servicePath: "services/thread-list/thread-list-summary-merge-service.js",
+    adapterPath: "adapters/thread-list-summary-merge-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-request-context-service"),
+    adapter: require("../adapters/thread-list-request-context-service"),
+    exports: ["createThreadListRequestContext"],
+    servicePath: "services/thread-list/thread-list-request-context-service.js",
+    adapterPath: "adapters/thread-list-request-context-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-response-coalescer-service"),
+    adapter: require("../adapters/thread-list-response-coalescer-service"),
+    exports: ["createThreadListResponseCoalescer"],
+    servicePath: "services/thread-list/thread-list-response-coalescer-service.js",
+    adapterPath: "adapters/thread-list-response-coalescer-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-cold-path-diagnosis-service"),
+    adapter: require("../adapters/thread-list-cold-path-diagnosis-service"),
+    exports: ["diagnoseThreadListColdPath"],
+    servicePath: "services/thread-list/thread-list-cold-path-diagnosis-service.js",
+    adapterPath: "adapters/thread-list-cold-path-diagnosis-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-summary-service"),
+    adapter: require("../adapters/thread-list-summary-service"),
+    exports: ["stripThreadListDetailFields", "stripThreadListResultDetailFields"],
+    servicePath: "services/thread-list/thread-list-summary-service.js",
+    adapterPath: "adapters/thread-list-summary-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-state-service"),
+    adapter: require("../adapters/thread-list-state-service"),
+    exports: ["createThreadListStateService"],
+    servicePath: "services/thread-list/thread-list-state-service.js",
+    adapterPath: "adapters/thread-list-state-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-runtime-service"),
+    adapter: require("../adapters/thread-list-runtime-service"),
+    exports: ["createThreadListRuntimeService"],
+    servicePath: "services/thread-list/thread-list-runtime-service.js",
+    adapterPath: "adapters/thread-list-runtime-service.js",
+  },
+  {
+    canonical: require("../services/thread-list/thread-list-server-boundary-service"),
+    adapter: require("../adapters/thread-list-server-boundary-service"),
+    exports: ["createThreadListServerBoundaryService"],
+    servicePath: "services/thread-list/thread-list-server-boundary-service.js",
+    adapterPath: "adapters/thread-list-server-boundary-service.js",
+  },
+];
+
+test("thread-list compatibility adapters re-export canonical service boundaries", () => {
+  for (const boundary of serviceBoundaries) {
+    for (const exportName of boundary.exports) {
+      assert.equal(boundary.adapter[exportName], boundary.canonical[exportName], exportName);
+    }
+  }
+});
+
+test("thread-list server boundary composes fallback source and runtime facades", () => {
+  const { createThreadListServerBoundaryService } = require("../services/thread-list/thread-list-server-boundary-service");
+  const service = createThreadListServerBoundaryService({
+    archivedSessionThreadIds: () => new Set(),
+    filterFallbackThreads: (threads) => threads,
+    isThreadListLiveStatus: () => false,
+    isLiveTurn: () => false,
+    parseJsonLine: (line) => JSON.parse(line),
+    readGlobalState: () => ({}),
+    readRolloutTail: () => "",
+    readStateDbFallback: () => [],
+    readStateDbThread: () => null,
+    rolloutPathForThread: () => "",
+    statusText: (status) => String(status && status.type || status || ""),
+    timestampToMs: () => 0,
+    visibleProjectlessThreadIds: () => new Set(),
+    visibleWorkspaceRoots: () => [],
+  });
+
+  assert.equal(typeof service.threadListFallbackSourceService, "object");
+  assert.equal(typeof service.threadListRuntimeService, "object");
+  assert.equal(service.threadListResponseCoalescer, service.threadListRuntimeService.threadListResponseCoalescer);
+  assert.equal(service.readRolloutSessionFallback, service.threadListFallbackSourceService.readRolloutSessionFallback);
+  assert.equal(service.readThreadListFallback, service.threadListRuntimeService.readThreadListFallback);
+  assert.equal(service.mergeThreadSummaryListWithDiagnostics, service.threadListRuntimeService.mergeThreadSummaryListWithDiagnostics);
+});
+
+test("thread-list server boundary prevents stale-context normalize recursion during list summary merge", () => {
+  const { createThreadListServerBoundaryService } = require("../services/thread-list/thread-list-server-boundary-service");
+  const seen = {
+    cached: false,
+    normalize: false,
+    display: false,
+  };
+  const service = createThreadListServerBoundaryService({
+    archivedSessionThreadIds: () => new Set(),
+    filterFallbackThreads: (threads) => threads,
+    isThreadListLiveStatus: () => false,
+    isLiveTurn: () => false,
+    parseJsonLine: (line) => JSON.parse(line),
+    readGlobalState: () => ({}),
+    readRolloutTail: () => "",
+    readStateDbFallback: () => [],
+    readStateDbThread: () => null,
+    rolloutPathForThread: () => "",
+    statusText: (status) => String(status && status.type || status || ""),
+    stripThreadListDetailFields: (thread) => Object.assign({}, thread),
+    timestampToMs: () => 0,
+    visibleProjectlessThreadIds: () => new Set(),
+    visibleWorkspaceRoots: () => [],
+    mergeThreadWithCachedDisplaySummary(thread, options = {}) {
+      seen.cached = true;
+      assert.equal(options.skipStaleContextOnlyActiveNormalize, true);
+      return Object.assign({}, thread, { cached: true });
+    },
+    normalizeThreadSummaryLiveStatus(thread, options = {}) {
+      seen.normalize = true;
+      assert.equal(options.skipStaleContextOnlyActiveNormalize, true);
+      return Object.assign({}, thread, { normalized: true });
+    },
+    mergeThreadDisplaySummary(base, display, options = {}) {
+      seen.display = true;
+      assert.equal(options.skipStaleContextOnlyActiveNormalize, true);
+      return Object.assign({}, base || {}, display || {}, { merged: true });
+    },
+  });
+
+  const result = service.mergeThreadSummaryListWithDiagnostics([
+    { id: "thread-a", status: { type: "idle" }, updatedAt: 1 },
+    { id: "thread-a", status: { type: "idle" }, updatedAt: 2 },
+  ]);
+
+  assert.deepEqual(result.threads.map((thread) => thread.id), ["thread-a"]);
+  assert.equal(result.threads[0].cached, true);
+  assert.equal(result.threads[0].normalized, true);
+  assert.equal(result.threads[0].merged, true);
+  assert.deepEqual(seen, { cached: true, normalize: true, display: true });
+});
+
+test("thread summary state service can skip stale-context normalization for boundary-owned list merges", () => {
+  const { createThreadSummaryStateService } = require("../services/thread-list/thread-summary-state-service");
+  const service = createThreadSummaryStateService({
+    normalizeStaleContextOnlyActiveThread() {
+      throw new Error("stale-context normalize should be skipped for thread-list boundary merges");
+    },
+    normalizeHomeAiDeployLaneSummary: (thread) => Object.assign({}, thread, { deployLaneNormalized: true }),
+    annotateThreadRolloutStats: (thread) => Object.assign({}, thread, { rolloutAnnotated: true }),
+    threadDisplaySummaryCache: {
+      read: () => ({ id: "thread-a", name: "Cached", status: { type: "idle" } }),
+      remember: (thread) => thread,
+    },
+    threadListSummaryTimestampMs: (thread) => Number(thread && thread.updatedAt || 0),
+    statusText: (status) => String(status && status.type || status || ""),
+  });
+  const options = { skipStaleContextOnlyActiveNormalize: true };
+
+  const merged = service.mergeThreadDisplaySummary(
+    { id: "thread-a", name: "Base", updatedAt: 1, status: { type: "idle" } },
+    { id: "thread-a", name: "Display", updatedAt: 2, status: { type: "idle" } },
+    options,
+  );
+  const cached = service.mergeThreadWithCachedDisplaySummary(
+    { id: "thread-a", name: "Base", status: { type: "idle" } },
+    options,
+  );
+  const normalized = service.normalizeThreadSummaryLiveStatus(
+    { id: "thread-a", status: { type: "idle" } },
+    options,
+  );
+
+  assert.equal(merged.name, "Display");
+  assert.equal(merged.rolloutAnnotated, true);
+  assert.equal(cached.name, "Cached");
+  assert.equal(normalized.deployLaneNormalized, true);
+});
+
+test("thread summary state service skips fallback cache status writes while cache paths normalize summaries", () => {
+  const { createThreadSummaryStateService } = require("../services/thread-list/thread-summary-state-service");
+  const updates = [];
+  const service = createThreadSummaryStateService({
+    localActiveThreadStatusTtlMs: 1,
+    normalizeStaleContextOnlyActiveThread: (thread) => thread,
+    normalizeHomeAiDeployLaneSummary: (thread) => thread,
+    statusText: (status) => String(status && status.type || status || ""),
+    updateThreadListFallbackCacheStatus(threadId, status, meta) {
+      updates.push({ threadId, status, meta });
+      return true;
+    },
+  });
+
+  service.rememberLocalActiveThreadStatus("thread-a", "turn-a", { source: "test" });
+  assert.equal(updates.length, 1);
+  updates.length = 0;
+
+  const normalized = service.normalizeThreadSummaryLiveStatus({
+    id: "thread-a",
+    status: { type: "idle" },
+    updatedAt: 1,
+  }, {
+    nowMs: Date.now() + 1000,
+    skipFallbackCacheStatusUpdate: true,
+    skipStaleContextOnlyActiveNormalize: true,
+  });
+
+  assert.equal(normalized.id, "thread-a");
+  assert.equal(updates.length, 0);
+});
+
+test("thread summary detail sync skips stale-context normalization before fallback upsert", () => {
+  const { createThreadSummaryStateService } = require("../services/thread-list/thread-summary-state-service");
+  const upserts = [];
+  const service = createThreadSummaryStateService({
+    normalizeStaleContextOnlyActiveThread() {
+      throw new Error("stale-context normalize should be skipped for detail post-read sync");
+    },
+    normalizeHomeAiDeployLaneSummary: (thread) => Object.assign({}, thread, { deployLaneNormalized: true }),
+    annotateThreadRolloutStats: (thread) => Object.assign({}, thread, { rolloutAnnotated: true }),
+    stripThreadListDetailFields: (thread) => Object.assign({}, thread),
+    statusText: (status) => String(status && status.type || status || ""),
+    upsertThreadListFallbackCacheThread(thread, options = {}) {
+      upserts.push({ thread, options });
+      return true;
+    },
+  });
+
+  const result = service.syncThreadDetailReadResultToThreadListFallbackCache({
+    status: 200,
+    body: {
+      thread: {
+        id: "thread-a",
+        name: "Thread A",
+        status: { type: "completed" },
+        activeTurnId: "turn-old",
+        turns: [{ id: "turn-a", items: [] }],
+      },
+    },
+  });
+
+  assert.equal(result.synced, true);
+  assert.equal(result.restStatus, true);
+  assert.equal(upserts.length, 1);
+  assert.equal(upserts[0].thread.id, "thread-a");
+  assert.equal(upserts[0].thread.deployLaneNormalized, true);
+  assert.equal(upserts[0].thread.activeTurnId, undefined);
+  assert.deepEqual(upserts[0].options, { addIfMissing: true });
+});
+
+test("thread summary detail sync strips active overlay detail fields before fallback upsert", () => {
+  const { createThreadSummaryStateService } = require("../services/thread-list/thread-summary-state-service");
+  const { stripThreadListDetailFields } = require("../services/thread-list/thread-list-summary-service");
+  const upserts = [];
+  const service = createThreadSummaryStateService({
+    stripThreadListDetailFields,
+    statusText: (status) => String(status && status.type || status || ""),
+    upsertThreadListFallbackCacheThread(thread) {
+      JSON.stringify(thread);
+      upserts.push(thread);
+      return true;
+    },
+  });
+  const overlay = { reason: "overlay-evidence-complete" };
+  overlay.self = overlay;
+
+  const result = service.syncThreadDetailReadResultToThreadListFallbackCache({
+    status: 200,
+    body: {
+      thread: {
+        id: "thread-overlay",
+        name: "Thread Overlay",
+        status: { type: "active", turnId: "turn-active" },
+        mobileActiveOverlay: overlay,
+        mobileActiveOverlayBackfill: { sourceItems: 1 },
+        turns: [{ id: "turn-active", items: [] }],
+      },
+    },
+  });
+
+  assert.equal(result.synced, true);
+  assert.equal(upserts.length, 1);
+  assert.equal(upserts[0].id, "thread-overlay");
+  assert.equal(upserts[0].mobileActiveOverlay, undefined);
+  assert.equal(upserts[0].mobileActiveOverlayBackfill, undefined);
+  assert.equal(upserts[0].turns, undefined);
+});
+
+test("thread-list server composition imports canonical service paths", () => {
+  assert.match(serverJs, /require\("\.\/services\/thread-list\/thread-summary-state-service"\)/);
+  assert.match(serverJs, /require\("\.\/services\/thread-list\/thread-list-summary-service"\)/);
+  assert.match(serverJs, /require\("\.\/services\/thread-list\/thread-list-state-service"\)/);
+  assert.match(serverJs, /require\("\.\/services\/thread-list\/thread-list-server-boundary-service"\)/);
+  assert.match(threadListServerBoundaryServiceJs, /require\("\.\/thread-list-fallback-source-service"\)/);
+  assert.match(threadListServerBoundaryServiceJs, /require\("\.\/thread-list-runtime-service"\)/);
+  assert.match(threadListRuntimeServiceJs, /require\("\.\/thread-list-fallback-cache-service"\)/);
+  assert.match(threadListRuntimeServiceJs, /require\("\.\/thread-list-fallback-persistent-cache-store"\)/);
+  assert.match(threadListRuntimeServiceJs, /require\("\.\/thread-list-fallback-prewarm-service"\)/);
+  assert.match(threadListRuntimeServiceJs, /require\("\.\/thread-list-route-merge-service"\)/);
+  assert.match(threadListRuntimeServiceJs, /require\("\.\/thread-list-summary-merge-service"\)/);
+  assert.match(threadListRuntimeServiceJs, /require\("\.\/thread-list-response-coalescer-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/services\/thread-list\/thread-list-fallback-cache-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/services\/thread-list\/thread-list-fallback-persistent-cache-store"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/services\/thread-list\/thread-list-fallback-source-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/services\/thread-list\/thread-list-fallback-prewarm-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/services\/thread-list\/thread-list-runtime-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/services\/thread-list\/thread-list-route-merge-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/services\/thread-list\/thread-list-summary-merge-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/services\/thread-list\/thread-list-response-coalescer-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-list-fallback-cache-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-list-fallback-persistent-cache-store"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-list-fallback-source-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-summary-state-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-list-fallback-prewarm-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-list-route-merge-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-list-summary-merge-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-list-response-coalescer-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-list-summary-service"\)/);
+  assert.doesNotMatch(serverJs, /require\("\.\/adapters\/thread-list-state-service"\)/);
+  assert.match(threadListRouteServiceJs, /require\("\.\.\/services\/thread-list\/thread-list-app-server-fetch-policy-service"\)/);
+  assert.match(threadListRouteServiceJs, /require\("\.\.\/services\/thread-list\/thread-list-route-merge-service"\)/);
+  assert.match(threadListRouteServiceJs, /require\("\.\.\/services\/thread-list\/thread-list-request-context-service"\)/);
+  assert.match(threadListRouteServiceJs, /require\("\.\.\/services\/thread-list\/thread-list-cold-path-diagnosis-service"\)/);
+  assert.doesNotMatch(threadListRouteServiceJs, /require\("\.\.\/adapters\/thread-list-app-server-fetch-policy-service"\)/);
+  assert.doesNotMatch(threadListRouteServiceJs, /require\("\.\.\/adapters\/thread-list-route-merge-service"\)/);
+  assert.doesNotMatch(threadListRouteServiceJs, /require\("\.\.\/adapters\/thread-list-request-context-service"\)/);
+  assert.doesNotMatch(threadListRouteServiceJs, /require\("\.\.\/adapters\/thread-list-cold-path-diagnosis-service"\)/);
+});
+
+test("thread-list package check covers canonical services and compatibility adapters", () => {
+  for (const boundary of serviceBoundaries) {
+    assert.match(packageJson, new RegExp(`node --check ${boundary.servicePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(packageJson, new RegExp(`node --check ${boundary.adapterPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  }
+});

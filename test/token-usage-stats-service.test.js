@@ -218,20 +218,20 @@ test("decorating thread list reuses compiled workspace snapshot", () => {
     now: () => nowMs,
   });
   const workspaceCwds = [
-    "C:\\Users\\xuxin\\Documents\\系统工具",
-    "C:\\Users\\xuxin\\Documents\\ϵͳ¹¤¾ß",
-    "C:\\Users\\xuxin\\Documents\\Music",
+    "C:\\Users\\Public\\Documents\\系统工具",
+    "C:\\Users\\Public\\Documents\\ϵͳ¹¤¾ß",
+    "C:\\Users\\Public\\Documents\\Music",
   ];
   assert.equal(service.recordTurnUsage({
     threadId: "thread-a",
     turnId: "turn-1",
-    cwd: "C:\\Users\\xuxin\\Documents\\系统工具",
+    cwd: "C:\\Users\\Public\\Documents\\系统工具",
     completedAtMs: Date.parse("2026-06-01T09:00:00.000Z"),
     usage: { totalTokens: 8000 },
   }).ok, true);
 
   const first = service.decorateThreadListResult({ data: [{ id: "thread-a" }] }, {
-    cwd: "C:\\Users\\xuxin\\Documents\\系统工具",
+    cwd: "C:\\Users\\Public\\Documents\\系统工具",
     nowMs,
     workspaceCwds,
   });
@@ -241,7 +241,7 @@ test("decorating thread list reuses compiled workspace snapshot", () => {
   assert.equal(first.mobileTokenUsageDiagnostics.queryCount > 0, true);
 
   const second = service.decorateThreadListResult({ data: [{ id: "thread-a" }] }, {
-    cwd: "C:\\Users\\xuxin\\Documents\\系统工具",
+    cwd: "C:\\Users\\Public\\Documents\\系统工具",
     nowMs,
     workspaceCwds,
   });
@@ -305,8 +305,8 @@ test("replayed identical turn usage does not invalidate token query cache", () =
 test("normalizes known mojibake workspace paths for project stats", () => {
   const dbPath = tempDbPath("mojibake");
   const service = createTokenUsageStatsService({ dbPath });
-  const canonicalCwd = "C:\\Users\\xuxin\\Documents\\系统工具";
-  const mojibakeCwd = "C:\\Users\\xuxin\\Documents\\ϵͳ¹¤¾ß";
+  const canonicalCwd = "C:\\Users\\Public\\Documents\\系统工具";
+  const mojibakeCwd = "C:\\Users\\Public\\Documents\\ϵͳ¹¤¾ß";
 
   assert.equal(service.recordTurnUsage({
     threadId: "thread-a",
@@ -328,12 +328,12 @@ test("normalizes known mojibake workspace paths for project stats", () => {
 });
 
 test("merges historical Windows mojibake workspace rows under visible workspace cwd", () => {
-  const financeCwd = "C:\\Users\\xuxin\\Documents\\\u8d22\u52a1";
-  const wardrobeCwd = "C:\\Users\\xuxin\\Documents\\\u7537\u88c5\u8863\u6a71";
-  const toolsCwd = "C:\\Users\\xuxin\\Documents\\\u7cfb\u7edf\u5de5\u5177";
-  const financeBad = "C:\\Users\\xuxin\\Documents\\\u00b2\u00c6\u00ce\u00f1";
-  const wardrobeBad = "C:\\Users\\xuxin\\Documents\\\u00c4\u00d0\u05f0\u00d2\u00b3\u00f7";
-  const toolsBad = "C:\\Users\\xuxin\\Documents\\\u03f5\u0373\u00b9\u00a4\u00be\u00df";
+  const financeCwd = "C:\\Users\\Public\\Documents\\\u8d22\u52a1";
+  const wardrobeCwd = "C:\\Users\\Public\\Documents\\\u7537\u88c5\u8863\u6a71";
+  const toolsCwd = "C:\\Users\\Public\\Documents\\\u7cfb\u7edf\u5de5\u5177";
+  const financeBad = "C:\\Users\\Public\\Documents\\\u00b2\u00c6\u00ce\u00f1";
+  const wardrobeBad = "C:\\Users\\Public\\Documents\\\u00c4\u00d0\u05f0\u00d2\u00b3\u00f7";
+  const toolsBad = "C:\\Users\\Public\\Documents\\\u03f5\u0373\u00b9\u00a4\u00be\u00df";
   const workspaceRows = [
     { cwd: financeBad, total_tokens: 32000000, today_tokens: 32000000, week_tokens: 32000000, input_tokens: 30000000, cached_input_tokens: 1000000, output_tokens: 2000000, reasoning_output_tokens: 0 },
     { cwd: wardrobeBad, total_tokens: 16000000, today_tokens: 16000000, week_tokens: 16000000, input_tokens: 15000000, cached_input_tokens: 500000, output_tokens: 1000000, reasoning_output_tokens: 0 },

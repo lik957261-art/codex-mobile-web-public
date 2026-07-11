@@ -46,6 +46,9 @@ test("Codex Mobile MCP server exposes delegation tools and parses stdio framing"
   assert.equal(listedTools.find((entry) => entry.name === "list_threads").annotations.readOnlyHint, true);
   assert.equal(listedTools.find((entry) => entry.name === "delegate_to_thread").annotations.destructiveHint, false);
   assert.equal(listedTools.find((entry) => entry.name === "return_to_source").annotations.idempotentHint, true);
+  assert.ok(listedTools.find((entry) => entry.name === "delegate_to_thread").inputSchema.properties.pluginId);
+  assert.ok(listedTools.find((entry) => entry.name === "delegate_to_thread").inputSchema.properties.replyToThreadId);
+  assert.ok(listedTools.find((entry) => entry.name === "delegate_to_thread").inputSchema.properties.secretRef);
   const initialized = await handleMessage({ server: "http://127.0.0.1:1", key: "secret" }, { id: 1, method: "initialize" });
   assert.equal(initialized.serverInfo.name, "codex_mobile");
   assert.match(initialized.instructions, /delegate_to_thread/);
@@ -80,6 +83,9 @@ test("Codex Mobile MCP server calls existing authenticated task-card API", async
       assert.equal(body.pending, false);
       assert.equal(body.body, "body");
       assert.equal(body.reasoningEffort, "xhigh");
+      assert.equal(body.pluginId, "codex-mobile-web");
+      assert.equal(body.replyToThreadId, "thread-origin");
+      assert.equal(body.sensitiveContext.secretRefs[0].id, "sec_mcp1234567890");
       assert.deepEqual(body.targetThreadIds, ["thread-home"]);
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({
@@ -95,6 +101,11 @@ test("Codex Mobile MCP server calls existing authenticated task-card API", async
             injectedTurnId: "turn-1",
             delivery: { targetApprovalBypassed: true, reasoningEffort: "xhigh" },
             injectionRuntime: { reasoningEffort: "xhigh", requestedReasoningEffort: "xhigh" },
+            sensitiveContext: {
+              secretRefs: [
+                { id: "sec_mcp1...7890", targetPlugin: "codex", expiresInSeconds: 600, expiresInMinutes: 10 },
+              ],
+            },
           },
         ],
       }));
@@ -103,6 +114,7 @@ test("Codex Mobile MCP server calls existing authenticated task-card API", async
     if (req.method === "POST" && req.url === "/api/thread-task-cards/ttc_inbound/reply") {
       const body = JSON.parse(await readBody(req));
       assert.equal(body.threadId, "target-1");
+      assert.equal(body.workflowId, "workflow-1");
       assert.equal(body.title, "Return: completed");
       assert.equal(body.summary, "completed");
       assert.equal(body.body, "done");
@@ -112,6 +124,14 @@ test("Codex Mobile MCP server calls existing authenticated task-card API", async
       res.end(JSON.stringify({
         ok: true,
         card: { id: "ttc_inbound", status: "replied" },
+        returnResolution: {
+          requestedActorThreadId: "target-1",
+          resolvedActorThreadId: "target-1",
+          expectedTargetThreadId: "target-1",
+          workflowRecovered: true,
+          actorThreadInferred: false,
+          resolverVersion: "task-card-exact-routing-v1",
+        },
         replyCard: {
           id: "ttc_return",
           status: "approved",
@@ -149,21 +169,31 @@ test("Codex Mobile MCP server calls existing authenticated task-card API", async
     title: "title",
     bodyMarkdown: "body",
     reasoningEffort: "xhigh",
+    pluginId: "codex-mobile-web",
+    replyToThreadId: "thread-origin",
+    secretRef: "sec_mcp1234567890",
   });
   assert.equal(delegated.cardCount, 1);
   assert.equal(delegated.cards[0].id, "ttc_1");
   assert.equal(delegated.cards[0].targetApprovalBypassed, true);
   assert.equal(delegated.cards[0].reasoningEffort, "xhigh");
   assert.equal(delegated.cards[0].runtimeReasoningEffort, "xhigh");
+  assert.equal(delegated.cards[0].sensitiveContext.secretRefs[0].id, "sec_mcp1...7890");
+  assert.doesNotMatch(JSON.stringify(delegated), /sec_mcp1234567890/);
 
   const returned = await returnToSource(context, {
     taskCardId: "ttc_inbound",
     threadId: "target-1",
+    workflowId: "workflow-1",
     status: "completed",
     title: "completed",
     bodyMarkdown: "done",
   });
   assert.equal(returned.status, "replied");
+  assert.equal(returned.workflowRecovered, true);
+  assert.equal(returned.actorThreadInferred, false);
+  assert.equal(returned.expectedTargetThreadId, "target-1");
+  assert.equal(returned.resolverVersion, "task-card-exact-routing-v1");
   assert.equal(returned.replyCard.id, "ttc_return");
   assert.equal(returned.replyCard.status, "approved");
   assert.equal(returned.replyCard.targetThreadId, "source-1");
